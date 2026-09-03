@@ -1,0 +1,9 @@
+name: agent-audit
+version: 0.1.0
+description: Project-local, privacy-conscious Agent skill and verification audit log.
+kind: standalone
+provides_hooks:
+  - on_skill_lifecycle
+  - post_tool_call
+  - pre_verify
+  - on_session_end
