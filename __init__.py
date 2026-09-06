@@ -143,6 +143,14 @@ def _validation_kind(tool_name: str, args: Any) -> str:
     return "validation"
 
 
+def _is_direct_gradle_invocation(tool_name: str, args: Any) -> bool:
+    """Identify prohibited shell Gradle use without retaining the command."""
+    if tool_name != "terminal":
+        return False
+    text = _text(args).lower()
+    return "gradle-mcp" not in text and bool(re.search(r"\b(?:gradlew(?:\.bat)?|gradle)\b", text))
+
+
 def _looks_failed(status: Any, result: Any) -> bool:
     if str(status).lower() in {"error", "failed", "failure", "blocked", "cancelled"}:
         return True
@@ -248,6 +256,16 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         paths=paths,
     )
 
+    if _is_direct_gradle_invocation(tool_name, args):
+        _write(
+            "workflow_deviation",
+            category="tool_policy",
+            reason="direct_gradle_invocation",
+            rule_id="GRADLE-MCP-001",
+            session_id=session_id,
+            turn_id=_opaque(kwargs.get("turn_id")),
+        )
+
     if tool_name in _MUTATING_TOOLS:
         _record_mutation(session_id, paths)
         return
@@ -325,6 +343,14 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
                 unresolved_mutation=True,
                 generation=generation,
             )
+            _write(
+                "workflow_deviation",
+                category="verification",
+                reason="unresolved_mutation",
+                rules=[],
+                generation=generation,
+                session_id=session_id,
+            )
             return {
                 "action": "continue",
                 "message": (
@@ -365,6 +391,15 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
         action="continue" if failed_rules or missing_rules or legacy_failed else "allow",
         generation=generation,
     )
+    if failed_rules or legacy_failed or missing_rules:
+        _write(
+            "workflow_deviation",
+            category="verification",
+            reason="failed_validation" if failed_rules or legacy_failed else "missing_validation",
+            rules=[rule_id for rule_id, _ in failed_rules] if failed_rules else missing_rules,
+            generation=generation,
+            session_id=session_id,
+        )
 
     if failed_rules or legacy_failed:
         if failed_rules:

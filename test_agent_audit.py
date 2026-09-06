@@ -66,7 +66,8 @@ def test_rule_fan_out_and_freshness() -> None:
         coding=True, attempt=0, changed_paths=["src/main/java/io/github/example/OrderService.java"], session_id=session
     )
     assert gate and "STYLE-JAVA-001, TEST-JAVA-001" in gate["message"]
-    assert events[-1]["rule_statuses"] == {"STYLE-JAVA-001": "stale", "TEST-JAVA-001": "stale"}
+    assert events[-2]["rule_statuses"] == {"STYLE-JAVA-001": "stale", "TEST-JAVA-001": "stale"}
+    assert events[-1]["reason"] == "missing_validation"
 
     _tool(session, {"commandLine": ":checkstyleMain"}, "BUILD SUCCESSFUL")
     assert events[-1]["event"] == "validation_result"
@@ -119,7 +120,51 @@ def test_java_gate_applies_without_coding_posture() -> None:
     )
 
     assert gate and "STYLE-JAVA-001" in gate["message"]
-    assert events[-1]["event"] == "verification_gate"
+    assert events[-2]["event"] == "verification_gate"
+    assert events[-1]["event"] == "workflow_deviation"
+
+
+def test_missing_validation_records_a_workflow_deviation() -> None:
+    events = _reset()
+    session = "session-missing-validation"
+    _change(session, "src/main/java/io/github/example/OrderService.java")
+
+    _AUDIT._on_pre_verify(
+        coding=True,
+        attempt=0,
+        changed_paths=["src/main/java/io/github/example/OrderService.java"],
+        session_id=session,
+    )
+
+    assert events[-1] == {
+        "event": "workflow_deviation",
+        "category": "verification",
+        "reason": "missing_validation",
+        "rules": ["STYLE-JAVA-001", "TEST-JAVA-001"],
+        "generation": 1,
+        "session_id": session,
+    }
+
+
+def test_direct_gradle_invocation_records_a_policy_deviation() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "./gradlew test"},
+        status="success",
+        session_id="session-direct-gradle",
+        turn_id="turn-direct-gradle",
+    )
+
+    assert events[-1] == {
+        "event": "workflow_deviation",
+        "category": "tool_policy",
+        "reason": "direct_gradle_invocation",
+        "rule_id": "GRADLE-MCP-001",
+        "session_id": "session-direct-gradle",
+        "turn_id": "turn-direct-gradle",
+    }
 
 
 def test_patch_add_and_delete_headers_preserve_paths() -> None:
@@ -143,7 +188,8 @@ def test_unresolved_mutation_cannot_pass_pre_verify() -> None:
     gate = _AUDIT._on_pre_verify(coding=False, attempt=0, changed_paths=[], session_id=session)
 
     assert gate and gate["action"] == "continue"
-    assert events[-1]["unresolved_mutation"] is True
+    assert events[-2]["unresolved_mutation"] is True
+    assert events[-1]["reason"] == "unresolved_mutation"
 
 
 def test_patch_header_preserves_validation_correlation() -> None:
@@ -155,7 +201,8 @@ def test_patch_header_preserves_validation_correlation() -> None:
     failed_gate = _AUDIT._on_pre_verify(
         coding=False, attempt=0, changed_paths=[path], session_id=session
     )
-    assert failed_gate and events[-1]["action"] == "continue"
+    assert failed_gate and events[-2]["action"] == "continue"
+    assert events[-1]["reason"] == "failed_validation"
 
     _patch_change(session, path)
     _tool(session, {"commandLine": ":checkstyleMain"}, "BUILD SUCCESSFUL")
