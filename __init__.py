@@ -1,7 +1,8 @@
 """Project-local, privacy-conscious Hermes audit hooks.
 
 The plugin records compact lifecycle metadata in ``.hermes/events.jsonl``.
-It deliberately does not persist prompts, commands, tool arguments, or results.
+It observes discovery and validation without persisting prompts, commands,
+tool arguments, or results.
 """
 
 from __future__ import annotations
@@ -18,6 +19,11 @@ _LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
 _VALIDATION_STATE: dict[str, dict[str, Any]] = {}
 _MUTATING_TOOLS = {"patch", "write_file", "edit_file", "delete_file"}
+_EXPECTED_DISCOVERY_PROVIDERS = {"semble", "codebase-memory"}
+_DISCOVERY_OPERATIONS = {
+    "semble": {"search", "find_related"},
+    "codebase-memory": {"search_graph", "trace_path"},
+}
 _MAX_FAILURE_SUMMARY = 600
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _JAVA_SOURCE_PREFIXES = ("src/main/java/", "src/test/java/")
@@ -194,7 +200,40 @@ def _validation_state(session_id: str) -> dict[str, Any]:
     state = _VALIDATION_STATE.setdefault(session_id, {"generation": 0, "rules": {}})
     state.setdefault("generation", 0)
     state.setdefault("rules", {})
+    state.setdefault("discovery_providers", set())
     return state
+
+
+def _discovery_call(tool_name: str, args: Any = None) -> tuple[str, str] | None:
+    """Classify semantic discovery without retaining arguments."""
+    normalized = tool_name.lower().replace("-", "_")
+    operation = normalized.rsplit("__", 1)[-1]
+    if "semble" in normalized and operation in _DISCOVERY_OPERATIONS["semble"]:
+        return "semble", operation
+    if "codebase_memory" in normalized and operation in _DISCOVERY_OPERATIONS["codebase-memory"]:
+        return "codebase-memory", operation
+    if normalized == "terminal":
+        command = _text(args).lower().replace("-", "_")
+        semble = re.search(r"\b(search|find_related)\b", command)
+        if "semble" in command and semble:
+            return "semble", semble.group(1)
+        codebase = re.search(r"\b(search_graph|trace_path)\b", command)
+        if codebase:
+            return "codebase-memory", codebase.group(1)
+    return None
+
+
+def _is_success_status(status: Any) -> bool:
+    return str(status).lower() in {"success", "succeeded", "passed", "completed", "ok"}
+
+
+def _is_kanban_create(tool_name: str, args: Any) -> bool:
+    normalized = tool_name.lower().replace("-", "_")
+    if "kanban" in normalized and "create" in normalized:
+        return True
+    if normalized != "terminal":
+        return False
+    return bool(re.search(r"\bkanban\b.*\bcreate\b", _text(args), re.IGNORECASE))
 
 
 def _record_mutation(session_id: str, changed_paths: list[str]) -> list[str]:
@@ -255,6 +294,38 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         turn_id=_opaque(kwargs.get("turn_id")),
         paths=paths,
     )
+
+    discovery = _discovery_call(tool_name, args)
+    if discovery:
+        provider, operation = discovery
+        _write(
+            "discovery_observation",
+            provider=provider,
+            operation=operation,
+            status=_opaque(status),
+            session_id=session_id,
+            task_id=_opaque(kwargs.get("task_id")),
+            turn_id=_opaque(kwargs.get("turn_id")),
+        )
+        if _is_success_status(status) and not _looks_failed(status, kwargs.get("result")):
+            with _STATE_LOCK:
+                _validation_state(session_id)["discovery_providers"].add(provider)
+
+    if _is_kanban_create(tool_name, args) and _is_success_status(status):
+        with _STATE_LOCK:
+            observed = sorted(_validation_state(session_id)["discovery_providers"])
+        missing = _EXPECTED_DISCOVERY_PROVIDERS - set(observed)
+        if missing:
+            _write(
+                "workflow_deviation",
+                category="planning_discovery",
+                reason="kanban_create_without_expected_discovery",
+                expected_providers=sorted(_EXPECTED_DISCOVERY_PROVIDERS),
+                observed_providers=observed,
+                session_id=session_id,
+                task_id=_opaque(kwargs.get("task_id")),
+                turn_id=_opaque(kwargs.get("turn_id")),
+            )
 
     if _is_direct_gradle_invocation(tool_name, args):
         _write(

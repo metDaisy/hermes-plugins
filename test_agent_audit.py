@@ -16,7 +16,9 @@ _SPEC.loader.exec_module(_AUDIT)
 def _reset() -> list[dict]:
     _AUDIT._VALIDATION_STATE.clear()
     events: list[dict] = []
-    _AUDIT._write = lambda event, **fields: events.append({"event": event, **fields})
+    _AUDIT._write = lambda event, **fields: events.append(
+        {"event": event, **{key: value for key, value in fields.items() if value is not None}}
+    )
     return events
 
 
@@ -253,6 +255,128 @@ def test_modularity_result_only_updates_architecture_rules() -> None:
     )
     assert events[-1]["event"] == "validation_result"
     assert events[-1]["rules"] == ["ARCH-LAYER-001", "ARCH-MOD-001"]
+
+
+def test_discovery_tools_record_only_safe_operation_metadata() -> None:
+    events = _reset()
+    session = "session-discovery"
+
+    _AUDIT._on_post_tool_call(
+        tool_name="mcp__semble_mcp__semble__search",
+        args={"query": "sensitive implementation question", "repo": "C:/private/repo"},
+        result={"content": "raw source result"},
+        status="success",
+        session_id=session,
+        turn_id="turn-semble",
+    )
+    _AUDIT._on_post_tool_call(
+        tool_name="mcp__codebase_memory__codebase_memory__search_graph",
+        args={"project": "private-project", "query": "caller relationship"},
+        result={"nodes": ["SensitiveSymbol"]},
+        status="success",
+        session_id=session,
+        turn_id="turn-codebase",
+    )
+
+    discovery = [event for event in events if event["event"] == "discovery_observation"]
+    assert discovery == [
+        {
+            "event": "discovery_observation",
+            "provider": "semble",
+            "operation": "search",
+            "status": "success",
+            "session_id": session,
+            "turn_id": "turn-semble",
+        },
+        {
+            "event": "discovery_observation",
+            "provider": "codebase-memory",
+            "operation": "search_graph",
+            "status": "success",
+            "session_id": session,
+            "turn_id": "turn-codebase",
+        },
+    ]
+    assert "sensitive implementation question" not in str(discovery)
+    assert "SensitiveSymbol" not in str(discovery)
+
+
+def test_kanban_create_without_discovery_records_non_blocking_deviation() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "hermes --profile project-manager kanban --board issue-20 create --title task"},
+        result="created t_aaaaaaaa",
+        status="success",
+        session_id="session-no-discovery",
+        turn_id="turn-create",
+    )
+
+    assert events[-1] == {
+        "event": "workflow_deviation",
+        "category": "planning_discovery",
+        "reason": "kanban_create_without_expected_discovery",
+        "expected_providers": ["codebase-memory", "semble"],
+        "observed_providers": [],
+        "session_id": "session-no-discovery",
+        "turn_id": "turn-create",
+    }
+
+
+def test_kanban_create_after_both_discovery_providers_has_no_deviation() -> None:
+    events = _reset()
+    session = "session-complete-discovery"
+    for tool_name in (
+        "mcp__semble_mcp__semble__search",
+        "mcp__codebase_memory__codebase_memory__trace_path",
+    ):
+        _AUDIT._on_post_tool_call(
+            tool_name=tool_name,
+            args={},
+            result={},
+            status="success",
+            session_id=session,
+            turn_id="turn-discovery",
+        )
+
+    before_create = len([event for event in events if event["event"] == "workflow_deviation"])
+    _AUDIT._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "hermes --profile project-manager kanban --board issue-20 create --title task"},
+        result="created t_aaaaaaaa",
+        status="success",
+        session_id=session,
+        turn_id="turn-create",
+    )
+
+    after_create = len([event for event in events if event["event"] == "workflow_deviation"])
+    assert after_create == before_create
+
+
+def test_terminal_discovery_fallback_records_provider_without_command() -> None:
+    events = _reset()
+    session = "session-terminal-discovery"
+    for command in (
+        'semble search "private query" C:/private/repo',
+        'codebase-memory search_graph --project private-project --query "private relationship"',
+    ):
+        _AUDIT._on_post_tool_call(
+            tool_name="terminal",
+            args={"command": command},
+            result="private raw result",
+            status="success",
+            session_id=session,
+            turn_id="turn-terminal",
+        )
+
+    discovery = [event for event in events if event["event"] == "discovery_observation"]
+    assert [(event["provider"], event["operation"]) for event in discovery] == [
+        ("semble", "search"),
+        ("codebase-memory", "search_graph"),
+    ]
+    assert "private query" not in str(discovery)
+    assert "private relationship" not in str(discovery)
 
 
 if __name__ == "__main__":
