@@ -6,7 +6,7 @@ version: 0.5.0
 plugins:
   - repo: metDaisy/hermes-plugins
     subdir: plugins/agent-audit
-    ref: 4ec3154dd4a68a0e630b987b8826e19e3f4ac645
+    ref: c3eccec1f9be5f99c1f4ce5a445ddade9423078c
 
 config: {}
 skills: []
