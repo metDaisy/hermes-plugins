@@ -26,7 +26,18 @@ _DISCOVERY_OPERATIONS = {
     "codebase-memory": {"search_graph", "trace_path"},
 }
 _MAX_FAILURE_SUMMARY = 600
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _find_project_root() -> Path:
+    """Find the repository root in both project-local and monorepo layouts."""
+    module_path = Path(__file__).resolve()
+    for candidate in module_path.parents:
+        if (candidate / ".git").exists():
+            return candidate
+    return module_path.parents[3]
+
+
+_PROJECT_ROOT = _find_project_root()
 _SAFE_EVENT_FIELDS = {
     "schema_version",
     "timestamp",

@@ -135,7 +135,7 @@ def read_events(
 
 
 def audit_summary(database_path: Path = _DB_PATH) -> dict[str, Any]:
-    """Return privacy-safe aggregate counts for the Audit Explorer summary."""
+    """Return privacy-safe aggregate counts for the agent-audit summary."""
     connection = _read_connection(database_path)
     if connection is None:
         return {"total_events": 0, "profiles": {}, "event_types": {}, "statuses": {}}

@@ -91,7 +91,7 @@ function Page() {
   }), [summary.data])
   return jsx('main', { className: 'mx-auto max-w-7xl p-4 sm:p-6', children: [
     jsxs('header', { className: 'flex flex-wrap items-start justify-between gap-4', children: [
-      jsx('div', { children: [jsx('p', { className: 'text-[11px] font-semibold uppercase tracking-[0.16em] text-(--ui-text-tertiary)', children: 'Privacy-safe workflow evidence' }), jsx('h1', { className: 'mt-1 text-2xl font-semibold tracking-tight text-(--ui-text-primary)', children: 'Audit Explorer' }), jsx('p', { className: 'mt-1 text-sm text-(--ui-text-secondary)', children: 'Profile, validation rule, session별 SQLite audit event를 조회합니다.' })] }),
+      jsx('div', { children: [jsx('p', { className: 'text-[11px] font-semibold uppercase tracking-[0.16em] text-(--ui-text-tertiary)', children: 'Privacy-safe workflow evidence' }), jsx('h1', { className: 'mt-1 text-2xl font-semibold tracking-tight text-(--ui-text-primary)', children: 'agent-audit' }), jsx('p', { className: 'mt-1 text-sm text-(--ui-text-secondary)', children: 'Profile, validation rule, session별 SQLite audit event를 조회합니다.' })] }),
       jsx('button', { type: 'button', className: button, disabled: summary.isFetching || events.isFetching, onClick: refresh, children: summary.isFetching || events.isFetching ? '갱신 중…' : '새로고침' })
     ] }),
     jsxs('dl', { className: 'mt-5 flex flex-wrap gap-2', children: [jsx(Metric, { label: 'Event', value: summary.data?.total_events || 0 }), jsx(Metric, { label: 'Profile', value: metrics.profiles }), jsx(Metric, { label: 'Deviation', value: metrics.deviations }), jsx(Metric, { label: 'Failed', value: metrics.failures })] }),
@@ -102,13 +102,13 @@ function Page() {
 
 export default {
   id: ID,
-  name: 'Agent Audit Explorer',
+  name: 'agent-audit',
   defaultEnabled: true,
   register(ctx) {
     pluginCtx = ctx
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: PAGE_PATH }, render: () => jsx(Page, {}) },
-      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PAGE_PATH, label: 'Audit Explorer', codicon: 'pulse' } }
+      { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: PAGE_PATH, label: 'agent-audit', codicon: 'pulse' } }
     ])
   }
 }
