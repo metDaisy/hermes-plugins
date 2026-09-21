@@ -18,12 +18,49 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.4.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.5.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`
 기능·계약 변경 시 SemVer 규칙에 따라 버전을 올리고
 `python plugins/agent-audit/test_metadata.py`로 metadata 일치를 확인합니다.
+
+## Rule mapping 설정
+
+플러그인은 특정 프로젝트의 module 이름, package prefix 또는 layer를 코드에 내장하지 않습니다. Rule mapping은 Hermes 설정의 `plugins.entries.agent-audit.rule_mapping`에서 읽습니다. 설정이 없으면 path 기반 verification gate를 만들지 않고 lifecycle/audit event만 기록합니다.
+
+```yaml
+plugins:
+  entries:
+    agent-audit:
+      rule_mapping:
+        path_rules:
+          - rule_id: STYLE-JAVA-001
+            prefixes:
+              - src/main/java/
+              - src/test/java/
+          - rule_id: TEST-JAVA-001
+            prefixes:
+              - src/main/java/
+              - src/test/java/
+          - rule_id: ARCH-MOD-001
+            prefixes:
+              - src/main/java/com/example/orders/
+          - rule_id: ARCH-LAYER-001
+            prefixes:
+              - src/main/java/com/example/orders/presentation/
+
+        # 위에서부터 처음 일치하는 validator rule만 적용합니다.
+        validator_rules:
+          - contains: [checkstyle]
+            rule_ids: [STYLE-JAVA-001]
+          - contains: [modularitytest, modularity]
+            rule_ids: [ARCH-MOD-001, ARCH-LAYER-001]
+          - contains: [test, junit, integrationtest]
+            rule_ids: [TEST-JAVA-001]
+```
+
+`path_rules`의 `prefixes`는 project-relative POSIX 경로 prefix이고, `validator_rules`의 `contains`는 validator tool name과 인자를 소문자로 변환한 문자열에 적용됩니다. 절대 경로와 `..`를 포함한 prefix는 무시됩니다. Project별 Rule ID와 경로 계약은 plugin을 사용하는 repository가 소유합니다.
 
 ## 관찰하는 Rule
 

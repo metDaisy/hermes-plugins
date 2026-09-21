@@ -19,6 +19,7 @@ from typing import Any
 _LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
 _VALIDATION_STATE: dict[str, dict[str, Any]] = {}
+_PLUGIN_ID = "agent-audit"
 _MUTATING_TOOLS = {"patch", "write_file", "edit_file", "delete_file"}
 _EXPECTED_DISCOVERY_PROVIDERS = {"semble", "codebase-memory"}
 _DISCOVERY_OPERATIONS = {
@@ -79,11 +80,74 @@ _SAFE_EVENT_FIELDS = {
     "interrupted",
     "turn_exit_reason",
 }
-_JAVA_SOURCE_PREFIXES = ("src/main/java/", "src/test/java/")
-_MAIN_JAVA_PREFIX = "src/main/java/io/github/metdaisy/amaazon/"
-_APPLICATION_MODULES = {"auth", "user", "address", "catalog", "seller", "common", "global"}
-_LAYER_DOMAINS = {"auth", "user", "catalog"}
-_LAYER_SEGMENTS = ("/presentation/", "/application/", "/domain/", "/infra/")
+
+
+def _normalize_rule_mapping(raw: Any) -> dict[str, list[dict[str, list[str]]]]:
+    """Normalize declarative path/validator rules and ignore malformed entries safely."""
+    if not isinstance(raw, dict):
+        return {"path_rules": [], "validator_rules": []}
+
+    path_rules: list[dict[str, list[str]]] = []
+    for entry in raw.get("path_rules", []):
+        if not isinstance(entry, dict):
+            continue
+        rule_id = entry.get("rule_id")
+        prefixes = entry.get("prefixes")
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            continue
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        if not isinstance(prefixes, list):
+            continue
+        normalized_prefixes = []
+        for prefix in prefixes:
+            if not isinstance(prefix, str):
+                continue
+            normalized = prefix.strip().replace("\\", "/")
+            if normalized.startswith("/") or ":" in normalized.split("/", 1)[0]:
+                continue
+            if ".." in normalized.split("/"):
+                continue
+            normalized_prefixes.append(normalized.removeprefix("./"))
+        if normalized_prefixes:
+            path_rules.append({"rule_ids": [rule_id.strip()], "prefixes": normalized_prefixes})
+
+    validator_rules: list[dict[str, list[str]]] = []
+    for entry in raw.get("validator_rules", []):
+        if not isinstance(entry, dict):
+            continue
+        contains = entry.get("contains")
+        rule_ids = entry.get("rule_ids", entry.get("rules"))
+        if isinstance(contains, str):
+            contains = [contains]
+        if isinstance(rule_ids, str):
+            rule_ids = [rule_ids]
+        if not isinstance(contains, list) or not isinstance(rule_ids, list):
+            continue
+        normalized_contains = [value.strip().lower() for value in contains if isinstance(value, str) and value.strip()]
+        normalized_rule_ids = [value.strip() for value in rule_ids if isinstance(value, str) and value.strip()]
+        if normalized_contains and normalized_rule_ids:
+            validator_rules.append({"contains": normalized_contains, "rule_ids": normalized_rule_ids})
+
+    return {"path_rules": path_rules, "validator_rules": validator_rules}
+
+
+def _load_rule_mapping() -> dict[str, list[dict[str, list[str]]]]:
+    """Load project-specific rule mapping from ``plugins.entries.agent-audit``."""
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        raw = cfg_get(
+            load_config_readonly(),
+            "plugins",
+            "entries",
+            _PLUGIN_ID,
+            "rule_mapping",
+            default={},
+        )
+    except Exception:
+        raw = {}
+    return _normalize_rule_mapping(raw)
 
 
 def _project_dir() -> Path:
@@ -287,33 +351,22 @@ def _looks_failed(status: Any, result: Any) -> bool:
 
 
 def _rule_ids_for_paths(paths: list[str]) -> list[str]:
-    """Return stable Rule IDs affected by project-relative changed paths."""
+    """Return configured Rule IDs affected by project-relative changed paths."""
     rule_ids: set[str] = set()
-    for path in paths:
-        normalized = f"/{path.lstrip('/')}"
-        is_main_java = path.startswith("src/main/java/")
-        if path.startswith(_JAVA_SOURCE_PREFIXES):
-            rule_ids.update({"STYLE-JAVA-001", "TEST-JAVA-001"})
-        module = None
-        if path.startswith(_MAIN_JAVA_PREFIX):
-            module = path[len(_MAIN_JAVA_PREFIX) :].split("/", 1)[0]
-        if is_main_java and module in _APPLICATION_MODULES:
-            rule_ids.add("ARCH-MOD-001")
-        if module in _LAYER_DOMAINS and any(segment in normalized for segment in _LAYER_SEGMENTS):
-            rule_ids.add("ARCH-LAYER-001")
+    for rule in _load_rule_mapping()["path_rules"]:
+        if any(path.startswith(prefix) for path in paths for prefix in rule["prefixes"]):
+            rule_ids.update(rule["rule_ids"])
     return sorted(rule_ids)
 
 
 def _rule_ids_for_validation(tool_name: str, args: Any) -> list[str]:
-    """Map an observed validator invocation to applicable Rule IDs."""
+    """Map an observed validator invocation to configured Rule IDs."""
     text = f"{tool_name} {_text(args)}".lower()
     rule_ids: set[str] = set()
-    if "checkstyle" in text:
-        rule_ids.add("STYLE-JAVA-001")
-    if "modularitytest" in text or "modularity" in text:
-        rule_ids.update({"ARCH-MOD-001", "ARCH-LAYER-001"})
-    elif re.search(r"\b(test|junit|integrationtest)\b", text):
-        rule_ids.add("TEST-JAVA-001")
+    for rule in _load_rule_mapping()["validator_rules"]:
+        if any(fragment in text for fragment in rule["contains"]):
+            rule_ids.update(rule["rule_ids"])
+            break
     return sorted(rule_ids)
 
 
