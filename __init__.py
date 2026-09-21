@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,47 @@ _DISCOVERY_OPERATIONS = {
 }
 _MAX_FAILURE_SUMMARY = 600
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_SAFE_EVENT_FIELDS = {
+    "schema_version",
+    "timestamp",
+    "event",
+    "profile_name",
+    "session_id",
+    "task_id",
+    "turn_id",
+    "action",
+    "skill",
+    "provenance",
+    "use_count",
+    "reused",
+    "tool",
+    "status",
+    "duration_ms",
+    "paths",
+    "provider",
+    "operation",
+    "category",
+    "reason",
+    "rule_id",
+    "expected_providers",
+    "observed_providers",
+    "trigger",
+    "required_rules",
+    "changed_paths",
+    "generation",
+    "validator",
+    "rules",
+    "attempt",
+    "validation_status",
+    "rule_statuses",
+    "missing_rules",
+    "failed_rules",
+    "unresolved_mutation",
+    "completed",
+    "failed",
+    "interrupted",
+    "turn_exit_reason",
+}
 _JAVA_SOURCE_PREFIXES = ("src/main/java/", "src/test/java/")
 _MAIN_JAVA_PREFIX = "src/main/java/io/github/metdaisy/amaazon/"
 _APPLICATION_MODULES = {"auth", "user", "address", "catalog", "seller", "common", "global"}
@@ -38,8 +80,8 @@ def _project_dir() -> Path:
     return _PROJECT_ROOT
 
 
-def _log_path() -> Path:
-    return _project_dir() / ".hermes" / "events.jsonl"
+def _db_path() -> Path:
+    return _project_dir() / ".hermes" / "audit.db"
 
 
 def _safe_path(value: Any) -> str | None:
@@ -84,23 +126,92 @@ def _opaque(value: Any) -> str | None:
     return text[:96] if text else None
 
 
+def _current_profile_name() -> str | None:
+    """Resolve the profile at hook time so multiplexed turns are attributed correctly."""
+    try:
+        from hermes_constants import get_hermes_home, profile_name_for_home
+
+        return _opaque(profile_name_for_home(get_hermes_home()) or "default")
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _profile_name(kwargs: dict[str, Any]) -> str | None:
+    """Prefer hook context, then resolve the currently scoped runtime profile."""
+    return _opaque(kwargs.get("profile_name") or kwargs.get("profile")) or _current_profile_name()
+
+
+def _initialize_database(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            profile_name TEXT,
+            session_id TEXT,
+            task_id TEXT,
+            turn_id TEXT,
+            event_type TEXT NOT NULL,
+            status TEXT,
+            generation INTEGER,
+            rule_id TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS audit_events_profile_timestamp_idx
+            ON audit_events(profile_name, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS audit_events_session_timestamp_idx
+            ON audit_events(session_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS audit_events_type_timestamp_idx
+            ON audit_events(event_type, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS audit_events_status_timestamp_idx
+            ON audit_events(status, timestamp DESC);
+        """
+    )
+
+
 def _write(event: str, **fields: Any) -> None:
-    """Append one compact event; audit failure must never break the Agent."""
+    """Persist one privacy-safe event; audit failure must never break the Agent."""
     payload = {
         "schema_version": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": event,
-        **{key: value for key, value in fields.items() if value is not None},
+        **{key: value for key, value in fields.items() if value is not None and key in _SAFE_EVENT_FIELDS},
     }
+    connection: sqlite3.Connection | None = None
     try:
-        path = _log_path()
+        path = _db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        with _LOCK, path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-            stream.write("\n")
-    except (OSError, TypeError, ValueError):
-        # Observability is fail-open. A broken local log must not break coding.
+        with _LOCK:
+            connection = sqlite3.connect(path, timeout=1)
+            connection.execute("PRAGMA busy_timeout = 1000")
+            _initialize_database(connection)
+            connection.execute(
+                """
+                INSERT INTO audit_events (
+                    timestamp, profile_name, session_id, task_id, turn_id,
+                    event_type, status, generation, rule_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["timestamp"],
+                    payload.get("profile_name"),
+                    payload.get("session_id"),
+                    payload.get("task_id"),
+                    payload.get("turn_id"),
+                    event,
+                    payload.get("status"),
+                    payload.get("generation"),
+                    payload.get("rule_id"),
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+            connection.commit()
+    except (OSError, TypeError, ValueError, sqlite3.Error):
+        # Observability is fail-open. A broken local store must not break coding.
         return
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _text(value: Any) -> str:
@@ -236,7 +347,9 @@ def _is_kanban_create(tool_name: str, args: Any) -> bool:
     return bool(re.search(r"\bkanban\b.*\bcreate\b", _text(args), re.IGNORECASE))
 
 
-def _record_mutation(session_id: str, changed_paths: list[str]) -> list[str]:
+def _record_mutation(
+    session_id: str, changed_paths: list[str], profile_name: str | None
+) -> list[str]:
     affected_rules = _rule_ids_for_paths(changed_paths)
     with _STATE_LOCK:
         state = _validation_state(session_id)
@@ -260,6 +373,7 @@ def _record_mutation(session_id: str, changed_paths: list[str]) -> list[str]:
         changed_paths=changed_paths,
         generation=generation,
         session_id=session_id,
+        profile_name=profile_name,
     )
     return affected_rules
 
@@ -274,6 +388,7 @@ def _on_skill_lifecycle(**kwargs: Any) -> None:
         reused=kwargs.get("reused"),
         session_id=_opaque(kwargs.get("session_id")),
         task_id=_opaque(kwargs.get("task_id")),
+        profile_name=_profile_name(kwargs),
     )
 
 
@@ -283,6 +398,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
     args = kwargs.get("args")
     status = kwargs.get("status")
     paths = _paths_from_args(args)
+    profile_name = _profile_name(kwargs)
 
     _write(
         "tool_call",
@@ -293,6 +409,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         task_id=_opaque(kwargs.get("task_id")),
         turn_id=_opaque(kwargs.get("turn_id")),
         paths=paths,
+        profile_name=profile_name,
     )
 
     discovery = _discovery_call(tool_name, args)
@@ -306,6 +423,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
             session_id=session_id,
             task_id=_opaque(kwargs.get("task_id")),
             turn_id=_opaque(kwargs.get("turn_id")),
+            profile_name=profile_name,
         )
         if _is_success_status(status) and not _looks_failed(status, kwargs.get("result")):
             with _STATE_LOCK:
@@ -325,6 +443,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
                 session_id=session_id,
                 task_id=_opaque(kwargs.get("task_id")),
                 turn_id=_opaque(kwargs.get("turn_id")),
+                profile_name=profile_name,
             )
 
     if _is_direct_gradle_invocation(tool_name, args):
@@ -335,10 +454,11 @@ def _on_post_tool_call(**kwargs: Any) -> None:
             rule_id="GRADLE-MCP-001",
             session_id=session_id,
             turn_id=_opaque(kwargs.get("turn_id")),
+            profile_name=profile_name,
         )
 
     if tool_name in _MUTATING_TOOLS:
-        _record_mutation(session_id, paths)
+        _record_mutation(session_id, paths, profile_name)
         return
 
     if "gradle-mcp" not in tool_name and "gradle_mcp" not in tool_name:
@@ -378,6 +498,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         generation=generation,
         session_id=session_id,
         turn_id=_opaque(kwargs.get("turn_id")),
+        profile_name=profile_name,
     )
 
 
@@ -387,6 +508,7 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
 
     changed_paths = _safe_paths(kwargs.get("changed_paths"))
     session_id = _opaque(kwargs.get("session_id")) or "unknown"
+    profile_name = _profile_name(kwargs)
     with _STATE_LOCK:
         state = _VALIDATION_STATE.get(session_id, {})
         required_rules = _rule_ids_for_paths(changed_paths)
@@ -413,6 +535,7 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
                 action="continue",
                 unresolved_mutation=True,
                 generation=generation,
+                profile_name=profile_name,
             )
             _write(
                 "workflow_deviation",
@@ -421,6 +544,7 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
                 rules=[],
                 generation=generation,
                 session_id=session_id,
+                profile_name=profile_name,
             )
             return {
                 "action": "continue",
@@ -461,6 +585,7 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
         failed_rules=[rule_id for rule_id, _ in failed_rules],
         action="continue" if failed_rules or missing_rules or legacy_failed else "allow",
         generation=generation,
+        profile_name=profile_name,
     )
     if failed_rules or legacy_failed or missing_rules:
         _write(
@@ -470,6 +595,7 @@ def _on_pre_verify(**kwargs: Any) -> dict[str, str] | None:
             rules=[rule_id for rule_id, _ in failed_rules] if failed_rules else missing_rules,
             generation=generation,
             session_id=session_id,
+            profile_name=profile_name,
         )
 
     if failed_rules or legacy_failed:
@@ -511,6 +637,7 @@ def _on_session_end(**kwargs: Any) -> None:
         failed=kwargs.get("failed"),
         interrupted=kwargs.get("interrupted"),
         turn_exit_reason=_opaque(kwargs.get("turn_exit_reason")),
+        profile_name=_profile_name(kwargs),
     )
     if session_id:
         with _STATE_LOCK:

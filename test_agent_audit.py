@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 _PLUGIN = Path(__file__).with_name("__init__.py")
@@ -15,6 +17,7 @@ _SPEC.loader.exec_module(_AUDIT)
 
 def _reset() -> list[dict]:
     _AUDIT._VALIDATION_STATE.clear()
+    _AUDIT._current_profile_name = lambda: None
     events: list[dict] = []
     _AUDIT._write = lambda event, **fields: events.append(
         {"event": event, **{key: value for key, value in fields.items() if value is not None}}
@@ -167,6 +170,70 @@ def test_direct_gradle_invocation_records_a_policy_deviation() -> None:
         "session_id": "session-direct-gradle",
         "turn_id": "turn-direct-gradle",
     }
+
+
+def test_tool_call_records_profile_name_without_other_runtime_context() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="read_file",
+        args={"path": "docs/index.md"},
+        status="success",
+        session_id="session-profile",
+        profile_name="project-manager",
+    )
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    assert tool_call["profile_name"] == "project-manager"
+    assert "args" not in tool_call
+
+
+def test_tool_call_derives_profile_name_when_hook_context_omits_it() -> None:
+    events = _reset()
+    original = _AUDIT._current_profile_name
+    try:
+        _AUDIT._current_profile_name = lambda: "coder"
+        _AUDIT._on_post_tool_call(
+            tool_name="read_file",
+            args={"path": "docs/index.md"},
+            status="success",
+            session_id="session-derived-profile",
+        )
+        tool_call = next(event for event in events if event["event"] == "tool_call")
+    finally:
+        _AUDIT._current_profile_name = original
+
+    assert tool_call["profile_name"] == "coder"
+
+
+def test_write_persists_privacy_safe_profile_event_in_sqlite() -> None:
+    with TemporaryDirectory() as directory:
+        database_path = Path(directory) / "audit.db"
+        spec = importlib.util.spec_from_file_location("agent_audit_sqlite", _PLUGIN)
+        assert spec and spec.loader
+        audit = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        audit._db_path = lambda: database_path
+
+        audit._write(
+            "tool_call",
+            profile_name="project-manager",
+            session_id="session-audit-db",
+            status="success",
+            tool="read_file",
+            unsafe_prompt="must not be stored",
+        )
+
+        connection = sqlite3.connect(database_path)
+        try:
+            row = connection.execute(
+                "SELECT profile_name, event_type, status, payload_json FROM audit_events"
+            ).fetchone()
+        finally:
+            connection.close()
+
+    assert row[:3] == ("project-manager", "tool_call", "success")
+    assert "unsafe_prompt" not in row[3]
 
 
 def test_patch_add_and_delete_headers_preserve_paths() -> None:

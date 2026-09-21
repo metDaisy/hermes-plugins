@@ -1,0 +1,13 @@
+{
+  "name": "agent-audit",
+  "label": "Agent Audit",
+  "description": "Read-only privacy-safe agent audit explorer",
+  "icon": "ShieldCheck",
+  "version": "0.3.0",
+  "tab": {
+    "path": "/agent-audit",
+    "position": "after:skills"
+  },
+  "slots": [],
+  "api": "plugin_api.py"
+}

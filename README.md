@@ -1,11 +1,13 @@
 # agent-audit
 
-Project-local Hermes hook plugin that records privacy-safe lifecycle and validation metadata in `.hermes/events.jsonl`. It observes workflow evidence and gives verification nudges; it does not replace Checkstyle, JUnit, ArchUnit, Spring Modulith verification or CI.
+Project-local Hermes hook plugin that records privacy-safe lifecycle and validation metadata in `.hermes/audit.db` (SQLite). It observes workflow evidence and gives verification nudges; it does not replace Checkstyle, JUnit, ArchUnit, Spring Modulith verification or CI.
 
 ## Ownership
 
 - `plugin.yaml`: plugin identity and hook registration
-- `__init__.py`: event schema, rule mapping, redaction, freshness tracking and hooks
+- `__init__.py`: SQLite event schema, rule mapping, redaction, freshness tracking and hooks
+- `dashboard/plugin_api.py`: read-only SQLite query API for Desktop UI
+- `desktop/plugin.js`: Audit Explorer page and profile-aware timeline
 - `test_agent_audit.py`: executable behavior contract
 - `.hermes/README.md`: project-level activation and capability setup
 
@@ -25,9 +27,9 @@ A mutation increments the session generation and makes affected evidence stale. 
 
 ## Privacy and failure behavior
 
-The log may contain event type, tool or Skill name, status, duration, opaque correlation IDs, project-relative paths, rule IDs, generation and a bounded sanitized failure summary.
+The SQLite store may contain event type, profile name, tool or Skill name, status, duration, opaque correlation IDs, project-relative paths, rule IDs, generation and a bounded sanitized failure summary.
 
-It does not persist prompts, reasoning, conversation history, raw commands, raw tool arguments/results, credentials or absolute paths. Credential-like text is redacted before a failure summary is retained.
+It does not persist prompts, reasoning, conversation history, raw commands, raw tool arguments/results, credentials or absolute paths. Credential-like text is redacted before a failure summary is retained. The Desktop UI queries only this allowlisted data; it never reads or displays raw Hermes logs.
 
 Logging is fail-open: filesystem or serialization failure does not stop coding. Verification failure still belongs to the underlying validator and project workflow.
 
