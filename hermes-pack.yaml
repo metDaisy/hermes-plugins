@@ -1,0 +1,13 @@
+name: metdaisy-hermes-plugins
+description: metDaisy Hermes plugin monorepo
+
+author: metDaisy
+version: 0.1.0
+
+plugins:
+  - repo: metDaisy/hermes-plugins
+    subdir: plugins/agent-audit
+    ref: 29a2298f6c491fc9502ea0d68c79d742fdaa41d3
+
+config: {}
+skills: []
