@@ -18,8 +18,8 @@ _ORIGINAL_LOAD_RULE_MAPPING = _AUDIT._load_rule_mapping
 
 def _configured_rule_mapping() -> dict:
     layer_prefixes = [
-        f"src/main/java/io/github/metdaisy/amaazon/{domain}/{layer}/"
-        for domain in ("auth", "user", "catalog")
+        f"src/main/java/com/example/{domain}/{layer}/"
+        for domain in ("orders", "catalog", "billing")
         for layer in ("presentation", "application", "domain", "infra")
     ]
     return {
@@ -29,8 +29,8 @@ def _configured_rule_mapping() -> dict:
             {
                 "rule_id": "ARCH-MOD-001",
                 "prefixes": [
-                    f"src/main/java/io/github/metdaisy/amaazon/{module}/"
-                    for module in ("auth", "user", "address", "catalog", "seller", "common", "global")
+                    f"src/main/java/com/example/{module}/"
+                    for module in ("orders", "users", "address", "catalog", "shared", "common")
                 ],
             },
             {"rule_id": "ARCH-LAYER-001", "prefixes": layer_prefixes},
@@ -345,7 +345,7 @@ def test_patch_header_preserves_validation_correlation() -> None:
 def test_structural_paths_map_to_architecture_rules() -> None:
     _reset()
     assert _AUDIT._rule_ids_for_paths(
-        ["src/main/java/io/github/metdaisy/amaazon/auth/package-info.java"]
+        ["src/main/java/com/example/orders/package-info.java"]
     ) == [
         "ARCH-MOD-001",
         "STYLE-JAVA-001",
@@ -356,29 +356,29 @@ def test_structural_paths_map_to_architecture_rules() -> None:
 def test_architecture_scope_matches_current_modularity_tests() -> None:
     _reset()
     assert "ARCH-MOD-001" in _AUDIT._rule_ids_for_paths(
-        ["src/main/java/io/github/metdaisy/amaazon/seller/domain/entity/Seller.java"]
+        ["src/main/java/com/example/users/domain/entity/User.java"]
     )
     assert "ARCH-LAYER-001" not in _AUDIT._rule_ids_for_paths(
-        ["src/main/java/io/github/metdaisy/amaazon/seller/domain/entity/Seller.java"]
+        ["src/main/java/com/example/users/domain/entity/User.java"]
     )
     assert "ARCH-MOD-001" in _AUDIT._rule_ids_for_paths(
-        ["src/main/java/io/github/metdaisy/amaazon/global/security/config/SecurityConfig.java"]
+        ["src/main/java/com/example/common/security/config/SecurityConfig.java"]
     )
     assert "ARCH-LAYER-001" not in _AUDIT._rule_ids_for_paths(
-        ["src/main/java/io/github/metdaisy/amaazon/global/security/config/SecurityConfig.java"]
+        ["src/main/java/com/example/common/security/config/SecurityConfig.java"]
     )
     assert "ARCH-LAYER-001" in _AUDIT._rule_ids_for_paths(
-        ["src/main/java/io/github/metdaisy/amaazon/auth/presentation/AuthController.java"]
+        ["src/main/java/com/example/orders/presentation/OrderController.java"]
     )
 
 
 def test_modularity_result_only_updates_architecture_rules() -> None:
     events = _reset()
     session = "session-architecture"
-    _change(session, "src/main/java/io/github/metdaisy/amaazon/auth/presentation/AuthController.java")
+    _change(session, "src/main/java/com/example/orders/presentation/OrderController.java")
     _tool(
         session,
-        {"commandLine": ":test --tests io.github.metdaisy.amaazon.ModularityTest"},
+        {"commandLine": ":test --tests com.example.ModularityTest"},
         "BUILD SUCCESSFUL",
     )
     assert events[-1]["event"] == "validation_result"
