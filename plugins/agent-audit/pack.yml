@@ -1,8 +1,7 @@
-name: metdaisy-hermes-plugins
-description: metDaisy Hermes plugin monorepo
-
+name: agent-audit-pack
+description: Install the agent-audit plugin from the metDaisy Hermes plugin monorepo.
 author: metDaisy
-version: 0.1.0
+version: 0.4.0
 
 plugins:
   - repo: metDaisy/hermes-plugins
