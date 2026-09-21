@@ -7,6 +7,7 @@ metDaisy가 관리하는 Hermes Agent plugin monorepo입니다.
 | Plugin | Version | Description |
 |---|---:|---|
 | [`agent-audit`](plugins/agent-audit/README.md) | `0.4.0` | Privacy-safe lifecycle, validation evidence, SQLite audit storage, dashboard API, Desktop UI |
+| [`llamacpp-manager`](plugins/llamacpp-manager/README.md) | `0.1.4` | llama.cpp runtime, HF GGUF model registration, parameter settings, server lifecycle, custom endpoint, and server logs |
 
 각 plugin은 독립적인 `plugin.yaml`을 가지며 `plugins/<plugin-name>/`을 plugin root로 사용합니다.
 
