@@ -1,0 +1,6 @@
+{
+  "name": "llamacpp-manager",
+  "label": "llama.cpp Manager",
+  "description": "Standalone llama.cpp runtime, HF GGUF downloader, model settings, and local server manager.",
+  "api": "plugin_api.py"
+}
