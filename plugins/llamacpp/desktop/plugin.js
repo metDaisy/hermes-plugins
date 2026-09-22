@@ -90,93 +90,30 @@ function ServerLogPanel({ status, jobs }) {
 }
 
 function RuntimeCard({ status, jobs, onRefresh }) {
-  const installed = Boolean(status?.runtime_installed)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  const [runtimeKind, setRuntimeKind] = useState('llamacpp')
-  const [runtimePath, setRuntimePath] = useState('')
-  const [runtimeSaving, setRuntimeSaving] = useState(false)
-  const runtimeJob = (jobs || []).find(job => job.kind === 'runtime-install' && job.status === 'running') || (jobs || []).find(job => job.kind === 'runtime-install' && (job.status === 'error' || job.status === 'done'))
+  const [requestedKind, setRequestedKind] = useState(status?.runtime_kind || 'official')
+  const runtimeJob = (jobs || []).find(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && job.status === 'running') || (jobs || []).find(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && ['error', 'done'].includes(job.status))
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
+  const activeKind = status?.runtime_kind || 'official'
+  const available = status?.runtime_options?.[requestedKind] || {}
   const runtimeBusy = busy || runtimeJob?.status === 'running'
   const serverBusy = serverJob?.status === 'running'
-  const externalRuntime = runtimeKind !== 'llamacpp'
-  useEffect(() => {
-    if (!status) return
-    setRuntimeKind(status.runtime_kind || (status.runtime_mode === 'custom' ? 'prism_ml' : 'llamacpp'))
-    setRuntimePath(status.runtime_path || '')
-  }, [status?.runtime_mode, status?.runtime_path])
-  useEffect(() => {
-    if (runtimeJob?.status === 'done') setMessage('runtime 업데이트가 완료되었습니다.')
-    if (runtimeJob?.status === 'error') setMessage('runtime 설치 실패: 아래 오류를 확인하세요.')
-  }, [runtimeJob?.job_id, runtimeJob?.status])
-  useEffect(() => {
-    if (serverJob?.status === 'done' || serverJob?.status === 'error') onRefresh()
-  }, [serverJob?.job_id, serverJob?.status])
-  useEffect(() => {
-    if (serverJob?.status === 'done') setMessage('llama-server가 실행되었습니다.')
-    if (serverJob?.status === 'error') setMessage(`llama-server 실행 실패: ${serverJob.error || '원인을 확인할 수 없습니다.'}`)
-  }, [serverJob?.job_id, serverJob?.status, serverJob?.error])
-  const serverAction = async action => {
-    setBusy(true)
-    setMessage('')
-    try { await api('/server', { method: 'POST', body: { action } }); setMessage(action === 'start' ? 'server 시작 요청을 보냈습니다.' : 'server 중지 요청을 보냈습니다.'); onRefresh() } catch (cause) { setMessage(`실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
-  }
-  const install = async () => {
-    
-    setBusy(true)
-    setMessage('')
-    try {
-      const result = await api('/runtime/install', { method: 'POST', body: { kind: runtimeKind, backend: null } })
-      setMessage(result?.job_id ? 'runtime 설치 작업을 시작했습니다. 아래 진행률을 확인하세요.' : 'runtime 상태를 확인했습니다.')
-      onRefresh()
-    } catch (cause) { setMessage(`runtime 설치 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
-  }
-  const saveRuntime = async () => {
-    setRuntimeSaving(true)
-    setMessage('')
-    try {
-      const result = await api('/runtime', { method: 'PUT', body: { kind: runtimeKind, path: runtimePath } })
-      setRuntimeKind(result.kind || runtimeKind)
-      setRuntimePath(result.path || '')
-      setMessage(result.requires_restart ? 'runtime 선택을 저장했습니다. 실행 중인 server는 유지되며 다음 start부터 적용됩니다.' : 'runtime 선택을 저장했습니다.')
-      onRefresh()
-    } catch (cause) { setMessage(`runtime 선택 실패: ${cause?.message || String(cause)}`) } finally { setRuntimeSaving(false) }
-  }
+  useEffect(() => { setRequestedKind(status?.runtime_kind || 'official') }, [status?.runtime_kind])
+  useEffect(() => { if (runtimeJob?.status === 'done') { setMessage('runtime 준비가 완료되었습니다.'); onRefresh() } }, [runtimeJob?.job_id, runtimeJob?.status])
+  const install = async () => { setBusy(true); setMessage(''); try { await api('/runtime/install', { method: 'POST', body: { kind: requestedKind } }); setMessage('runtime 준비 작업을 시작했습니다.') } catch (cause) { setMessage(`runtime 준비 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
+  const useRuntime = async () => { setBusy(true); setMessage(''); try { await api('/runtime', { method: 'PUT', body: { kind: requestedKind } }); await onRefresh(); setMessage('선택한 runtime으로 전환했습니다.') } catch (cause) { setMessage(`runtime 전환 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
+  const openFolder = async () => { try { await api('/runtime/open', { method: 'POST', body: { kind: requestedKind } }) } catch (cause) { setMessage(`폴더 열기 실패: ${cause?.message || String(cause)}`) } }
+  const serverAction = async action => { setBusy(true); try { await api('/server', { method: 'POST', body: { action } }); await onRefresh() } catch (cause) { setMessage(`server 작업 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
   const activeModel = status?.models?.find(model => model.id === status?.active_model_id)
-  const device = status?.devices?.[0]
-  const backend = status?.backend || status?.runtime_backend || '확인 중'
-  return jsxs('section', { className: `${card} relative overflow-hidden p-5 sm:p-6`, 'aria-labelledby': 'llamacpp-title', children: [
-    jsx('div', { className: 'pointer-events-none absolute -right-16 -top-20 h-56 w-56 rounded-full bg-(--ui-accent)/10 blur-3xl' }),
-    jsxs('div', { className: 'relative flex flex-wrap items-start justify-between gap-5', children: [
-      jsx('div', { className: 'min-w-0', children: [jsx('div', { className: 'mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-(--ui-text-tertiary)', children: 'Local inference control plane' }), jsx('h1', { id: 'llamacpp-title', className: 'text-2xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-2 max-w-xl ${muted}`, children: '독립 plugin API로 모델 검색, GGUF 다운로드, runtime과 llama-server 상태를 관리합니다.' })] }),
-      jsx('div', { className: 'pt-1 font-mono text-sm text-(--ui-text-tertiary)', children: `version: ${status?.tag || 'unknown'}` })
-    ] }),
-    jsxs('div', { className: 'relative mt-5 flex flex-wrap items-center gap-2', children: [jsx(Badge, { tone: status?.server_running ? 'good' : 'warn', children: status?.server_running ? 'running' : 'stopped' }), jsx(Badge, { children: `${status?.models?.length || 0} registered` }), jsx('button', { className: primary, disabled: runtimeBusy || serverBusy, onClick: install, title: externalRuntime ? 'Prism-ML GitHub runtime을 내려받아 선택합니다.' : undefined, children: externalRuntime ? 'Prism-ML GitHub 다운로드' : installed ? 'runtime 설치/업데이트' : 'runtime 설치' }), status?.server_running ? jsx('button', { className: button, disabled: runtimeBusy || serverBusy, onClick: () => serverAction('stop'), 'aria-label': 'llama-server 중지', children: 'stop' }) : jsx('button', { className: button, disabled: runtimeBusy || serverBusy || !installed || !status?.active_model_id, title: status?.active_model_id ? '선택된 모델로 server 시작' : '먼저 등록 모델에서 선택을 눌러 모델을 지정하세요', onClick: () => serverAction('start'), 'aria-label': status?.active_model_id ? 'llama-server 시작' : '모델을 선택한 뒤 llama-server 시작', children: serverBusy ? 'starting…' : status?.active_model_id ? 'start' : '모델 선택 후 시작' }), jsx('button', { className: button, disabled: runtimeBusy || serverBusy, onClick: onRefresh, 'aria-label': 'llama.cpp 상태 새로고침', children: '↻ 새로고침' })] }),
-    jsxs('dl', { className: 'relative mt-4 grid grid-cols-2 gap-x-5 gap-y-3 rounded-md bg-(--ui-bg-tertiary) px-3 py-3 text-xs sm:grid-cols-5', children: [
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'backend' }), jsx('dd', { className: 'mt-0.5 font-mono text-(--ui-text-secondary)', children: backend })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'device' }), jsx('dd', { className: 'mt-0.5 min-w-0 truncate text-(--ui-text-secondary)', title: device?.name || undefined, children: device?.name || '감지되지 않음' })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'vram' }), jsx('dd', { className: 'mt-0.5 font-mono text-(--ui-text-secondary)', title: device?.memory || undefined, children: formatVram(device) })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'active model' }), jsx('dd', { className: 'mt-0.5 min-w-0 truncate text-(--ui-text-secondary)', title: activeModel?.id, children: activeModel?.id || '선택되지 않음' })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'endpoint' }), jsx('dd', { className: 'mt-0.5 truncate text-(--ui-text-secondary)', title: status?.custom_endpoint?.base_url || status?.server_base_url || undefined, children: status?.custom_endpoint?.base_url ? `${status.custom_endpoint.base_url} · custom 등록` : (status?.server_base_url || 'server 중지') })] })
-    ] }),
-    jsxs('div', { className: 'relative mt-4 rounded-md border border-(--ui-stroke-secondary) p-3', children: [
-      jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'llama.cpp runtime 선택' }),
-      jsx('p', { className: `mt-1 text-xs ${muted}`, children: 'official backend 또는 Prism-ML backend를 선택합니다. Prism-ML은 GitHub에서 Bonsai-demo와 호환 llama-server를 내려받거나 기존 경로를 지정할 수 있습니다.' }),
-      jsxs('div', { className: 'mt-3 grid gap-2 md:grid-cols-[10rem_minmax(0,1fr)_auto]', children: [
-        jsx('select', { className: input, style: themedSelect(), value: runtimeKind, disabled: runtimeSaving || serverBusy, 'aria-label': 'llama.cpp runtime 종류', onChange: event => setRuntimeKind(event.target.value), children: [jsx('option', { style: themedOption, value: 'official', children: 'llama.cpp official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML llama.cpp' })] }),
-        jsx('input', { className: input, value: runtimePath, disabled: runtimeKind === 'llamacpp' || runtimeSaving || serverBusy, 'aria-label': '외부 llama.cpp 경로', placeholder: '예: E:\\Bonsai-demo 또는 llama-server.exe', onChange: event => setRuntimePath(event.target.value) }),
-        jsx('button', { className: button, disabled: runtimeSaving || serverBusy || (runtimeKind !== 'llamacpp' && !runtimePath.trim()), onClick: saveRuntime, children: runtimeSaving ? '저장 중…' : 'runtime 저장' })
-      ] }),
-      status?.runtime_kind === 'prism_ml' && !status?.runtime_installed ? jsx('p', { className: 'mt-2 text-xs text-(--dt-destructive)', role: 'alert', children: '선택한 Prism-ML runtime에서 llama-server를 찾지 못했습니다.' }) : null
-    ] }),
-    message ? jsx('p', { className: `relative mt-3 text-xs ${message.startsWith('실패') || message.startsWith('runtime 선택 실패') || message.startsWith('runtime 설치 실패') || message.startsWith('llama-server 실행 실패') || message.startsWith('preset 저장 실패') || message.startsWith('preset 적용 실패') || message.startsWith('preset 삭제 실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
-    jsx(JobProgress, { job: runtimeJob }),
-    jsx(JobProgress, { job: serverJob }),
-    jsx(ServerLogPanel, { status, jobs })
+  return jsxs('section', { className: `${card} p-4 sm:p-5`, children: [
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsx('div', { className: 'text-right', children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: activeKind === 'prism_ml' ? 'Prism-ML runtime' : 'official runtime' }), jsx('p', { className: 'font-mono text-sm text-(--ui-text-primary)', children: status?.runtime_version || '미설치' })] })] }),
+    jsxs('div', { className: 'mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]', children: [jsx('select', { className: input, style: themedSelect(), value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: event => setRequestedKind(event.target.value), children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), jsxs('div', { className: 'flex flex-wrap gap-2', children: [jsx('button', { className: button, disabled: runtimeBusy, onClick: openFolder, children: '열기' }), requestedKind === activeKind ? null : jsx('button', { className: primary, disabled: runtimeBusy || serverBusy || !available.installed, onClick: useRuntime, children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: primary, disabled: runtimeBusy || serverBusy, onClick: install, children: requestedKind === 'prism_ml' ? (available.version ? 'Prism-ML 업데이트' : 'Prism-ML 다운로드') : 'official 업데이트' })] })] }),
+    jsxs('div', { className: 'mt-4 grid gap-3 border-t border-(--ui-stroke-secondary) pt-4 sm:grid-cols-3', children: [jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: '현재 backend' }), jsx('p', { className: 'mt-1 font-mono text-sm', children: status?.runtime_label || '확인 중' })] }), jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: '활성 모델' }), jsx('p', { className: 'mt-1 truncate font-mono text-sm', title: activeModel?.id, children: activeModel?.id || '선택되지 않음' })] }), jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'server' }), jsxs('div', { className: 'mt-1 flex items-center gap-2', children: [jsx(Badge, { tone: status?.server_running ? 'good' : 'warn', children: status?.server_running ? 'running' : 'stopped' }), status?.server_running ? jsx('button', { className: compactDanger, disabled: runtimeBusy, onClick: () => serverAction('stop'), children: '중지' }) : jsx('button', { className: compactPrimary, disabled: runtimeBusy || !status?.runtime_installed || !status?.active_model_id, onClick: () => serverAction('start'), children: '시작' })] })] })] }),
+    message ? jsx('p', { className: `mt-3 text-xs ${message.includes('실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
+    jsx(JobProgress, { job: runtimeJob }), jsx(JobProgress, { job: serverJob }), jsx(ServerLogPanel, { status, jobs })
   ] })
 }
-
 function ParameterSummary({ options, order }) {
   const keys = order?.length ? order.filter(key => Object.prototype.hasOwnProperty.call(options || {}, key)) : Object.keys(options || {})
   const entries = keys.map(key => [key, options[key]])
@@ -212,9 +149,8 @@ function ModelRow({ model, status, refresh }) {
         ] }),
         jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order })
       ] }),
-      jsxs('div', { className: 'flex flex-wrap items-center gap-2 md:justify-end', children: [isActive ? jsx('button', { className: button, disabled: true, 'aria-label': `${display} 선택됨`, children: '선택됨' }) : jsx('button', { className: primary, disabled: busy || status?.server_running, onClick: activate, 'aria-label': `${display} 선택`, title: status?.server_running ? 'server 중지 후 다른 모델을 선택할 수 있습니다.' : undefined, children: '선택' }), jsx('button', { className: danger, disabled: busy || status?.server_running, onClick: remove, 'aria-label': `${display} 삭제`, children: '삭제' }), jsx('button', { className: button, onClick: () => setParameterOpen(current => !current), 'aria-expanded': parameterOpen, 'aria-label': `${display} parameter 편집`, children: parameterOpen ? '접기' : '편집' })] })
+      jsxs('div', { className: 'flex flex-wrap items-center gap-2 md:justify-end', children: [isActive ? jsx('button', { className: button, disabled: true, 'aria-label': `${display} 선택됨`, children: '선택됨' }) : jsx('button', { className: primary, disabled: busy || status?.server_running, onClick: activate, 'aria-label': `${display} 선택`, title: status?.server_running ? 'server 중지 후 다른 모델을 선택할 수 있습니다.' : undefined, children: '선택' }), jsx('button', { className: danger, disabled: busy || status?.server_running, onClick: remove, 'aria-label': `${display} 삭제`, children: '삭제' })] })
     ] }),
-    jsx(ModelSettingsEditor, { modelId: model.id, refresh, open: parameterOpen })
   ] })
 }
 
@@ -398,53 +334,32 @@ function DownloadedModelRow({ model, onRegister, onDelete }) {
   ] })
 }
 
+function TabBar({ active, setActive }) {
+  const tabs = [['runtime', '운영'], ['models', '모델'], ['parameters', '파라미터']]
+  return jsx('nav', { className: 'mb-5 flex gap-1 border-b border-(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 관리 탭', children: tabs.map(([id, label]) => jsx('button', { className: `border-b-2 px-3 py-2 text-sm ${active === id ? 'border-(--ui-accent) text-(--ui-text-primary)' : 'border-transparent text-(--ui-text-secondary) hover:text-(--ui-text-primary)'}`, onClick: () => setActive(id), 'aria-current': active === id ? 'page' : undefined, children: label }, id)) })
+}
+
 function Page() {
   const [wizard, setWizard] = useState(null)
+  const [tab, setTab] = useState('runtime')
   const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: true })
-  const jobs = useQuery({
-    queryKey: [ID, 'jobs'],
-    queryFn: () => api('/jobs'),
-    refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false,
-    refetchOnWindowFocus: false
-  })
-  const hfModels = useQuery({ queryKey: [ID, 'hf-models'], queryFn: () => api('/hf-models'), refetchInterval: false, refetchOnWindowFocus: false })
-  const data = status.data
-  const models = data?.models || []
-  const localModels = hfModels.data?.models || []
-  const runtimeJobs = jobs.data?.jobs || []
-  useEffect(() => {
-    if (runtimeJobs.some(job => job.kind === 'runtime-install' && job.status === 'done')) {
-      queryClient.invalidateQueries({ queryKey: [ID, 'status'] })
-    }
-  }, [runtimeJobs])
-  const refreshStatus = () => Promise.all([
-    queryClient.invalidateQueries({ queryKey: [ID, 'status'] }),
-    queryClient.invalidateQueries({ queryKey: [ID, 'jobs'] })
-  ])
+  const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
+  const hfModels = useQuery({ queryKey: [ID, 'hf-models', status.data?.runtime_kind], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
+  const data = status.data; const models = data?.models || []; const localModels = hfModels.data?.models || []; const runtimeJobs = jobs.data?.jobs || []
+  useEffect(() => { if (runtimeJobs.some(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && job.status === 'done')) queryClient.invalidateQueries({ queryKey: [ID, 'status'] }) }, [runtimeJobs])
+  const refreshStatus = () => Promise.all([queryClient.invalidateQueries({ queryKey: [ID, 'status'] }), queryClient.invalidateQueries({ queryKey: [ID, 'jobs'] })])
   const refreshInventory = () => queryClient.invalidateQueries({ queryKey: [ID, 'hf-models'] })
   const refreshWizard = () => Promise.all([refreshStatus(), refreshInventory()])
   const openDownload = () => setWizard({ mode: 'download', repo: '' })
   const openRegister = repo => setWizard({ mode: 'register', repo })
-  const deleteDownloaded = async repoId => {
-    if (!window.confirm(`'${repoId}' HF cache를 삭제할까요?`)) return
-    try {
-      await api('/hf-models/delete', { method: 'POST', body: { repo_id: repoId } })
-      await hfModels.refetch()
-    } catch (cause) {
-      window.alert(`모델 삭제 실패: ${cause?.message || String(cause)}`)
-    }
-  }
-  const loadedCount = useMemo(() => Object.keys(data?.loaded_models || {}).length, [data?.loaded_models])
-  return jsx('main', { className: 'mx-auto max-w-5xl p-4 sm:p-6 lg:p-8', children: [
-    jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus }),
-    jsxs('div', { className: 'mt-6 flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('div', { className: `mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] ${muted}`, children: `${loadedCount} resident` }), jsx('h2', { className: 'text-lg font-semibold', children: '등록된 모델 리스트' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }),
-    jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: 'plugin API 상태 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('div', { className: 'py-10 text-center', children: [jsx('p', { className: 'font-medium', children: '등록된 모델이 없습니다.' }), jsx('p', { className: `mt-1 ${muted}`, children: '아래 다운받은 모델 목록에서 cache 상태를 확인할 수 있습니다.' })] }) }),
-    jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: hfModels.isFetching ? '새로고침 중…' : '다시 탐색' })] }), hfModels.error ? jsx('p', { className: 'pb-4 text-sm text-(--dt-destructive)', children: String(hfModels.error.message || hfModels.error) }) : null, hfModels.data?.warning ? jsx('p', { className: 'pb-4 text-sm text-(--dt-destructive)', children: hfModels.data.warning }) : null, hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델 목록을 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] }),
-    jsx('p', { className: `mt-3 text-xs ${muted}`, children: '다운로드는 HF cache inventory에만 표시됩니다. 등록은 선택 항목 등록을 눌렀을 때만 수행되며, C 드라이브로 복사하거나 링크하지 않습니다. 삭제는 확인 후 HF cache에서 해당 repository를 제거합니다.' }),
+  const deleteDownloaded = async repoId => { if (!window.confirm(`'${repoId}' HF cache를 삭제할까요?`)) return; try { await api('/hf-models/delete', { method: 'POST', body: { repo_id: repoId } }); await hfModels.refetch() } catch (cause) { window.alert(`모델 삭제 실패: ${cause?.message || String(cause)}`) } }
+  const activeModel = models.find(model => model.id === data?.active_model_id)
+  return jsxs('main', { className: 'mx-auto max-w-5xl p-4 sm:p-6', children: [jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus }) : null,
+    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: data?.runtime_kind === 'prism_ml' ? 'Prism-ML Bonsai/Ternary GGUF만 표시·등록합니다.' : '등록 모델과 HF cache inventory를 분리해 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: data?.runtime_kind === 'prism_ml' ? 'Prism-ML 호환 다운로드 모델이 없습니다.' : '다운받은 모델이 없습니다.' })] })] }) : null,
+    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: '파라미터와 preset' }), jsx('p', { className: `mt-1 ${muted}`, children: '모델을 선택한 뒤 parameter를 검색·추가하고 현재 설정을 preset으로 저장합니다.' }), activeModel ? jsx(ModelSettingsEditor, { modelId: activeModel.id, refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '먼저 모델 탭에서 사용할 모델을 선택하세요.' })] }) : null,
     wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode }) : null
   ] })
 }
-
 export default {
   id: ID,
   name: 'llama.cpp Manager',

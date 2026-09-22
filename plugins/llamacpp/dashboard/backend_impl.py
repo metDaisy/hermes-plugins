@@ -26,16 +26,17 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException
 
 try:
-    from dashboard.backends import get_backend
+    from dashboard.backends import backend_view, get_backend
 except ImportError:
-    from backends import get_backend
+    from backends import backend_view, get_backend
 
 router = APIRouter()
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 PROFILE_ROOT = PLUGIN_DIR.parent.parent
 MACHINE_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes"
-RUNTIME_ROOT = MACHINE_ROOT / "backends" / "llamacpp"
+RUNTIME_ROOT = MACHINE_ROOT / "runtimes" / "llamacpp"
+PRISM_RUNTIME_ROOT = MACHINE_ROOT / "runtimes" / "prism-ml"
 HF_HOME = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 MODELS_ROOT = HF_HOME
 ASSETS_ROOT = HF_HOME / "assets"
@@ -819,7 +820,9 @@ def _server_log_tail(limit: int = 250) -> dict[str, Any]:
 
 
 def _server_rows() -> list[dict[str, Any]]:
-    return [{"id": row["id"], "size_bytes": row["size_bytes"], "size_label": row["size_label"]} for row in _model_rows()]
+    adapter = get_backend(_runtime_kind(_state()))
+    visible = [row for row in _model_rows() if adapter.accepts_model(str(row.get("hf_repo") or ""), [str(row.get("hf_file") or path) for path in row.get("paths", [])] or [str(row.get("hf_file") or "")])]
+    return [{"id": row["id"], "size_bytes": row["size_bytes"], "size_label": row["size_label"]} for row in visible]
 
 
 def _runtime_info() -> dict[str, Any]:
@@ -830,9 +833,11 @@ def _runtime_info() -> dict[str, Any]:
     path = str(Path(str(raw_path)).expanduser().resolve()) if raw_path else None
     executable = _server_executable()
     adapter = get_backend(kind)
-    return {"kind": kind, "mode": mode, "label": adapter.label, "description": adapter.description,
+    view = backend_view(kind, state, MACHINE_ROOT)
+    return {"kind": kind, "mode": mode, "label": view.label, "description": adapter.description,
             "repository": getattr(adapter, "repository", None), "path": path,
-            "executable": str(executable) if executable else None,
+            "managed_root": view.managed_root, "version": view.version,
+            "install_action": view.install_action, "executable": str(executable) if executable else None,
             "installed": executable is not None, "official": kind == "official"}
 
 
@@ -841,6 +846,7 @@ def _status() -> dict[str, Any]:
     runtime = _runtime_info()
     target = _installed_target() if runtime["kind"] == "official" else None
     tag, backend = target or (str(state.get("installed_tag") or ""), str(state.get("installed_backend") or ""))
+    runtime_version = runtime["version"] or (tag if runtime["kind"] == "official" else None)
     process_alive = _pid_alive(state.get("pid"))
     running = process_alive and _health(int(state.get("port") or 18434))
     if not process_alive:
@@ -855,12 +861,15 @@ def _status() -> dict[str, Any]:
         _save_state(state)
         _unregister_custom_endpoint()
         SERVER_LOG_PATH.unlink(missing_ok=True)
-    return {"enabled": True, "tag": tag, "configured_tag": str(state.get("tag") or "latest"),
+    return {"enabled": True, "tag": tag, "runtime_version": runtime_version, "configured_tag": str(state.get("tag") or "latest"),
             "latest_tag": None, "update_available": False, "runtime_installed": bool(_server_executable()),
             "runtime_backend": backend or (_backend() if tag else None), "backend": backend or (_backend() if tag else None),
             "runtime_mode": runtime["mode"], "runtime_path": runtime["path"],
             "runtime_executable": runtime["executable"], "runtime_kind": runtime["kind"],
             "runtime_label": runtime["label"], "runtime_repository": runtime["repository"],
+            "runtime_managed_root": runtime["managed_root"], "runtime_install_action": runtime["install_action"],
+            "runtime_options": {"official": {"version": str(state.get("installed_tag") or "") or None, "installed": _server_executable_in(RUNTIME_ROOT) is not None},
+                                "prism_ml": {"version": str(state.get("prism_release_tag") or "") or None, "installed": _server_executable_in(PRISM_RUNTIME_ROOT) is not None}},
             "devices": _detected_devices(), "server_running": running,
             "server_base_url": f"http://127.0.0.1:{int(state.get('port') or 18434)}" if running else None,
             "custom_endpoint": state.get("custom_endpoint") if running else None,
@@ -936,12 +945,17 @@ def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
     return reported.resolve()
 
 
+def _require_compatible_model(kind: str, repo_id: str, paths: list[str]) -> None:
+    if not get_backend(kind).accepts_model(repo_id, paths):
+        raise HTTPException(status_code=422, detail="Prism-ML backend에는 Prism-ML Bonsai/Ternary GGUF 모델만 등록할 수 있습니다")
+
+
 def _local_hf_models() -> dict[str, Any]:
     models, executable, warning = _hf_downloaded_models()
-    return {
-        "models": models,
-        "warning": warning,
-    }
+    kind = _runtime_kind(_state())
+    adapter = get_backend(kind)
+    visible = [model for model in models if adapter.accepts_model(str(model.get("repo_id") or ""), ["inventory.gguf"])]
+    return {"models": visible, "warning": warning, "runtime_kind": kind}
 
 
 def _copy_options(options: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1048,13 +1062,12 @@ def save_runtime(body: dict[str, Any]) -> dict[str, Any]:
     mode = "official" if kind == "official" else "custom"
     custom_path = None
     if kind != "official":
-        raw_path = str(body.get("path") or "").strip()
-        if not raw_path:
-            raise HTTPException(status_code=422, detail="custom llama.cpp path is required")
+        adapter = get_backend(kind)
+        raw_path = str(body.get("path") or adapter.managed_root(MACHINE_ROOT)).strip()
         try:
-            _resolve_server_executable_from_path(raw_path)
+            adapter.resolve_executable(raw_path)
         except RuntimeError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail="Prism-ML runtime이 아직 준비되지 않았습니다. 먼저 다운로드를 완료하세요.") from exc
         custom_path = str(Path(raw_path).expanduser().resolve())
     state = _state()
     state["runtime_kind"] = kind
@@ -1145,9 +1158,9 @@ def _download_archive(url: str, destination: Path, job: dict[str, Any], floor: i
 def _install_prism_runtime() -> dict[str, Any]:
     job = _job("prism-runtime-install", "Prism-ML GitHub runtime 준비")
     def run() -> None:
-        target = RUNTIME_ROOT / "prism-ml" / "Bonsai-demo"
+        target = PRISM_RUNTIME_ROOT
         staging = target.with_name(f".Bonsai-demo-{job['job_id']}")
-        archive = RUNTIME_ROOT / "downloads" / f"prism-{job['job_id']}.zip"
+        archive = PRISM_RUNTIME_ROOT.parent / "downloads" / f"prism-{job['job_id']}.zip"
         try:
             git = shutil.which("git")
             if not git: raise RuntimeError("git is required to download Prism-ML Bonsai-demo")
@@ -1167,7 +1180,7 @@ def _install_prism_runtime() -> dict[str, Any]:
             with zipfile.ZipFile(archive) as package: package.extractall(bin_dir)
             if backend == "cuda":
                 try:
-                    cuda_archive = RUNTIME_ROOT / "downloads" / f"prism-cudart-{job['job_id']}.zip"
+                    cuda_archive = PRISM_RUNTIME_ROOT.parent / "downloads" / f"prism-cudart-{job['job_id']}.zip"
                     _download_archive(f"{base_url}/cudart-llama-bin-win-cuda-{cuda_tag}-x64.zip", cuda_archive, job, 82, 94)
                     with zipfile.ZipFile(cuda_archive) as package: package.extractall(bin_dir)
                     cuda_archive.unlink(missing_ok=True)
@@ -1181,6 +1194,20 @@ def _install_prism_runtime() -> dict[str, Any]:
             archive.unlink(missing_ok=True); shutil.rmtree(staging, ignore_errors=True)
     _spawn(job, run, "prism-runtime-install")
     return {"job_id":job["job_id"],"kind":"prism_ml","repository":"PrismML-Eng/Bonsai-demo"}
+
+
+
+
+@router.post("/runtime/open")
+def open_runtime(body: dict[str, Any]) -> dict[str, Any]:
+    kind = get_backend((body or {}).get("kind") or _runtime_kind(_state())).key
+    target = get_backend(kind).managed_root(MACHINE_ROOT)
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        os.startfile(str(target))  # type: ignore[attr-defined]
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="runtime folder could not be opened") from exc
+    return {"ok": True, "kind": kind}
 
 
 @router.post("/runtime/install")
@@ -1329,8 +1356,10 @@ def search(q: str = "", limit: int = 20) -> dict[str, Any]:
         payload = _http_json(url)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Hugging Face search failed: {exc}") from exc
-    return {"hits": [{"repo": str(item.get("id", "")), "downloads": int(item.get("downloads") or 0)}
-                    for item in payload if isinstance(item, dict) and item.get("id")]}
+    adapter = get_backend(_runtime_kind(_state()))
+    hits = [{"repo": str(item.get("id", "")), "downloads": int(item.get("downloads") or 0)}
+            for item in payload if isinstance(item, dict) and item.get("id")]
+    return {"hits": [hit for hit in hits if adapter.accepts_model(hit["repo"], ["candidate.gguf"])]}
 
 
 @router.get("/repo")
@@ -1340,6 +1369,7 @@ def repo(repo_id: str) -> dict[str, Any]:
         payload = _http_json(url)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Could not list {repo_id}: {exc}") from exc
+    kind = _runtime_kind(_state())
     groups: dict[str, dict[str, Any]] = {}
     for item in payload if isinstance(payload, list) else []:
         path = str(item.get("path", ""))
@@ -1350,7 +1380,9 @@ def repo(repo_id: str) -> dict[str, Any]:
         row = groups.setdefault(label, {"label": label, "paths": [], "total_bytes": 0, "fit": "available"})
         row["paths"].append(path)
         row["total_bytes"] += int(item.get("size") or 0)
-    return {"files": sorted(groups.values(), key=lambda item: item["total_bytes"], reverse=True)}
+    files = sorted(groups.values(), key=lambda item: item["total_bytes"], reverse=True)
+    _require_compatible_model(kind, repo_id, [path for group in files for path in group["paths"]]) if files else None
+    return {"files": files}
 
 
 @router.post("/download-browsed")
@@ -1359,6 +1391,7 @@ def download_browsed(body: dict[str, Any]) -> dict[str, Any]:
     paths = [str(path) for path in body.get("paths") or [] if str(path).lower().endswith(".gguf")]
     if not repo_id or not paths:
         raise HTTPException(status_code=422, detail="repo and .gguf paths are required")
+    _require_compatible_model(_runtime_kind(_state()), repo_id, paths)
     model_id = _model_id(Path(paths[0]))
     job = _job("model-download", model_id)
     job.update({"phase": "downloading", "percent": 0})
@@ -1381,6 +1414,7 @@ def register(body: dict[str, Any]) -> dict[str, Any]:
     paths = [str(path) for path in body.get("paths") or [] if str(path).lower().endswith(".gguf")]
     if not repo_id or not paths:
         raise HTTPException(status_code=422, detail="repo and .gguf paths are required")
+    _require_compatible_model(_runtime_kind(_state()), repo_id, paths)
     model_id = _model_id(Path(paths[0]))
     cached_groups, warning = _hf_cached_files(repo_id)
     selected_group = next((group for group in cached_groups if set(group["paths"]) == set(paths)), None)

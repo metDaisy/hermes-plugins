@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dashboard.backends import get_runtime, runtime_ids
+from dashboard.backends import backend_view, get_runtime, runtime_ids
 
 
 class RuntimeAdapterTests(unittest.TestCase):
@@ -15,6 +15,24 @@ class RuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(get_runtime("custom").key, "prism_ml")
         self.assertEqual(get_runtime("prism_ml").key, "prism_ml")
         self.assertEqual(runtime_ids(), ("official", "prism_ml"))
+
+    def test_backend_contract_exposes_managed_roots_and_versions(self) -> None:
+        machine_root = Path("C:/Users/leee/AppData/Local/hermes")
+        official = backend_view("official", {"installed_tag": "b10976"}, machine_root)
+        prism = backend_view("prism_ml", {"prism_release_tag": "prism-b10709-9a9394a"}, machine_root)
+        self.assertEqual(official.label, "llama.cpp official")
+        self.assertEqual(official.managed_root, str(machine_root / "runtimes" / "llamacpp"))
+        self.assertEqual(official.version, "b10976")
+        self.assertEqual(prism.label, "Prism-ML llama.cpp")
+        self.assertEqual(prism.managed_root, str(machine_root / "runtimes" / "prism-ml"))
+        self.assertEqual(prism.version, "prism-b10709-9a9394a")
+
+    def test_prism_backend_accepts_only_prism_bonsai_gguf(self) -> None:
+        prism = get_runtime("prism_ml")
+        self.assertTrue(prism.accepts_model("prism-ml/Ternary-Bonsai-2-27B-gguf", ["Ternary-Bonsai-2-27B-PQ2_0.gguf"]))
+        self.assertTrue(prism.accepts_model("prism-ml/Bonsai-8B-gguf", ["Bonsai-8B-Q1_0.gguf"]))
+        self.assertFalse(prism.accepts_model("ornith-ai/Ornith-1.5-35B-A3B-GGUF", ["Ornith-1.5-35B-Q6_K.gguf"]))
+        self.assertFalse(prism.accepts_model("prism-ml/Bonsai-8B-mlx-1bit", ["model.safetensors"]))
 
     def test_official_runtime_resolves_a_direct_server(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

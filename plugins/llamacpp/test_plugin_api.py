@@ -76,6 +76,24 @@ class LlamaCppManagerTests(unittest.TestCase):
                 self.assertEqual(deleted, {"ok": True, "preset_id": preset_id})
                 self.assertEqual(api.presets(model_id="model-a")["presets"], [])
 
+    def test_profile_proxy_lock_uses_official_runtime_root(self) -> None:
+        proxy_source = (Path(__file__).parent / "dashboard" / "plugin_api.py").read_text(encoding="utf-8")
+        self.assertIn('/ "runtimes" / "llamacpp"', proxy_source)
+        self.assertNotIn('/ "backends" / "llamacpp"', proxy_source)
+
+    def test_prism_runtime_has_its_own_machine_root(self) -> None:
+        self.assertEqual(api.RUNTIME_ROOT, api.MACHINE_ROOT / "runtimes" / "llamacpp")
+        self.assertEqual(api.PRISM_RUNTIME_ROOT, api.MACHINE_ROOT / "runtimes" / "prism-ml")
+
+    def test_prism_hides_non_bonsai_registered_models(self) -> None:
+        rows = [{"id": "Ornith", "size_bytes": 1, "size_label": "1 B", "hf_repo": "ornith-ai/Ornith-GGUF", "hf_file": "Ornith-Q6_K.gguf", "paths": []}, {"id": "Bonsai", "size_bytes": 1, "size_label": "1 B", "hf_repo": "prism-ml/Ternary-Bonsai-2-27B-gguf", "hf_file": "Ternary-Bonsai-2-27B-PQ2_0.gguf", "paths": []}]
+        with patch.object(api, "_model_rows", return_value=rows), patch.object(api, "_runtime_kind", return_value="prism_ml"):
+            self.assertEqual([row["id"] for row in api._server_rows()], ["Bonsai"])
+
+    def test_prism_rejects_non_bonsai_registration(self) -> None:
+        with self.assertRaisesRegex(Exception, "Prism-ML"):
+            api._require_compatible_model("prism_ml", "ornith-ai/Ornith-1.5-35B-A3B-GGUF", ["Ornith-1.5-35B-Q6_K.gguf"])
+
     def test_shared_backend_uses_machine_state_and_profile_proxy(self) -> None:
         self.assertEqual(api.STATE_PATH, api.RUNTIME_ROOT / "state.json")
         proxy_path = Path(__file__).parent / "dashboard" / "plugin_api.py"

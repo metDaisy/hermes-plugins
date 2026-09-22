@@ -15,7 +15,7 @@ from fastapi.responses import Response
 
 router = APIRouter()
 
-RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes" / "backends" / "llamacpp"
+RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes" / "runtimes" / "llamacpp"
 COORDINATOR_PORT = 18380
 COORDINATOR_URL = f"http://127.0.0.1:{COORDINATOR_PORT}"
 COORDINATOR_SCRIPT = Path(__file__).with_name("coordinator_server.py")

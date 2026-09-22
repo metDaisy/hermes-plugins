@@ -13,6 +13,17 @@ class PrismMlBackend:
     description = "PrismML-Eng/Bonsai-demo compatible llama-server"
     repository = "https://github.com/PrismML-Eng/Bonsai-demo"
 
+    def managed_root(self, machine_root: Path) -> Path:
+        return machine_root / "runtimes" / "prism-ml"
+
+    def runtime_version(self, state: dict[str, Any]) -> str | None:
+        return str(state.get("prism_release_tag") or "") or None
+
+    def accepts_model(self, repo_id: str, paths: list[str]) -> bool:
+        repo = str(repo_id or "").strip().lower()
+        names = " ".join(str(path).lower() for path in paths)
+        return repo.startswith("prism-ml/") and bool(paths) and all(name.endswith(".gguf") for name in paths) and ("bonsai" in repo or "bonsai" in names or "ternary" in repo or "ternary" in names)
+
     def resolve_executable(self, raw_path: Path | str) -> Path:
         path = Path(str(raw_path)).expanduser()
         known = [

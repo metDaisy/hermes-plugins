@@ -11,6 +11,16 @@ class OfficialLlamaCppBackend:
     key = "official"
     label = "llama.cpp official"
     description = "Official ggml-org llama.cpp runtime"
+    repository = "https://github.com/ggml-org/llama.cpp"
+
+    def managed_root(self, machine_root: Path) -> Path:
+        return machine_root / "runtimes" / "llamacpp"
+
+    def runtime_version(self, state: dict[str, Any]) -> str | None:
+        return str(state.get("installed_tag") or "") or None
+
+    def accepts_model(self, repo_id: str, paths: list[str]) -> bool:
+        return bool(paths) and all(str(path).lower().endswith(".gguf") for path in paths)
 
     def resolve_executable(self, raw_path: Path | str) -> Path:
         path = Path(str(raw_path)).expanduser()
