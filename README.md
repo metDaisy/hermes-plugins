@@ -7,8 +7,7 @@ metDaisy가 관리하는 Hermes Agent plugin monorepo입니다.
 | Plugin | Version | Description |
 |---|---:|---|
 | [`agent-audit`](plugins/agent-audit/README.md) | `0.5.1` | Privacy-safe lifecycle, validation evidence, SQLite audit storage, dashboard API, Desktop UI |
-| [`llamacpp-manager`](plugins/llamacpp-manager/README.md) | `0.1.5` | General llama.cpp runtime selection, HF GGUF model registration, parameter presets, server lifecycle, custom endpoint, and server logs |
-| [`llamacpp-local`](plugins/llamacpp-local/README.md) | `0.1.0` | Model-provider profile for official or Prism-ML llama.cpp OpenAI-compatible endpoints |
+| [`llamacpp`](plugins/llamacpp/README.md) | `0.2.0` | Unified manager frontend with official llama.cpp and Prism-ML backends, GGUF registration, server lifecycle, custom endpoint, and logs |
 
 각 plugin은 독립적인 `plugin.yaml`을 가지며 `plugins/<plugin-name>/`을 plugin root로 사용합니다.
 
@@ -17,12 +16,7 @@ metDaisy가 관리하는 Hermes Agent plugin monorepo입니다.
 ```text
 plugins/
 ├── agent-audit/
-├── llamacpp-manager/       # general runtime/process manager
-└── llamacpp-local/         # model-provider profile
-    ├── plugin.yaml
-    ├── __init__.py
-    ├── README.md
-    └── test_provider.py
+└── llamacpp/               # unified manager frontend + official/Prism backends
 ```
 
 ## agent-audit 검증

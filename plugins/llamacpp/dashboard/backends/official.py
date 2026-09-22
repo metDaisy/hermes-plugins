@@ -7,8 +7,8 @@ from typing import Any
 from .base import build_server_command, resolve_server_executable
 
 
-class LlamaCppRuntime:
-    key = "llamacpp"
+class OfficialLlamaCppBackend:
+    key = "official"
     label = "llama.cpp official"
     description = "Official ggml-org llama.cpp runtime"
 

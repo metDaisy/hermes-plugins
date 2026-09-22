@@ -1,4 +1,4 @@
-"""Shared primitives for llama.cpp runtime adapters."""
+"""Shared primitives for llama.cpp backend adapters."""
 from __future__ import annotations
 
 from pathlib import Path

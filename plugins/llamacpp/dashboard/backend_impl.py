@@ -26,26 +26,26 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException
 
 try:
-    from dashboard.runtimes import get_runtime
+    from dashboard.backends import get_backend
 except ImportError:
-    from runtimes import get_runtime
+    from backends import get_backend
 
 router = APIRouter()
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 PROFILE_ROOT = PLUGIN_DIR.parent.parent
 MACHINE_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes"
-RUNTIME_ROOT = MACHINE_ROOT / "runtimes" / "llamacpp"
+RUNTIME_ROOT = MACHINE_ROOT / "backends" / "llamacpp"
 HF_HOME = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 MODELS_ROOT = HF_HOME
 ASSETS_ROOT = HF_HOME / "assets"
-STATE_PATH = PLUGIN_DIR / "state.json"
+STATE_PATH = RUNTIME_ROOT / "state.json"
 OPTIONS_PATH = RUNTIME_ROOT / "model-options.json"
 OPTION_METADATA_CACHE_PATH = RUNTIME_ROOT / "parameter-metadata-cache.json"
 SERVER_LOG_PATH = RUNTIME_ROOT / "logs" / "llama-server.log"
-CUSTOM_ENDPOINT_KEY = "llamacpp-manager-local"
-CUSTOM_ENDPOINT_BEGIN = "# BEGIN llamacpp-manager endpoint (managed)"
-CUSTOM_ENDPOINT_END = "# END llamacpp-manager endpoint (managed)"
+CUSTOM_ENDPOINT_KEY = "llamacpp-local"
+CUSTOM_ENDPOINT_BEGIN = "# BEGIN llamacpp endpoint (managed)"
+CUSTOM_ENDPOINT_END = "# END llamacpp endpoint (managed)"
 _custom_endpoint_lock = threading.RLock()
 _SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
 _OPTION_RE = re.compile(r"(?<![-\w])(?:--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z][A-Za-z0-9-]*)")
@@ -61,7 +61,7 @@ _latest_cache: tuple[float, str] | None = None
 def _default_state() -> dict[str, Any]:
     return {"active_model_id": None, "tag": "latest", "backend": "auto", "port": 18434,
             "pid": None, "custom_endpoint": None, "models": {}, "model_settings": {},
-            "parameter_presets": {}, "runtime_kind": "llamacpp", "runtime_path": None,
+            "parameter_presets": {}, "runtime_kind": "official", "runtime_path": None,
             "runtime_mode": "official", "custom_runtime_path": None}
 
 
@@ -109,7 +109,7 @@ def _hf_storage() -> tuple[Path, Path]:
 
 
 def _http_json(url: str) -> Any:
-    headers = {"Accept": "application/json", "User-Agent": "llamacpp-manager"}
+    headers = {"Accept": "application/json", "User-Agent": "llamacpp"}
     token = os.environ.get("HF_TOKEN") or os.environ.get("hf_token")
     host = (urllib.parse.urlsplit(url).hostname or "").lower()
     if token and (host == "huggingface.co" or host.endswith(".huggingface.co") or host == "hf.co"):
@@ -456,13 +456,13 @@ def _server_executable_in(root: Path) -> Path | None:
 
 def _runtime_kind(state: dict[str, Any] | None = None) -> str:
     current = state or _state()
-    raw = current.get("runtime_kind") or current.get("runtime_mode") or "llamacpp"
-    return get_runtime(raw).key
+    raw = current.get("runtime_kind") or current.get("runtime_mode") or "official"
+    return get_backend(raw).key
 
 
 def _resolve_server_executable_from_path(raw_path: Path | str) -> Path:
     """Resolve a user-selected llama-server path through the active adapter."""
-    return get_runtime(_runtime_kind()).resolve_executable(raw_path)
+    return get_backend(_runtime_kind()).resolve_executable(raw_path)
 
 
 def _server_executable(tag: str | None = None, backend: str | None = None) -> Path | None:
@@ -470,7 +470,7 @@ def _server_executable(tag: str | None = None, backend: str | None = None) -> Pa
         target = (tag, backend)
     else:
         state = _state()
-        if _runtime_kind(state) != "llamacpp":
+        if _runtime_kind(state) != "official":
             try:
                 return _resolve_server_executable_from_path(str(state.get("runtime_path") or state.get("custom_runtime_path") or ""))
             except RuntimeError:
@@ -551,7 +551,7 @@ def _find_managed_endpoint(lines: list[str]) -> tuple[int, int] | None:
     end = next((index for index in range(begin + 1, len(lines))
                 if lines[index].strip() == CUSTOM_ENDPOINT_END), None)
     if end is None:
-        raise RuntimeError("llamacpp-manager endpoint block is incomplete")
+        raise RuntimeError("llamacpp endpoint block is incomplete")
     return begin, end
 
 
@@ -572,7 +572,7 @@ def _config_with_managed_endpoint(text: str, base_url: str, model_id: str, conte
         key_prefix = "  "
         if any(line.startswith(key_prefix + CUSTOM_ENDPOINT_KEY + ":")
                for line in lines[providers_index + 1:]):
-            raise RuntimeError("a non-plugin provider already owns the llamacpp-manager endpoint key")
+            raise RuntimeError("a non-plugin provider already owns the llamacpp endpoint key")
         insert_at = providers_index + 1
         while insert_at < len(lines) and (not lines[insert_at].strip() or lines[insert_at].startswith((" ", "\	"))):
             insert_at += 1
@@ -628,8 +628,7 @@ def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
                 updates.append((path, updated))
         for path, updated in updates:
             _write_profile_config(path, updated)
-    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "provider_profile": "llamacpp-local",
-            "base_url": base_url, "model": model_id, "context_length": context_length}
+    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "base_url": base_url, "model": model_id, "context_length": context_length}
 
 
 def _unregister_custom_endpoint() -> None:
@@ -764,7 +763,7 @@ def _start_server() -> None:
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"invalid server port: {raw_port}") from exc
     model_path = None if isinstance(entry, dict) and entry.get("hf_repo") else _active_path(model_id)
-    adapter = get_runtime(_runtime_kind(state))
+    adapter = get_backend(_runtime_kind(state))
     command = adapter.build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, stored_options,
                                    model_path=model_path)
     command.extend(_option_cli_args({key: value for key, value in stored_options.items() if key != "port"}))
@@ -826,21 +825,21 @@ def _server_rows() -> list[dict[str, Any]]:
 def _runtime_info() -> dict[str, Any]:
     state = _state()
     kind = _runtime_kind(state)
-    mode = "official" if kind == "llamacpp" else "custom"
+    mode = "official" if kind == "official" else "custom"
     raw_path = state.get("runtime_path") or state.get("custom_runtime_path")
     path = str(Path(str(raw_path)).expanduser().resolve()) if raw_path else None
     executable = _server_executable()
-    adapter = get_runtime(kind)
+    adapter = get_backend(kind)
     return {"kind": kind, "mode": mode, "label": adapter.label, "description": adapter.description,
             "repository": getattr(adapter, "repository", None), "path": path,
             "executable": str(executable) if executable else None,
-            "installed": executable is not None, "official": kind == "llamacpp"}
+            "installed": executable is not None, "official": kind == "official"}
 
 
 def _status() -> dict[str, Any]:
     state = _state()
     runtime = _runtime_info()
-    target = _installed_target() if runtime["kind"] == "llamacpp" else None
+    target = _installed_target() if runtime["kind"] == "official" else None
     tag, backend = target or (str(state.get("installed_tag") or ""), str(state.get("installed_backend") or ""))
     process_alive = _pid_alive(state.get("pid"))
     running = process_alive and _health(int(state.get("port") or 18434))
@@ -1043,12 +1042,12 @@ def runtime_info() -> dict[str, Any]:
 def save_runtime(body: dict[str, Any]) -> dict[str, Any]:
     requested = body.get("kind") or body.get("mode") or "llamacpp"
     try:
-        kind = get_runtime(requested).key
+        kind = get_backend(requested).key
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    mode = "official" if kind == "llamacpp" else "custom"
+    mode = "official" if kind == "official" else "custom"
     custom_path = None
-    if kind != "llamacpp":
+    if kind != "official":
         raw_path = str(body.get("path") or "").strip()
         if not raw_path:
             raise HTTPException(status_code=422, detail="custom llama.cpp path is required")
@@ -1134,8 +1133,65 @@ def delete_hf_model(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "repo_id": repo_id, "deleted": True}
 
 
+def _download_archive(url: str, destination: Path, job: dict[str, Any], floor: int, ceiling: int) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=120) as response, destination.open("wb") as output:
+        total, done = int(response.headers.get("Content-Length") or 0), 0
+        while chunk := response.read(1 << 20):
+            output.write(chunk); done += len(chunk)
+            if total: job["percent"] = floor + round(done / total * (ceiling - floor))
+
+
+def _install_prism_runtime() -> dict[str, Any]:
+    job = _job("prism-runtime-install", "Prism-ML GitHub runtime 준비")
+    def run() -> None:
+        target = RUNTIME_ROOT / "prism-ml" / "Bonsai-demo"
+        staging = target.with_name(f".Bonsai-demo-{job['job_id']}")
+        archive = RUNTIME_ROOT / "downloads" / f"prism-{job['job_id']}.zip"
+        try:
+            git = shutil.which("git")
+            if not git: raise RuntimeError("git is required to download Prism-ML Bonsai-demo")
+            job.update({"phase":"cloning","detail":"Downloading PrismML-Eng/Bonsai-demo","percent":5})
+            result = subprocess.run([git,"clone","--depth","1","https://github.com/PrismML-Eng/Bonsai-demo.git",str(staging)], capture_output=True, check=False, text=True, encoding="utf-8", errors="replace", timeout=180)
+            if result.returncode: raise RuntimeError("Prism-ML GitHub clone failed")
+            setup = (staging / "setup.ps1").read_text(encoding="utf-8", errors="replace")
+            tag_match, cuda_match = re.search(r'\$ReleaseTag\s*=\s*"([^"]+)"', setup), re.search(r'\$CudaTag\s*=\s*"([^"]+)"', setup)
+            if not tag_match or not cuda_match: raise RuntimeError("Prism-ML setup metadata did not expose release/CUDA tags")
+            tag, cuda_tag = tag_match.group(1), cuda_match.group(1)
+            backend = "cuda" if _backend() == "cuda" else "cpu"
+            asset = f"llama-{tag}-bin-win-cuda-{cuda_tag}-x64.zip" if backend == "cuda" else f"llama-{tag}-bin-win-cpu-x64.zip"
+            base_url = f"https://github.com/PrismML-Eng/llama.cpp/releases/download/{tag}"
+            job.update({"phase":"downloading","detail":f"Downloading Prism llama-server ({backend})","percent":15})
+            _download_archive(f"{base_url}/{asset}", archive, job, 15, 80)
+            bin_dir = staging / "bin" / backend; bin_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(archive) as package: package.extractall(bin_dir)
+            if backend == "cuda":
+                try:
+                    cuda_archive = RUNTIME_ROOT / "downloads" / f"prism-cudart-{job['job_id']}.zip"
+                    _download_archive(f"{base_url}/cudart-llama-bin-win-cuda-{cuda_tag}-x64.zip", cuda_archive, job, 82, 94)
+                    with zipfile.ZipFile(cuda_archive) as package: package.extractall(bin_dir)
+                    cuda_archive.unlink(missing_ok=True)
+                except Exception: pass
+            get_backend("prism_ml").resolve_executable(staging)
+            if target.exists(): shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(staging), str(target))
+            state = _state(); state.update({"runtime_kind":"prism_ml","runtime_path":str(target.resolve()),"runtime_mode":"custom","custom_runtime_path":str(target.resolve()),"prism_release_tag":tag,"prism_backend":backend}); _save_state(state)
+            _finish(job, f"Prism-ML {tag} ready")
+        finally:
+            archive.unlink(missing_ok=True); shutil.rmtree(staging, ignore_errors=True)
+    _spawn(job, run, "prism-runtime-install")
+    return {"job_id":job["job_id"],"kind":"prism_ml","repository":"PrismML-Eng/Bonsai-demo"}
+
+
 @router.post("/runtime/install")
 def runtime_install(body: dict[str, Any]) -> dict[str, Any]:
+    requested = body.get("kind") if isinstance(body, dict) else None
+    try:
+        kind = get_backend(requested or "official").key
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if kind == "prism_ml":
+        return _install_prism_runtime()
     try:
         tag, backend = _runtime_target(
             force_latest=True,

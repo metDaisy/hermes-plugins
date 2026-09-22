@@ -1,5 +1,0 @@
-name: llamacpp-local
-kind: model-provider
-version: 0.1.1
-description: Local official or Prism-ML llama.cpp OpenAI-compatible model provider
-author: metDaisy

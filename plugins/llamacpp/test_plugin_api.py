@@ -1,4 +1,4 @@
-"""Regression tests for alternate llama.cpp runtimes and parameter presets."""
+"""Regression tests for alternate llama.cpp backends and parameter presets."""
 from __future__ import annotations
 
 import importlib.util
@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-MODULE_PATH = Path(__file__).parent / "dashboard" / "plugin_api.py"
-SPEC = importlib.util.spec_from_file_location("llamacpp_manager_plugin_api", MODULE_PATH)
+MODULE_PATH = Path(__file__).parent / "dashboard" / "backend_impl.py"
+SPEC = importlib.util.spec_from_file_location("llamacpp_backend_impl", MODULE_PATH)
 assert SPEC and SPEC.loader
 api = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(api)
@@ -76,11 +76,17 @@ class LlamaCppManagerTests(unittest.TestCase):
                 self.assertEqual(deleted, {"ok": True, "preset_id": preset_id})
                 self.assertEqual(api.presets(model_id="model-a")["presets"], [])
 
-    def test_custom_endpoint_advertises_model_provider_profile(self) -> None:
+    def test_shared_backend_uses_machine_state_and_profile_proxy(self) -> None:
+        self.assertEqual(api.STATE_PATH, api.RUNTIME_ROOT / "state.json")
+        proxy_path = Path(__file__).parent / "dashboard" / "plugin_api.py"
+        coordinator_path = Path(__file__).parent / "dashboard" / "coordinator_server.py"
+        self.assertIn("Profile-local proxy", proxy_path.read_text(encoding="utf-8"))
+        self.assertIn("from backend_impl import router", coordinator_path.read_text(encoding="utf-8"))
+
+    def test_custom_endpoint_is_self_contained_without_provider_plugin(self) -> None:
         with patch.object(api, "_profile_config_paths", return_value=[]), patch.object(api, "_load_options", return_value={}):
             endpoint = api._register_custom_endpoint(18434, "bonsai")
             self.assertEqual(endpoint["provider"], "custom")
-            self.assertEqual(endpoint["provider_profile"], "llamacpp-local")
             self.assertEqual(endpoint["base_url"], "http://127.0.0.1:18434/v1")
 
         with tempfile.TemporaryDirectory() as raw_root:

@@ -7,7 +7,7 @@ from typing import Any
 from .base import build_server_command, resolve_server_executable
 
 
-class PrismMlRuntime:
+class PrismMlBackend:
     key = "prism_ml"
     label = "Prism-ML llama.cpp"
     description = "PrismML-Eng/Bonsai-demo compatible llama-server"

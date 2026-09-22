@@ -1,20 +1,20 @@
-"""Tests for llama.cpp runtime adapters."""
+"""Tests for llama.cpp backend adapters."""
 from __future__ import annotations
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from dashboard.runtimes import get_runtime, runtime_ids
+from dashboard.backends import get_runtime, runtime_ids
 
 
 class RuntimeAdapterTests(unittest.TestCase):
     def test_registry_keeps_official_alias_and_exposes_prism(self) -> None:
-        self.assertEqual(get_runtime("official").key, "llamacpp")
-        self.assertEqual(get_runtime("llamacpp").key, "llamacpp")
+        self.assertEqual(get_runtime("official").key, "official")
+        self.assertEqual(get_runtime("llamacpp").key, "official")
         self.assertEqual(get_runtime("custom").key, "prism_ml")
         self.assertEqual(get_runtime("prism_ml").key, "prism_ml")
-        self.assertEqual(runtime_ids(), ("llamacpp", "prism_ml"))
+        self.assertEqual(runtime_ids(), ("official", "prism_ml"))
 
     def test_official_runtime_resolves_a_direct_server(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
