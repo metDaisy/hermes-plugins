@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -63,14 +67,15 @@ class LlamaCppManagerTests(unittest.TestCase):
                 created = api.create_preset({"name": "Coding", "model_id": "model-a"})
                 preset_id = created["preset"]["id"]
 
-                listed = api.presets(model_id="model-a")
+                listed = api.presets(model_id="model-b")
                 self.assertEqual([item["name"] for item in listed["presets"]], ["Coding"])
                 self.assertEqual(listed["presets"][0]["options"], {"ctx-size": "8192"})
+                self.assertIsNone(listed["presets"][0]["model_id"])
 
-                api.save_model_settings("model-a", {"options": {"ctx-size": "1024"}})
-                applied = api.apply_preset(preset_id, {"model_id": "model-a"})
+                api.save_model_settings("model-b", {"options": {"ctx-size": "1024"}})
+                applied = api.apply_preset(preset_id, {"model_id": "model-b"})
                 self.assertEqual(applied["options"], {"ctx-size": "8192"})
-                self.assertEqual(api.model_settings("model-a")["options"], {"ctx-size": "8192"})
+                self.assertEqual(api.model_settings("model-b")["options"], {"ctx-size": "8192"})
 
                 deleted = api.delete_preset(preset_id)
                 self.assertEqual(deleted, {"ok": True, "preset_id": preset_id})
@@ -89,6 +94,30 @@ class LlamaCppManagerTests(unittest.TestCase):
         rows = [{"id": "Ornith", "size_bytes": 1, "size_label": "1 B", "hf_repo": "ornith-ai/Ornith-GGUF", "hf_file": "Ornith-Q6_K.gguf", "paths": []}, {"id": "Bonsai", "size_bytes": 1, "size_label": "1 B", "hf_repo": "prism-ml/Ternary-Bonsai-2-27B-gguf", "hf_file": "Ternary-Bonsai-2-27B-PQ2_0.gguf", "paths": []}]
         with patch.object(api, "_model_rows", return_value=rows), patch.object(api, "_runtime_kind", return_value="prism_ml"):
             self.assertEqual([row["id"] for row in api._server_rows()], ["Bonsai"])
+
+    def test_prism_download_inventory_uses_allowed_repository_before_file_selection(self) -> None:
+        downloaded = [{"repo_id": "prism-ml/Ternary-Bonsai-2-27B-gguf", "size": "6.7G"}]
+        with patch.object(api, "_hf_downloaded_models", return_value=(downloaded, "hf", None)), \
+                patch.object(api, "_runtime_kind", return_value="prism_ml"):
+            self.assertEqual(api._local_hf_models()["models"], downloaded)
+
+    def test_server_rows_preserve_registered_hugging_face_provenance(self) -> None:
+        rows = [{"id": "Bonsai", "size_bytes": 1, "size_label": "1 B",
+                 "hf_repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+                 "hf_file": "Ternary-Bonsai-2-27B-PQ2_0.gguf", "paths": []}]
+        with patch.object(api, "_model_rows", return_value=rows), patch.object(api, "_runtime_kind", return_value="prism_ml"):
+            row = api._server_rows()[0]
+        self.assertEqual(row["hf_repo"], "prism-ml/Ternary-Bonsai-2-27B-gguf")
+        self.assertEqual(row["hf_file"], "Ternary-Bonsai-2-27B-PQ2_0.gguf")
+
+    def test_legacy_model_bound_preset_is_migrated_to_shared_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            state_path = Path(raw_root) / "state.json"
+            state_path.write_text('{"parameter_presets":{"legacy":{"name":"Legacy","model_id":"old-model","options":{}}}}', encoding="utf-8")
+            with patch.object(api, "STATE_PATH", state_path):
+                listed = api.presets()
+            self.assertIsNone(listed["presets"][0]["model_id"])
+            self.assertIsNone(api._read_json(state_path, {})["parameter_presets"]["legacy"]["model_id"])
 
     def test_prism_rejects_non_bonsai_registration(self) -> None:
         with self.assertRaisesRegex(Exception, "Prism-ML"):
@@ -121,6 +150,51 @@ class LlamaCppManagerTests(unittest.TestCase):
                 self.assertEqual(saved["executable"], str(executable))
                 self.assertEqual(api.runtime_info()["mode"], "custom")
                 self.assertEqual(api.runtime_info()["path"], str(runtime_dir.resolve()))
+
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Objects are Windows-only")
+    def test_child_exits_when_owner_process_exits(self) -> None:
+        lifecycle_path = Path(__file__).parent / "dashboard" / "child_lifecycle.py"
+        self.assertTrue(lifecycle_path.exists(), "missing Windows child lifecycle helper")
+        owner_script = """
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
+
+module_path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("llamacpp_child_lifecycle", module_path)
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+module.bind_child_to_owner_lifetime(child)
+print(child.pid, flush=True)
+"""
+        owner = subprocess.Popen(
+            [sys.executable, "-c", owner_script, str(lifecycle_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert owner.stdout is not None
+        child_pid = int(owner.stdout.readline().strip())
+        owner.terminate()
+        owner.wait(timeout=10)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.stdout.strip().startswith("INFO:"):
+                return
+            time.sleep(0.1)
+        subprocess.run(["taskkill", "/PID", str(child_pid), "/T", "/F"], capture_output=True, check=False)
+        self.fail("child process survived its owner process")
 
 
 if __name__ == "__main__":

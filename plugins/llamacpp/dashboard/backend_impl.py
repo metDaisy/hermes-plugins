@@ -828,7 +828,10 @@ def _server_log_tail(limit: int = 250) -> dict[str, Any]:
 def _server_rows() -> list[dict[str, Any]]:
     kind = _runtime_kind(_state())
     visible = [row for row in _model_rows() if _model_policy.accepts(kind, str(row.get("hf_repo") or ""), [str(row.get("hf_file") or path) for path in row.get("paths", [])] or [str(row.get("hf_file") or "")])]
-    return [{"id": row["id"], "size_bytes": row["size_bytes"], "size_label": row["size_label"]} for row in visible]
+    return [
+        {key: row[key] for key in ("id", "size_bytes", "size_label", "hf_repo", "hf_file", "paths") if key in row}
+        for row in visible
+    ]
 
 
 def _runtime_info() -> dict[str, Any]:
@@ -958,7 +961,10 @@ def _require_compatible_model(kind: str, repo_id: str, paths: list[str]) -> None
 def _local_hf_models() -> dict[str, Any]:
     models, executable, warning = _hf_downloaded_models()
     kind = _runtime_kind(_state())
-    visible = [model for model in models if _model_policy.accepts(kind, str(model.get("repo_id") or ""), ["inventory.gguf"])]
+    visible_repositories = set(_model_policy.visible_repositories(
+        kind, (str(model.get("repo_id") or "") for model in models),
+    ))
+    visible = [model for model in models if str(model.get("repo_id") or "") in visible_repositories]
     return {"models": visible, "warning": warning, "runtime_kind": kind}
 
 
@@ -1494,11 +1500,24 @@ def _normalize_options(options: Any) -> dict[str, str]:
 def _load_presets() -> dict[str, dict[str, Any]]:
     state = _state()
     raw = state.get("parameter_presets")
-    if isinstance(raw, dict):
-        return {str(key): dict(value) for key, value in raw.items() if isinstance(value, dict)}
-    state["parameter_presets"] = {}
-    _save_state(state)
-    return {}
+    if not isinstance(raw, dict):
+        state["parameter_presets"] = {}
+        _save_state(state)
+        return {}
+    migrated = False
+    presets: dict[str, dict[str, Any]] = {}
+    for preset_id, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        preset = dict(value)
+        if preset.get("model_id") is not None:
+            preset["model_id"] = None
+            raw[preset_id] = preset
+            migrated = True
+        presets[str(preset_id)] = preset
+    if migrated:
+        _save_state(state)
+    return presets
 
 
 def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -1531,13 +1550,7 @@ def save_model_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/presets")
 def presets(model_id: str = "") -> dict[str, Any]:
-    wanted = model_id.strip()
-    rows = []
-    for preset_id, value in _load_presets().items():
-        owner = str(value.get("model_id") or "")
-        if wanted and owner not in {"", wanted}:
-            continue
-        rows.append(_preset_row(preset_id, value))
+    rows = [_preset_row(preset_id, value) for preset_id, value in _load_presets().items()]
     rows.sort(key=lambda item: (item["name"].lower(), item["id"]))
     return {"presets": rows}
 
@@ -1549,16 +1562,16 @@ def create_preset(body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="preset name is required")
     if len(name) > 100:
         raise HTTPException(status_code=422, detail="preset name must be at most 100 characters")
-    model_id = str(body.get("model_id") or "").strip() or None
     options = body.get("options")
     if options is None:
-        options = _load_options().get(model_id or "", {})
+        source_model_id = str(body.get("model_id") or "").strip()
+        options = _load_options().get(source_model_id, {})
     normalized = _normalize_options(options)
     now = time.time()
     preset_id = uuid.uuid4().hex[:12]
     state = _state()
     stored = state.setdefault("parameter_presets", {})
-    stored[preset_id] = {"name": name, "model_id": model_id, "options": normalized,
+    stored[preset_id] = {"name": name, "model_id": None, "options": normalized,
                          "created_at": now, "updated_at": now}
     _save_state(state)
     return {"preset": _preset_row(preset_id, stored[preset_id])}
