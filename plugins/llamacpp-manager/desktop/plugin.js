@@ -93,10 +93,18 @@ function RuntimeCard({ status, jobs, onRefresh }) {
   const installed = Boolean(status?.runtime_installed)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [runtimeKind, setRuntimeKind] = useState('llamacpp')
+  const [runtimePath, setRuntimePath] = useState('')
+  const [runtimeSaving, setRuntimeSaving] = useState(false)
   const runtimeJob = (jobs || []).find(job => job.kind === 'runtime-install' && job.status === 'running') || (jobs || []).find(job => job.kind === 'runtime-install' && (job.status === 'error' || job.status === 'done'))
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
   const runtimeBusy = busy || runtimeJob?.status === 'running'
   const serverBusy = serverJob?.status === 'running'
+  useEffect(() => {
+    if (!status) return
+    setRuntimeKind(status.runtime_kind || (status.runtime_mode === 'custom' ? 'prism_ml' : 'llamacpp'))
+    setRuntimePath(status.runtime_path || '')
+  }, [status?.runtime_mode, status?.runtime_path])
   useEffect(() => {
     if (runtimeJob?.status === 'done') setMessage('runtime 업데이트가 완료되었습니다.')
     if (runtimeJob?.status === 'error') setMessage('runtime 설치 실패: 아래 오류를 확인하세요.')
@@ -122,6 +130,17 @@ function RuntimeCard({ status, jobs, onRefresh }) {
       onRefresh()
     } catch (cause) { setMessage(`runtime 설치 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
   }
+  const saveRuntime = async () => {
+    setRuntimeSaving(true)
+    setMessage('')
+    try {
+      const result = await api('/runtime', { method: 'PUT', body: { kind: runtimeKind, path: runtimePath } })
+      setRuntimeKind(result.kind || runtimeKind)
+      setRuntimePath(result.path || '')
+      setMessage(result.requires_restart ? 'runtime 선택을 저장했습니다. 실행 중인 server는 유지되며 다음 start부터 적용됩니다.' : 'runtime 선택을 저장했습니다.')
+      onRefresh()
+    } catch (cause) { setMessage(`runtime 선택 실패: ${cause?.message || String(cause)}`) } finally { setRuntimeSaving(false) }
+  }
   const activeModel = status?.models?.find(model => model.id === status?.active_model_id)
   const device = status?.devices?.[0]
   const backend = status?.backend || status?.runtime_backend || '확인 중'
@@ -139,7 +158,17 @@ function RuntimeCard({ status, jobs, onRefresh }) {
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'active model' }), jsx('dd', { className: 'mt-0.5 min-w-0 truncate text-(--ui-text-secondary)', title: activeModel?.id, children: activeModel?.id || '선택되지 않음' })] }),
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'endpoint' }), jsx('dd', { className: 'mt-0.5 truncate text-(--ui-text-secondary)', title: status?.custom_endpoint?.base_url || status?.server_base_url || undefined, children: status?.custom_endpoint?.base_url ? `${status.custom_endpoint.base_url} · custom 등록` : (status?.server_base_url || 'server 중지') })] })
     ] }),
-    message ? jsx('p', { className: `relative mt-3 text-xs ${message.startsWith('실패') || message.startsWith('runtime 설치 실패') || message.startsWith('llama-server 실행 실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
+    jsxs('div', { className: 'relative mt-4 rounded-md border border-(--ui-stroke-secondary) p-3', children: [
+      jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'llama.cpp runtime 선택' }),
+      jsx('p', { className: `mt-1 text-xs ${muted}`, children: '공식 runtime 또는 Prism-ML 등 다른 llama.cpp 빌드의 llama-server를 사용할 수 있습니다. 외부 runtime은 직접 빌드/다운로드한 디렉터리를 선택합니다.' }),
+      jsxs('div', { className: 'mt-3 grid gap-2 md:grid-cols-[10rem_minmax(0,1fr)_auto]', children: [
+        jsx('select', { className: input, style: themedSelect(), value: runtimeKind, disabled: runtimeSaving || serverBusy, 'aria-label': 'llama.cpp runtime 종류', onChange: event => setRuntimeKind(event.target.value), children: [jsx('option', { style: themedOption, value: 'llamacpp', children: 'llama.cpp official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML llama.cpp' })] }),
+        jsx('input', { className: input, value: runtimePath, disabled: runtimeKind === 'llamacpp' || runtimeSaving || serverBusy, 'aria-label': '외부 llama.cpp 경로', placeholder: '예: E:\\Bonsai-demo 또는 llama-server.exe', onChange: event => setRuntimePath(event.target.value) }),
+        jsx('button', { className: button, disabled: runtimeSaving || serverBusy || (runtimeKind !== 'llamacpp' && !runtimePath.trim()), onClick: saveRuntime, children: runtimeSaving ? '저장 중…' : 'runtime 저장' })
+      ] }),
+      status?.runtime_kind === 'prism_ml' && !status?.runtime_installed ? jsx('p', { className: 'mt-2 text-xs text-(--dt-destructive)', role: 'alert', children: '선택한 Prism-ML runtime에서 llama-server를 찾지 못했습니다.' }) : null
+    ] }),
+    message ? jsx('p', { className: `relative mt-3 text-xs ${message.startsWith('실패') || message.startsWith('runtime 선택 실패') || message.startsWith('runtime 설치 실패') || message.startsWith('llama-server 실행 실패') || message.startsWith('preset 저장 실패') || message.startsWith('preset 적용 실패') || message.startsWith('preset 삭제 실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
     jsx(JobProgress, { job: runtimeJob }),
     jsx(JobProgress, { job: serverJob }),
     jsx(ServerLogPanel, { status, jobs })
@@ -214,8 +243,11 @@ function ModelSettingsEditor({ modelId, refresh, open }) {
   const [saving, setSaving] = useState(false)
   const [fieldErrors, setFieldErrors] = useState({})
   const [message, setMessage] = useState('')
+  const [presetName, setPresetName] = useState('')
+  const [selectedPresetId, setSelectedPresetId] = useState('')
   const settings = useQuery({ queryKey: [ID, 'model-settings', modelId], queryFn: () => api(`/settings/${encodeURIComponent(modelId)}`), enabled: open, refetchOnWindowFocus: false })
   const options = useQuery({ queryKey: [ID, 'model-settings-options', query], queryFn: () => api(`/settings?q=${encodeURIComponent(query)}&limit=20`), enabled: open && query.trim().length > 0, refetchOnWindowFocus: false })
+  const presetsQuery = useQuery({ queryKey: [ID, 'parameter-presets', modelId], queryFn: () => api(`/presets?model_id=${encodeURIComponent(modelId)}`), enabled: open, refetchOnWindowFocus: false })
   const availableOptions = (options.data?.options || []).filter(option => !Object.prototype.hasOwnProperty.call(draft, option.key))
   const selected = availableOptions.find(option => option.key === selectedKey)
   useEffect(() => {
@@ -257,8 +289,45 @@ function ModelSettingsEditor({ modelId, refresh, open }) {
     if (await persist(next)) { setDraft(next); setFieldErrors(previous => { const copy = { ...previous }; delete copy[key]; return copy }) }
   }
   const update = (key, nextValue) => { setDraft(previous => ({ ...previous, [key]: nextValue })); setFieldErrors(previous => { const copy = { ...previous }; delete copy[key]; return copy }) }
+  const savePreset = async () => {
+    if (!presetName.trim()) { setMessage('preset 이름을 입력하세요.'); return }
+    try {
+      await api('/presets', { method: 'POST', body: { name: presetName.trim(), model_id: modelId, options: draft } })
+      await presetsQuery.refetch()
+      setPresetName('')
+      setMessage('현재 parameter를 preset으로 저장했습니다.')
+    } catch (cause) { setMessage(`preset 저장 실패: ${cause?.message || String(cause)}`) }
+  }
+  const applyPreset = async () => {
+    if (!selectedPresetId) return
+    try {
+      const result = await api(`/presets/${encodeURIComponent(selectedPresetId)}/apply`, { method: 'POST', body: { model_id: modelId } })
+      setDraft(result.options || {})
+      await settings.refetch()
+      setMessage(result.requires_restart ? 'preset을 적용했습니다. 현재 server는 유지되며 다음 start에 반영됩니다.' : 'preset을 적용했습니다.')
+      refresh()
+    } catch (cause) { setMessage(`preset 적용 실패: ${cause?.message || String(cause)}`) }
+  }
+  const deletePreset = async () => {
+    if (!selectedPresetId) return
+    try {
+      await api(`/presets/${encodeURIComponent(selectedPresetId)}`, { method: 'DELETE' })
+      await presetsQuery.refetch()
+      setSelectedPresetId('')
+      setMessage('preset을 삭제했습니다.')
+    } catch (cause) { setMessage(`preset 삭제 실패: ${cause?.message || String(cause)}`) }
+  }
   return open ? jsxs('div', { className: 'mt-3 rounded-md border border-(--ui-stroke-secondary) p-3 sm:p-4', children: [
       jsxs('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('p', { className: `text-xs ${muted}`, children: '이 등록 모델에 적용할 llama-server parameter를 수정합니다.' }), jsx('button', { className: compactPrimary, disabled: saving, onClick: () => persist(draft), 'aria-label': `${modelId} parameter 저장`, children: '저장' })] }),
+      jsxs('div', { className: 'mb-4 rounded-md bg-(--ui-bg-tertiary) p-3', children: [
+        jsx('p', { className: 'mb-2 text-xs font-medium text-(--ui-text-primary)', children: 'parameter preset' }),
+        jsxs('div', { className: 'flex flex-wrap gap-2', children: [
+          jsx('select', { className: compactInput, style: themedSelect(), value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: `${preset.name}${preset.model_id ? '' : ' · 공용'}` }, preset.id))] }),
+          jsx('button', { className: compactPrimary, disabled: !selectedPresetId || saving, onClick: applyPreset, children: '적용' }),
+          jsx('button', { className: compactDanger, disabled: !selectedPresetId || saving, onClick: deletePreset, children: '삭제' })
+        ] }),
+        jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx('input', { className: compactInput, value: presetName, 'aria-label': `${modelId} 새 preset 이름`, placeholder: '새 preset 이름', onChange: event => setPresetName(event.target.value), onKeyDown: event => { if (event.key === 'Enter') savePreset() } }), jsx('button', { className: compactPrimary, disabled: saving || !presetName.trim(), onClick: savePreset, children: '현재 설정 저장' })] })
+      ] }),
       settings.isLoading ? jsx('p', { className: muted, role: 'status', children: '현재 설정을 불러오는 중…' }) : null,
       jsx('div', { className: 'grid gap-x-4 gap-y-1 sm:grid-cols-2', children: Object.entries(draft).map(([key, current]) => jsxs('div', { className: 'flex min-w-0 items-start gap-2 border-b border-(--ui-stroke-secondary) py-1.5', children: [jsx('label', { className: 'w-24 shrink-0 truncate pt-2 text-xs font-medium text-(--ui-text-primary)', htmlFor: `parameter-${modelId}-${key}`, children: key }), jsxs('div', { className: 'min-w-0 flex-1', children: [jsxs('div', { className: 'flex min-w-0 items-center gap-1.5', children: [jsx(ParameterControl, { id: `parameter-${modelId}-${key}`, option: settings.data?.metadata?.[key], value: current, className: compactInput, error: fieldErrors[key], describedBy: fieldErrors[key] ? `parameter-error-${modelId}-${key}` : undefined, ariaLabel: `${key} 값`, onChange: event => update(key, event.target.value) }), jsx('button', { className: compactDanger, disabled: saving, onClick: () => remove(key), 'aria-label': `${key} parameter 삭제`, children: '삭제' })] }), fieldErrors[key] ? jsx('p', { id: `parameter-error-${modelId}-${key}`, className: 'mt-1 text-[11px] text-(--dt-destructive)', role: 'alert', children: fieldErrors[key] }) : null] })] }, key)) }),
       jsx('div', { className: 'mt-4 border-t border-(--ui-stroke-secondary) pt-3', children: jsx('p', { className: 'mb-2 text-xs font-medium text-(--ui-text-primary)', children: 'parameter 추가' }) }),

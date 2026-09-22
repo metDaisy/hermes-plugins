@@ -1,0 +1,12 @@
+name: llamacpp-local-pack
+description: Install the local llama.cpp model-provider plugin from the metDaisy Hermes plugin monorepo.
+author: metDaisy
+version: 0.1.0
+
+plugins:
+  - repo: metDaisy/hermes-plugins
+    subdir: plugins/llamacpp-local
+    ref: 32b1c9b63d8c8db8aba918fe22a9289b9e703c38
+
+config: {}
+skills: []

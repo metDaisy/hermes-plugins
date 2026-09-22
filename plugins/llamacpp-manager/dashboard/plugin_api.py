@@ -25,6 +25,11 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException
 
+try:
+    from dashboard.runtimes import get_runtime
+except ImportError:
+    from runtimes import get_runtime
+
 router = APIRouter()
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -55,7 +60,9 @@ _latest_cache: tuple[float, str] | None = None
 
 def _default_state() -> dict[str, Any]:
     return {"active_model_id": None, "tag": "latest", "backend": "auto", "port": 18434,
-            "pid": None, "custom_endpoint": None, "models": {}, "model_settings": {}}
+            "pid": None, "custom_endpoint": None, "models": {}, "model_settings": {},
+            "parameter_presets": {}, "runtime_kind": "llamacpp", "runtime_path": None,
+            "runtime_mode": "official", "custom_runtime_path": None}
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
@@ -447,8 +454,28 @@ def _server_executable_in(root: Path) -> Path | None:
     return None
 
 
+def _runtime_kind(state: dict[str, Any] | None = None) -> str:
+    current = state or _state()
+    raw = current.get("runtime_kind") or current.get("runtime_mode") or "llamacpp"
+    return get_runtime(raw).key
+
+
+def _resolve_server_executable_from_path(raw_path: Path | str) -> Path:
+    """Resolve a user-selected llama-server path through the active adapter."""
+    return get_runtime(_runtime_kind()).resolve_executable(raw_path)
+
+
 def _server_executable(tag: str | None = None, backend: str | None = None) -> Path | None:
-    target = (tag, backend) if tag and backend else _installed_target()
+    if tag and backend:
+        target = (tag, backend)
+    else:
+        state = _state()
+        if _runtime_kind(state) != "llamacpp":
+            try:
+                return _resolve_server_executable_from_path(str(state.get("runtime_path") or state.get("custom_runtime_path") or ""))
+            except RuntimeError:
+                return None
+        target = _installed_target()
     if target is None:
         return None
     return _server_executable_in(RUNTIME_ROOT / target[0] / target[1])
@@ -601,8 +628,8 @@ def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
                 updates.append((path, updated))
         for path, updated in updates:
             _write_profile_config(path, updated)
-    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "base_url": base_url,
-            "model": model_id, "context_length": context_length}
+    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "provider_profile": "llamacpp-local",
+            "base_url": base_url, "model": model_id, "context_length": context_length}
 
 
 def _unregister_custom_endpoint() -> None:
@@ -736,14 +763,10 @@ def _start_server() -> None:
         port = int(raw_port)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"invalid server port: {raw_port}") from exc
-    if isinstance(entry, dict) and entry.get("hf_repo"):
-        command = [str(executable), "--host", "127.0.0.1", "--port", str(port),
-                   "--hf-repo", str(entry["hf_repo"])]
-        if entry.get("hf_file"):
-            command.extend(["--hf-file", str(entry["hf_file"])])
-    else:
-        command = [str(executable), "--host", "127.0.0.1", "--port", str(port),
-                   "--model", str(_active_path(model_id))]
+    model_path = None if isinstance(entry, dict) and entry.get("hf_repo") else _active_path(model_id)
+    adapter = get_runtime(_runtime_kind(state))
+    command = adapter.build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, stored_options,
+                                   model_path=model_path)
     command.extend(_option_cli_args({key: value for key, value in stored_options.items() if key != "port"}))
     SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log = SERVER_LOG_PATH.open("wb")
@@ -800,9 +823,24 @@ def _server_rows() -> list[dict[str, Any]]:
     return [{"id": row["id"], "size_bytes": row["size_bytes"], "size_label": row["size_label"]} for row in _model_rows()]
 
 
+def _runtime_info() -> dict[str, Any]:
+    state = _state()
+    kind = _runtime_kind(state)
+    mode = "official" if kind == "llamacpp" else "custom"
+    raw_path = state.get("runtime_path") or state.get("custom_runtime_path")
+    path = str(Path(str(raw_path)).expanduser().resolve()) if raw_path else None
+    executable = _server_executable()
+    adapter = get_runtime(kind)
+    return {"kind": kind, "mode": mode, "label": adapter.label, "description": adapter.description,
+            "repository": getattr(adapter, "repository", None), "path": path,
+            "executable": str(executable) if executable else None,
+            "installed": executable is not None, "official": kind == "llamacpp"}
+
+
 def _status() -> dict[str, Any]:
     state = _state()
-    target = _installed_target()
+    runtime = _runtime_info()
+    target = _installed_target() if runtime["kind"] == "llamacpp" else None
     tag, backend = target or (str(state.get("installed_tag") or ""), str(state.get("installed_backend") or ""))
     process_alive = _pid_alive(state.get("pid"))
     running = process_alive and _health(int(state.get("port") or 18434))
@@ -821,6 +859,9 @@ def _status() -> dict[str, Any]:
     return {"enabled": True, "tag": tag, "configured_tag": str(state.get("tag") or "latest"),
             "latest_tag": None, "update_available": False, "runtime_installed": bool(_server_executable()),
             "runtime_backend": backend or (_backend() if tag else None), "backend": backend or (_backend() if tag else None),
+            "runtime_mode": runtime["mode"], "runtime_path": runtime["path"],
+            "runtime_executable": runtime["executable"], "runtime_kind": runtime["kind"],
+            "runtime_label": runtime["label"], "runtime_repository": runtime["repository"],
             "devices": _detected_devices(), "server_running": running,
             "server_base_url": f"http://127.0.0.1:{int(state.get('port') or 18434)}" if running else None,
             "custom_endpoint": state.get("custom_endpoint") if running else None,
@@ -991,6 +1032,41 @@ def _option_list() -> list[dict[str, Any]]:
 @router.get("/status")
 def status() -> dict[str, Any]:
     return _status()
+
+
+@router.get("/runtime")
+def runtime_info() -> dict[str, Any]:
+    return _runtime_info()
+
+
+@router.put("/runtime")
+def save_runtime(body: dict[str, Any]) -> dict[str, Any]:
+    requested = body.get("kind") or body.get("mode") or "llamacpp"
+    try:
+        kind = get_runtime(requested).key
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    mode = "official" if kind == "llamacpp" else "custom"
+    custom_path = None
+    if kind != "llamacpp":
+        raw_path = str(body.get("path") or "").strip()
+        if not raw_path:
+            raise HTTPException(status_code=422, detail="custom llama.cpp path is required")
+        try:
+            _resolve_server_executable_from_path(raw_path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        custom_path = str(Path(raw_path).expanduser().resolve())
+    state = _state()
+    state["runtime_kind"] = kind
+    state["runtime_path"] = custom_path
+    state["runtime_mode"] = mode
+    state["custom_runtime_path"] = custom_path
+    _save_state(state)
+    selected = _runtime_info()
+    selected["installed"] = bool(selected["executable"])
+    selected["requires_restart"] = bool(_pid_alive(state.get("pid")))
+    return selected
 
 
 @router.get("/hardware")
@@ -1311,6 +1387,32 @@ def _validate_option_values(options: dict[str, str]) -> None:
                 raise HTTPException(status_code=422, detail=f"parameter '{key}' requires a number") from exc
 
 
+def _normalize_options(options: Any) -> dict[str, str]:
+    if not isinstance(options, dict):
+        raise HTTPException(status_code=422, detail="options must be an object")
+    catalog = {option["key"]: option for option in _option_list()}
+    normalized = {str(key).lstrip("-"): _canonical_option_value(catalog.get(str(key).lstrip("-")), value)
+                  for key, value in options.items()}
+    _validate_option_values(normalized)
+    return normalized
+
+
+def _load_presets() -> dict[str, dict[str, Any]]:
+    state = _state()
+    raw = state.get("parameter_presets")
+    if isinstance(raw, dict):
+        return {str(key): dict(value) for key, value in raw.items() if isinstance(value, dict)}
+    state["parameter_presets"] = {}
+    _save_state(state)
+    return {}
+
+
+def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
+    return {"id": preset_id, "name": str(value.get("name") or preset_id),
+            "model_id": value.get("model_id"), "options": dict(value.get("options") or {}),
+            "created_at": value.get("created_at"), "updated_at": value.get("updated_at")}
+
+
 @router.get("/settings/{model_id}")
 def model_settings(model_id: str) -> dict[str, Any]:
     stored = _load_options().get(model_id, {})
@@ -1323,13 +1425,7 @@ def model_settings(model_id: str) -> dict[str, Any]:
 
 @router.put("/settings/{model_id}")
 def save_model_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    options = body.get("options") or {}
-    if not isinstance(options, dict):
-        raise HTTPException(status_code=422, detail="options must be an object")
-    catalog = {option["key"]: option for option in _option_list()}
-    normalized = {str(key).lstrip("-"): _canonical_option_value(catalog.get(str(key).lstrip("-")), value)
-                  for key, value in options.items()}
-    _validate_option_values(normalized)
+    normalized = _normalize_options(body.get("options") or {})
     all_options = _load_options()
     all_options[model_id] = normalized
     _save_options(all_options)
@@ -1337,6 +1433,71 @@ def save_model_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
     server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
     return {"model_id": model_id, "options": normalized, "applied": False,
             "requires_restart": server_running, "job_id": None}
+
+
+@router.get("/presets")
+def presets(model_id: str = "") -> dict[str, Any]:
+    wanted = model_id.strip()
+    rows = []
+    for preset_id, value in _load_presets().items():
+        owner = str(value.get("model_id") or "")
+        if wanted and owner not in {"", wanted}:
+            continue
+        rows.append(_preset_row(preset_id, value))
+    rows.sort(key=lambda item: (item["name"].lower(), item["id"]))
+    return {"presets": rows}
+
+
+@router.post("/presets")
+def create_preset(body: dict[str, Any]) -> dict[str, Any]:
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="preset name is required")
+    if len(name) > 100:
+        raise HTTPException(status_code=422, detail="preset name must be at most 100 characters")
+    model_id = str(body.get("model_id") or "").strip() or None
+    options = body.get("options")
+    if options is None:
+        options = _load_options().get(model_id or "", {})
+    normalized = _normalize_options(options)
+    now = time.time()
+    preset_id = uuid.uuid4().hex[:12]
+    state = _state()
+    stored = state.setdefault("parameter_presets", {})
+    stored[preset_id] = {"name": name, "model_id": model_id, "options": normalized,
+                         "created_at": now, "updated_at": now}
+    _save_state(state)
+    return {"preset": _preset_row(preset_id, stored[preset_id])}
+
+
+@router.post("/presets/{preset_id}/apply")
+def apply_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    stored = _load_presets()
+    value = stored.get(preset_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail="preset not found")
+    model_id = str(body.get("model_id") or value.get("model_id") or "").strip()
+    if not model_id:
+        raise HTTPException(status_code=422, detail="model_id is required to apply a preset")
+    normalized = _normalize_options(value.get("options") or {})
+    all_options = _load_options()
+    all_options[model_id] = normalized
+    _save_options(all_options)
+    state = _state()
+    server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
+    return {"preset_id": preset_id, "model_id": model_id, "options": normalized,
+            "applied": False, "requires_restart": server_running}
+
+
+@router.delete("/presets/{preset_id}")
+def delete_preset(preset_id: str) -> dict[str, Any]:
+    state = _state()
+    stored = state.get("parameter_presets")
+    if not isinstance(stored, dict) or preset_id not in stored:
+        raise HTTPException(status_code=404, detail="preset not found")
+    stored.pop(preset_id, None)
+    _save_state(state)
+    return {"ok": True, "preset_id": preset_id}
 
 
 @router.post("/sideload")

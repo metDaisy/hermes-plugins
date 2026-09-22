@@ -1,4 +1,4 @@
 name: llamacpp-manager
-version: 0.1.4
+version: 0.1.5
 description: Standalone llama.cpp runtime, HF GGUF downloader, model settings, and local server manager.
 kind: standalone
