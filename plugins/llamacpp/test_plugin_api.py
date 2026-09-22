@@ -119,6 +119,36 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertIsNone(listed["presets"][0]["model_id"])
             self.assertIsNone(api._read_json(state_path, {})["parameter_presets"]["legacy"]["model_id"])
 
+    def test_failed_start_cleanup_preserves_server_log(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            state_path = root / "state.json"
+            log_path = root / "logs" / "llama-server.log"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text("fatal startup detail", encoding="utf-8")
+            with patch.object(api, "STATE_PATH", state_path), patch.object(api, "SERVER_LOG_PATH", log_path), \
+                    patch.object(api, "_unregister_custom_endpoint"), patch.object(api, "_pid_alive", return_value=False):
+                api._stop_server(preserve_log=True)
+            self.assertTrue(log_path.exists())
+            self.assertEqual(log_path.read_text(encoding="utf-8"), "fatal startup detail")
+
+    def test_prism_preset_apply_omits_unmanaged_speculative_options(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            state_path = root / "state.json"
+            options_path = root / "model-options.json"
+            catalog = [
+                {"key": "ctx-size", "name": "--ctx-size", "aliases": ["--ctx-size"], "value_hint": "N", "description": "context", "requires_value": True, "default_value": "4096", "choices": [], "value_kind": "integer", "toggle": False},
+                {"key": "spec-type", "name": "--spec-type", "aliases": ["--spec-type"], "value_hint": "TYPE", "description": "speculative type", "requires_value": True, "default_value": None, "choices": ["draft-mtp"], "value_kind": "choice", "toggle": False},
+                {"key": "spec-draft-n-max", "name": "--spec-draft-n-max", "aliases": ["--spec-draft-n-max"], "value_hint": "N", "description": "draft tokens", "requires_value": True, "default_value": None, "choices": [], "value_kind": "integer", "toggle": False},
+            ]
+            with patch.object(api, "STATE_PATH", state_path), patch.object(api, "OPTIONS_PATH", options_path), \
+                    patch.object(api, "_option_list", return_value=catalog), patch.object(api, "_runtime_kind", return_value="prism_ml"):
+                created = api.create_preset({"name": "shared", "options": {"ctx-size": "8192", "spec-type": "draft-mtp", "spec-draft-n-max": "1"}})
+                applied = api.apply_preset(created["preset"]["id"], {"model_id": "bonsai"})
+            self.assertEqual(applied["options"], {"ctx-size": "8192"})
+            self.assertEqual(applied["omitted_options"], ["spec-draft-n-max", "spec-type"])
+
     def test_prism_rejects_non_bonsai_registration(self) -> None:
         with self.assertRaisesRegex(Exception, "Prism-ML"):
             api._require_compatible_model("prism_ml", "ornith-ai/Ornith-1.5-35B-A3B-GGUF", ["Ornith-1.5-35B-Q6_K.gguf"])

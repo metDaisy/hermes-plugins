@@ -650,7 +650,7 @@ def _unregister_custom_endpoint() -> None:
             _write_profile_config(path, updated)
 
 
-def _stop_server() -> None:
+def _stop_server(*, preserve_log: bool = False) -> None:
     state = _state()
     pid = state.get("pid")
     if _pid_alive(pid):
@@ -662,7 +662,8 @@ def _stop_server() -> None:
     state["custom_endpoint"] = None
     _save_state(state)
     _unregister_custom_endpoint()
-    SERVER_LOG_PATH.unlink(missing_ok=True)
+    if not preserve_log:
+        SERVER_LOG_PATH.unlink(missing_ok=True)
 
 
 def _watch_server_process(process: subprocess.Popen[Any]) -> None:
@@ -675,7 +676,7 @@ def _watch_server_process(process: subprocess.Popen[Any]) -> None:
         state["custom_endpoint"] = None
         _save_state(state)
         _unregister_custom_endpoint()
-        SERVER_LOG_PATH.unlink(missing_ok=True)
+        # An unexpected exit is diagnostic evidence, not normal cleanup.
 
     threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
 
@@ -782,9 +783,9 @@ def _start_server() -> None:
     try:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                    cwd=str(executable.parent), creationflags=flags)
-    except OSError:
+    except OSError as exc:
+        log.write(f"llama-server spawn failed: {exc}\n".encode("utf-8", errors="replace"))
         log.close()
-        SERVER_LOG_PATH.unlink(missing_ok=True)
         raise
     log.close()
     state["pid"] = process.pid
@@ -794,13 +795,15 @@ def _start_server() -> None:
     deadline = time.time() + 60
     while time.time() < deadline:
         if process.poll() is not None:
-            _stop_server()
-            raise RuntimeError("llama-server exited during startup")
+            _stop_server(preserve_log=True)
+            tail = _server_log_tail(limit=40).get("lines", [])
+            detail = "\n".join(tail[-40:])
+            raise RuntimeError("llama-server exited during startup" + (f"\n{detail}" if detail else ""))
         if _health(port):
             try:
                 endpoint = _register_custom_endpoint(port, model_id)
             except Exception as exc:
-                _stop_server()
+                _stop_server(preserve_log=True)
                 raise RuntimeError(f"custom endpoint registration failed: {exc}") from exc
             state = _state()
             if state.get("pid") == process.pid:
@@ -808,7 +811,7 @@ def _start_server() -> None:
                 _save_state(state)
             return
         time.sleep(0.5)
-    _stop_server()
+    _stop_server(preserve_log=True)
     raise RuntimeError("llama-server did not become healthy within 60 seconds")
 
 
@@ -864,12 +867,10 @@ def _status() -> dict[str, Any]:
             state["custom_endpoint"] = None
             _save_state(state)
         _unregister_custom_endpoint()
-        SERVER_LOG_PATH.unlink(missing_ok=True)
     elif not running:
         state["custom_endpoint"] = None
         _save_state(state)
         _unregister_custom_endpoint()
-        SERVER_LOG_PATH.unlink(missing_ok=True)
     return {"enabled": True, "tag": tag, "runtime_version": runtime_version, "configured_tag": str(state.get("tag") or "latest"),
             "latest_tag": None, "update_available": False, "runtime_installed": bool(_server_executable()),
             "runtime_backend": backend or (_backend() if tag else None), "backend": backend or (_backend() if tag else None),
@@ -1587,13 +1588,17 @@ def apply_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     if not model_id:
         raise HTTPException(status_code=422, detail="model_id is required to apply a preset")
     normalized = _normalize_options(value.get("options") or {})
+    omitted_options: list[str] = []
+    if _runtime_kind(_state()) == "prism_ml":
+        omitted_options = sorted(key for key in normalized if key.startswith("spec-"))
+        normalized = {key: option_value for key, option_value in normalized.items() if key not in omitted_options}
     all_options = _load_options()
     all_options[model_id] = normalized
     _save_options(all_options)
     state = _state()
     server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
     return {"preset_id": preset_id, "model_id": model_id, "options": normalized,
-            "applied": False, "requires_restart": server_running}
+            "omitted_options": omitted_options, "applied": False, "requires_restart": server_running}
 
 
 @router.delete("/presets/{preset_id}")
