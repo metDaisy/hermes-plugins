@@ -1,7 +1,7 @@
 import React from 'react'
 import pluginSdk from '@hermes/plugin-sdk'
 
-const { createElement, useEffect, useMemo, useState } = React
+const { createElement, useEffect, useMemo, useRef, useState } = React
 const { ROUTES_AREA, SIDEBAR_NAV_AREA, queryClient, useQuery } = pluginSdk
 const jsx = (type, props, key) => createElement(type, key === undefined ? props : { ...props, key })
 const jsxs = jsx
@@ -87,9 +87,14 @@ function ServerLogPanel({ status, jobs }) {
     if (open && status?.server_running === false) logQuery.refetch()
   }, [open, status?.server_running])
   const lines = logQuery.data?.lines || []
+  const logRef = useRef(null)
+  useEffect(() => {
+    if (!open || !logRef.current) return
+    logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [open, lines])
   return jsxs('section', { className: 'relative mt-3 overflow-hidden rounded-md border border-(--ui-stroke-secondary)', 'aria-labelledby': 'llama-server-log-title', children: [
     jsxs('div', { className: 'flex items-center justify-between gap-3 bg-(--ui-bg-tertiary) px-3 py-2', children: [jsx('h2', { id: 'llama-server-log-title', className: 'text-xs font-medium text-(--ui-text-primary)', children: 'llama-server log' }), jsxs('div', { className: 'flex items-center gap-2', children: [open ? jsx('button', { className: 'text-xs text-(--ui-text-secondary) hover:text-(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text-(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] })] }),
-    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg-(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text-(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama-server log', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : 'llama-server log가 아직 없습니다.' }) : null
+    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg-(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text-(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama-server log', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : 'llama-server log가 아직 없습니다.' }) : null
   ] })
 }
 
