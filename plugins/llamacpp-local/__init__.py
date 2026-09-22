@@ -11,7 +11,7 @@ from providers import register_provider
 from providers.base import ProviderProfile
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18434/v1"
-DEFAULT_MODEL = "Ternary-Bonsai-2-27B-gguf"
+DEFAULT_MODEL = "Ternary-Bonsai-2-27B-PQ2_0"
 
 
 class LlamaCppLocalProfile(ProviderProfile):
@@ -44,6 +44,7 @@ llamacpp_local = LlamaCppLocalProfile(
     model_aliases={
         "bonsai-2": DEFAULT_MODEL,
         "ternary-bonsai-2": DEFAULT_MODEL,
+        "bonsai-2-pq2": DEFAULT_MODEL,
     },
 )
 

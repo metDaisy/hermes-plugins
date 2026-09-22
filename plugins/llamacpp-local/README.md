@@ -33,12 +33,14 @@ adapter execution, HF GGUF registration, presets, server lifecycle, and logs.
    ```yaml
    model:
      provider: llamacpp-local
-     default: Ternary-Bonsai-2-27B-gguf
+     default: Ternary-Bonsai-2-27B-PQ2_0
    ```
 
-If the registered model appears under a different `/v1/models` id, use that id
-as `model.default`. The provider profile's fallback id is only a bootstrap
-value; live model discovery is authoritative once the server is running.
+For the Prism Bonsai 2 repository, select `Ternary-Bonsai-2-27B-PQ2_0.gguf`
+for an RTX 5080-class Blackwell GPU. If the registered model appears under a
+different `/v1/models` id, use that id as `model.default`. The provider
+profile's fallback id is only a bootstrap value; live model discovery is
+authoritative once the server is running.
 
 To use another port, set `model.base_url` to the server's `/v1` endpoint. The
 manager's default port is `18434`.

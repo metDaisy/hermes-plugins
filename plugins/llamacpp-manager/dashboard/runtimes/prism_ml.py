@@ -31,7 +31,9 @@ class PrismMlRuntime:
                       options: dict[str, str], model_path: Path | None = None) -> list[str]:
         command = build_server_command(executable, port, entry, model_path)
         repo = str(entry.get("hf_repo") or "").lower()
-        if "bonsai-2" in repo and "jinja" not in {str(key).lstrip("-") for key in options}:
-            # Bonsai's chat/tool template is required for its agentic prompt format.
+        model_name = str(model_id or "").lower()
+        is_bonsai_2 = "bonsai-2" in repo or "bonsai-2-27b" in model_name
+        if is_bonsai_2 and "jinja" not in {str(key).lstrip("-") for key in options}:
+            # Bonsai 2's native OpenAI tool-call format requires --jinja.
             command[5:5] = ["--jinja"]
         return command

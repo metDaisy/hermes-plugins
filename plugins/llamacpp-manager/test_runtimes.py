@@ -35,7 +35,11 @@ class RuntimeAdapterTests(unittest.TestCase):
         entry = {"hf_repo": "prism-ml/Ternary-Bonsai-2-27B-gguf", "hf_file": "model.gguf"}
         prism_command = get_runtime("prism_ml").build_command(executable, 18434, "model", entry, {})
         official_command = get_runtime("llamacpp").build_command(executable, 18434, "model", entry, {})
+        local_command = get_runtime("prism_ml").build_command(
+            executable, 18434, "Ternary-Bonsai-2-27B-PQ2_0", {"paths": ["model.gguf"]}, {}
+        )
         self.assertIn("--jinja", prism_command)
+        self.assertIn("--jinja", local_command)
         self.assertNotIn("--jinja", official_command)
         self.assertEqual(prism_command[-2:], ["--hf-file", "model.gguf"])
 

@@ -100,6 +100,7 @@ function RuntimeCard({ status, jobs, onRefresh }) {
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
   const runtimeBusy = busy || runtimeJob?.status === 'running'
   const serverBusy = serverJob?.status === 'running'
+  const externalRuntime = runtimeKind !== 'llamacpp'
   useEffect(() => {
     if (!status) return
     setRuntimeKind(status.runtime_kind || (status.runtime_mode === 'custom' ? 'prism_ml' : 'llamacpp'))
@@ -122,6 +123,10 @@ function RuntimeCard({ status, jobs, onRefresh }) {
     try { await api('/server', { method: 'POST', body: { action } }); setMessage(action === 'start' ? 'server 시작 요청을 보냈습니다.' : 'server 중지 요청을 보냈습니다.'); onRefresh() } catch (cause) { setMessage(`실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
   }
   const install = async () => {
+    if (externalRuntime) {
+      setMessage('Prism-ML runtime은 외부 경로를 저장한 뒤 사용합니다. 공식 runtime 설치를 실행하지 않습니다.')
+      return
+    }
     setBusy(true)
     setMessage('')
     try {
@@ -150,7 +155,7 @@ function RuntimeCard({ status, jobs, onRefresh }) {
       jsx('div', { className: 'min-w-0', children: [jsx('div', { className: 'mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-(--ui-text-tertiary)', children: 'Local inference control plane' }), jsx('h1', { id: 'llamacpp-manager-title', className: 'text-2xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-2 max-w-xl ${muted}`, children: '독립 plugin API로 모델 검색, GGUF 다운로드, runtime과 llama-server 상태를 관리합니다.' })] }),
       jsx('div', { className: 'pt-1 font-mono text-sm text-(--ui-text-tertiary)', children: `version: ${status?.tag || 'unknown'}` })
     ] }),
-    jsxs('div', { className: 'relative mt-5 flex flex-wrap items-center gap-2', children: [jsx(Badge, { tone: status?.server_running ? 'good' : 'warn', children: status?.server_running ? 'running' : 'stopped' }), jsx(Badge, { children: `${status?.models?.length || 0} registered` }), jsx('button', { className: primary, disabled: runtimeBusy || serverBusy, onClick: install, children: installed ? 'runtime 설치/업데이트' : 'runtime 설치' }), status?.server_running ? jsx('button', { className: button, disabled: runtimeBusy || serverBusy, onClick: () => serverAction('stop'), 'aria-label': 'llama-server 중지', children: 'stop' }) : jsx('button', { className: button, disabled: runtimeBusy || serverBusy || !installed || !status?.active_model_id, title: status?.active_model_id ? '선택된 모델로 server 시작' : '먼저 등록 모델에서 선택을 눌러 모델을 지정하세요', onClick: () => serverAction('start'), 'aria-label': status?.active_model_id ? 'llama-server 시작' : '모델을 선택한 뒤 llama-server 시작', children: serverBusy ? 'starting…' : status?.active_model_id ? 'start' : '모델 선택 후 시작' }), jsx('button', { className: button, disabled: runtimeBusy || serverBusy, onClick: onRefresh, 'aria-label': 'llama.cpp 상태 새로고침', children: '↻ 새로고침' })] }),
+    jsxs('div', { className: 'relative mt-5 flex flex-wrap items-center gap-2', children: [jsx(Badge, { tone: status?.server_running ? 'good' : 'warn', children: status?.server_running ? 'running' : 'stopped' }), jsx(Badge, { children: `${status?.models?.length || 0} registered` }), jsx('button', { className: primary, disabled: externalRuntime || runtimeBusy || serverBusy, onClick: install, title: externalRuntime ? 'Prism-ML runtime은 아래 경로를 저장해 사용합니다.' : undefined, children: externalRuntime ? 'Prism 경로 사용' : installed ? 'runtime 설치/업데이트' : 'runtime 설치' }), status?.server_running ? jsx('button', { className: button, disabled: runtimeBusy || serverBusy, onClick: () => serverAction('stop'), 'aria-label': 'llama-server 중지', children: 'stop' }) : jsx('button', { className: button, disabled: runtimeBusy || serverBusy || !installed || !status?.active_model_id, title: status?.active_model_id ? '선택된 모델로 server 시작' : '먼저 등록 모델에서 선택을 눌러 모델을 지정하세요', onClick: () => serverAction('start'), 'aria-label': status?.active_model_id ? 'llama-server 시작' : '모델을 선택한 뒤 llama-server 시작', children: serverBusy ? 'starting…' : status?.active_model_id ? 'start' : '모델 선택 후 시작' }), jsx('button', { className: button, disabled: runtimeBusy || serverBusy, onClick: onRefresh, 'aria-label': 'llama.cpp 상태 새로고침', children: '↻ 새로고침' })] }),
     jsxs('dl', { className: 'relative mt-4 grid grid-cols-2 gap-x-5 gap-y-3 rounded-md bg-(--ui-bg-tertiary) px-3 py-3 text-xs sm:grid-cols-5', children: [
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'backend' }), jsx('dd', { className: 'mt-0.5 font-mono text-(--ui-text-secondary)', children: backend })] }),
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'device' }), jsx('dd', { className: 'mt-0.5 min-w-0 truncate text-(--ui-text-secondary)', title: device?.name || undefined, children: device?.name || '감지되지 않음' })] }),
