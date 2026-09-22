@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from dashboard.backends import backend_view, get_runtime, runtime_ids
+from dashboard.domain.prism_catalog import PrismCatalog
 
 
 class RuntimeAdapterTests(unittest.TestCase):
@@ -26,6 +27,13 @@ class RuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(prism.label, "Prism-ML llama.cpp")
         self.assertEqual(prism.managed_root, str(machine_root / "runtimes" / "prism-ml"))
         self.assertEqual(prism.version, "prism-b10709-9a9394a")
+
+    def test_prism_catalog_rejects_legacy_and_unknown_quantizations(self) -> None:
+        catalog = PrismCatalog()
+        self.assertTrue(catalog.accepts("prism-ml/Ternary-Bonsai-2-27B-gguf", ["Ternary-Bonsai-2-27B-PQ2_0.gguf"]))
+        self.assertFalse(catalog.accepts("prism-ml/Ternary-Bonsai-2-27B-gguf", ["Ternary-Bonsai-2-27B-Q6_K.gguf"]))
+        self.assertFalse(catalog.accepts("prism-ml/Ternary-Bonsai-8B-gguf", ["Ternary-Bonsai-8B-Q2_0.gguf"]))
+        self.assertFalse(catalog.accepts("prism-ml/unknown", ["model-PQ2_0.gguf"]))
 
     def test_prism_backend_accepts_only_prism_bonsai_gguf(self) -> None:
         prism = get_runtime("prism_ml")

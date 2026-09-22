@@ -27,8 +27,12 @@ from fastapi import APIRouter, HTTPException
 
 try:
     from dashboard.backends import backend_view, get_backend
+    from dashboard.application.download_progress import DownloadProgressTracker
+    from dashboard.application.model_policy import ModelPolicyService
 except ImportError:
     from backends import backend_view, get_backend
+    from application.download_progress import DownloadProgressTracker
+    from application.model_policy import ModelPolicyService
 
 router = APIRouter()
 
@@ -57,6 +61,8 @@ _jobs_lock = threading.RLock()
 _state_lock = threading.RLock()
 _option_cache_lock = threading.RLock()
 _latest_cache: tuple[float, str] | None = None
+_model_policy = ModelPolicyService()
+_download_progress = DownloadProgressTracker()
 
 
 def _default_state() -> dict[str, Any]:
@@ -820,8 +826,8 @@ def _server_log_tail(limit: int = 250) -> dict[str, Any]:
 
 
 def _server_rows() -> list[dict[str, Any]]:
-    adapter = get_backend(_runtime_kind(_state()))
-    visible = [row for row in _model_rows() if adapter.accepts_model(str(row.get("hf_repo") or ""), [str(row.get("hf_file") or path) for path in row.get("paths", [])] or [str(row.get("hf_file") or "")])]
+    kind = _runtime_kind(_state())
+    visible = [row for row in _model_rows() if _model_policy.accepts(kind, str(row.get("hf_repo") or ""), [str(row.get("hf_file") or path) for path in row.get("paths", [])] or [str(row.get("hf_file") or "")])]
     return [{"id": row["id"], "size_bytes": row["size_bytes"], "size_label": row["size_label"]} for row in visible]
 
 
@@ -887,8 +893,7 @@ def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
         raise RuntimeError("hf CLI was not found on PATH")
     uri = f"hf://{repo}/{path}"
     if job is not None:
-        job.update({"phase": "downloading", "detail": f"다운로드 중: {Path(path).name}", "percent":
-                    round(part_index / max(1, part_count) * 100)})
+        _download_progress.begin(job, f"다운로드 중: {Path(path).name}")
     process = subprocess.Popen(
         [executable, "download", uri, "--format", "quiet"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
@@ -917,8 +922,7 @@ def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
             if not matches:
                 continue
             file_percent = min(100, max(0, int(matches[-1])))
-            overall = round((part_index + file_percent / 100) / max(1, part_count) * 100)
-            job["percent"] = min(100, max(0, overall))
+            _download_progress.observe_percent(job, file_percent, part_index, part_count)
 
     stdout_thread = threading.Thread(target=consume_stdout, daemon=True, name="llamacpp-hf-stdout")
     stderr_thread = threading.Thread(target=consume_stderr, daemon=True, name="llamacpp-hf-progress")
@@ -946,15 +950,15 @@ def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
 
 
 def _require_compatible_model(kind: str, repo_id: str, paths: list[str]) -> None:
-    if not get_backend(kind).accepts_model(repo_id, paths):
-        raise HTTPException(status_code=422, detail="Prism-ML backend에는 Prism-ML Bonsai/Ternary GGUF 모델만 등록할 수 있습니다")
+    version = str(_state().get("prism_release_tag") or "") or None
+    if not _model_policy.accepts(kind, repo_id, paths, version):
+        raise HTTPException(status_code=422, detail="Prism-ML backend에는 catalog에 등록된 Prism Bonsai/Ternary GGUF quant만 등록할 수 있습니다")
 
 
 def _local_hf_models() -> dict[str, Any]:
     models, executable, warning = _hf_downloaded_models()
     kind = _runtime_kind(_state())
-    adapter = get_backend(kind)
-    visible = [model for model in models if adapter.accepts_model(str(model.get("repo_id") or ""), ["inventory.gguf"])]
+    visible = [model for model in models if _model_policy.accepts(kind, str(model.get("repo_id") or ""), ["inventory.gguf"])]
     return {"models": visible, "warning": warning, "runtime_kind": kind}
 
 
@@ -1356,10 +1360,10 @@ def search(q: str = "", limit: int = 20) -> dict[str, Any]:
         payload = _http_json(url)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Hugging Face search failed: {exc}") from exc
-    adapter = get_backend(_runtime_kind(_state()))
+    kind = _runtime_kind(_state())
     hits = [{"repo": str(item.get("id", "")), "downloads": int(item.get("downloads") or 0)}
             for item in payload if isinstance(item, dict) and item.get("id")]
-    return {"hits": [hit for hit in hits if adapter.accepts_model(hit["repo"], ["candidate.gguf"])]}
+    return {"hits": [hit for hit in hits if _model_policy.accepts(kind, hit["repo"], ["candidate.gguf"])]}
 
 
 @router.get("/repo")
@@ -1394,7 +1398,7 @@ def download_browsed(body: dict[str, Any]) -> dict[str, Any]:
     _require_compatible_model(_runtime_kind(_state()), repo_id, paths)
     model_id = _model_id(Path(paths[0]))
     job = _job("model-download", model_id)
-    job.update({"phase": "downloading", "percent": 0})
+    _download_progress.begin(job, f"다운로드 준비: {model_id}")
 
     def run() -> None:
         downloaded: list[Path] = []

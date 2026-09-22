@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from .base import build_server_command, resolve_server_executable
+try:
+    from dashboard.domain.prism_catalog import PrismCatalog
+except ImportError:
+    from domain.prism_catalog import PrismCatalog
 
 
 class PrismMlBackend:
@@ -19,10 +23,11 @@ class PrismMlBackend:
     def runtime_version(self, state: dict[str, Any]) -> str | None:
         return str(state.get("prism_release_tag") or "") or None
 
+    def __init__(self, catalog: PrismCatalog | None = None) -> None:
+        self._catalog = catalog or PrismCatalog()
+
     def accepts_model(self, repo_id: str, paths: list[str]) -> bool:
-        repo = str(repo_id or "").strip().lower()
-        names = " ".join(str(path).lower() for path in paths)
-        return repo.startswith("prism-ml/") and bool(paths) and all(name.endswith(".gguf") for name in paths) and ("bonsai" in repo or "bonsai" in names or "ternary" in repo or "ternary" in names)
+        return self._catalog.accepts(repo_id, paths)
 
     def resolve_executable(self, raw_path: Path | str) -> Path:
         path = Path(str(raw_path)).expanduser()
