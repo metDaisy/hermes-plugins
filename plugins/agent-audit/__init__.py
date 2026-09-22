@@ -15,6 +15,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .audit_storage import database_path, storage_root
+except ImportError:
+    import sys
+
+    plugin_root = str(Path(__file__).resolve().parent)
+    if plugin_root not in sys.path:
+        sys.path.insert(0, plugin_root)
+    from audit_storage import database_path, storage_root
+
 
 _LOCK = threading.Lock()
 _STATE_LOCK = threading.Lock()
@@ -30,12 +40,8 @@ _MAX_FAILURE_SUMMARY = 600
 
 
 def _find_project_root() -> Path:
-    """Find the repository root in both project-local and monorepo layouts."""
-    module_path = Path(__file__).resolve()
-    for candidate in module_path.parents:
-        if (candidate / ".git").exists():
-            return candidate
-    return module_path.parents[3]
+    """Find the repository/profile root used by all plugin surfaces."""
+    return storage_root(__file__)
 
 
 _PROJECT_ROOT = _find_project_root()
@@ -156,7 +162,7 @@ def _project_dir() -> Path:
 
 
 def _db_path() -> Path:
-    return _project_dir() / ".hermes" / "audit.db"
+    return database_path(__file__)
 
 
 def _safe_path(value: Any) -> str | None:

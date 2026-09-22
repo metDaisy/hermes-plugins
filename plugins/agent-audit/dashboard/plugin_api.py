@@ -9,9 +9,19 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+try:
+    from ..audit_storage import database_path
+except ImportError:
+    import sys
+
+    plugin_root = str(Path(__file__).resolve().parents[1])
+    if plugin_root not in sys.path:
+        sys.path.insert(0, plugin_root)
+    from audit_storage import database_path
+
 router = APIRouter()
 
-_DB_PATH = Path(__file__).resolve().parents[3] / "audit.db"
+_DB_PATH = database_path(__file__)
 _MAX_LIMIT = 200
 _SAFE_FIELDS = {
     "schema_version", "timestamp", "event", "profile_name", "session_id", "task_id",

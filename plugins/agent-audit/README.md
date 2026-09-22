@@ -18,7 +18,7 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.5.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.5.1`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`

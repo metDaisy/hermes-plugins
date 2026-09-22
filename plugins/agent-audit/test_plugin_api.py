@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from audit_storage import database_path
 
 
 _API = Path(__file__).parent / "dashboard" / "plugin_api.py"
@@ -90,6 +93,20 @@ def test_summary_groups_sqlite_events_by_profile(tmp_path: Path) -> None:
         "event_types": {"tool_call": 1, "validation_result": 1},
         "statuses": {"passed": 1, "success": 1},
     }
+
+
+def test_installed_surfaces_share_profile_database_path(tmp_path: Path) -> None:
+    profile_home = tmp_path / "profiles" / "main"
+    module_file = profile_home / "plugins" / "agent-audit" / "dashboard" / "plugin_api.py"
+    previous = os.environ.get("HERMES_HOME")
+    os.environ["HERMES_HOME"] = str(profile_home)
+    try:
+        assert database_path(module_file) == tmp_path / "profiles" / ".hermes" / "audit.db"
+    finally:
+        if previous is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = previous
 
 
 if __name__ == "__main__":
