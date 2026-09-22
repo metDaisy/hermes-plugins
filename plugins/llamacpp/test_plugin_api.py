@@ -59,6 +59,17 @@ class LlamaCppManagerTests(unittest.TestCase):
                 "choices": [],
                 "value_kind": "integer",
                 "toggle": False,
+            }, {
+                "key": "no-mmproj",
+                "name": "--no-mmproj",
+                "aliases": ["--no-mmproj"],
+                "value_hint": "",
+                "description": "disable automatic mmproj",
+                "requires_value": False,
+                "default_value": None,
+                "choices": [],
+                "value_kind": "string",
+                "toggle": False,
             }]
 
             with patch.object(api, "STATE_PATH", state_path), patch.object(api, "OPTIONS_PATH", options_path), \
@@ -71,11 +82,14 @@ class LlamaCppManagerTests(unittest.TestCase):
                 self.assertEqual([item["name"] for item in listed["presets"]], ["Coding"])
                 self.assertEqual(listed["presets"][0]["options"], {"ctx-size": "8192"})
                 self.assertIsNone(listed["presets"][0]["model_id"])
+                renamed = api.rename_preset(preset_id, {"name": "Coding 32K"})
+                self.assertEqual(renamed["preset"]["name"], "Coding 32K")
+                self.assertEqual(api.presets()["presets"][0]["name"], "Coding 32K")
 
-                api.save_model_settings("model-b", {"options": {"ctx-size": "1024"}})
+                api.save_model_settings("model-b", {"options": {"ctx-size": "1024", "no-mmproj": ""}})
                 applied = api.apply_preset(preset_id, {"model_id": "model-b"})
-                self.assertEqual(applied["options"], {"ctx-size": "8192"})
-                self.assertEqual(api.model_settings("model-b")["options"], {"ctx-size": "8192"})
+                self.assertEqual(applied["options"], {"ctx-size": "8192", "no-mmproj": ""})
+                self.assertEqual(api.model_settings("model-b")["options"], {"ctx-size": "8192", "no-mmproj": ""})
 
                 deleted = api.delete_preset(preset_id)
                 self.assertEqual(deleted, {"ok": True, "preset_id": preset_id})
@@ -149,6 +163,12 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertEqual(applied["options"], {"ctx-size": "8192"})
             self.assertEqual(applied["omitted_options"], ["spec-draft-n-max", "spec-type"])
 
+    def test_model_card_exposes_shared_preset_selection_before_server_start(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        self.assertIn("모델 시작 preset", source)
+        self.assertIn("model-card-presets", source)
+        self.assertIn("/presets/${encodeURIComponent(selectedPresetId)}/apply", source)
+
     def test_prism_rejects_non_bonsai_registration(self) -> None:
         with self.assertRaisesRegex(Exception, "Prism-ML"):
             api._require_compatible_model("prism_ml", "ornith-ai/Ornith-1.5-35B-A3B-GGUF", ["Ornith-1.5-35B-Q6_K.gguf"])
@@ -180,6 +200,49 @@ class LlamaCppManagerTests(unittest.TestCase):
                 self.assertEqual(saved["executable"], str(executable))
                 self.assertEqual(api.runtime_info()["mode"], "custom")
                 self.assertEqual(api.runtime_info()["path"], str(runtime_dir.resolve()))
+    def test_flag_parameter_accepts_empty_value(self) -> None:
+        flag = {"key": "no-mmproj", "name": "--no-mmproj", "aliases": ["--no-mmproj"],
+                "value_hint": "", "description": "disable automatic mmproj", "requires_value": False,
+                "default_value": None, "choices": [], "value_kind": "string", "toggle": False}
+        with patch.object(api, "_option_list", return_value=[flag]):
+            self.assertEqual(api._normalize_options({"no-mmproj": ""}), {"no-mmproj": ""})
+
+    def test_option_catalog_marks_decimal_and_no_value_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            executable = root / "llama-server.exe"
+            executable.write_bytes(b"placeholder")
+            help_text = """--temp N                             temperature (default: 0.80)
+--mmproj-auto, --no-mmproj, --no-mmproj-auto
+                                        whether to use multimodal projector\n"""
+            result = subprocess.CompletedProcess([str(executable), "--help"], 0, help_text, "")
+            with patch.object(api, "_server_executable", return_value=executable), \
+                    patch.object(api, "OPTION_METADATA_CACHE_PATH", root / "options.json"), \
+                    patch.object(api, "_option_catalog_cache", None), \
+                    patch.object(api.subprocess, "run", return_value=result):
+                catalog = {item["key"]: item for item in api._option_list()}
+            self.assertEqual(catalog["temp"]["value_kind"], "number")
+            self.assertFalse(catalog["no-mmproj"]["requires_value"])
+            self.assertFalse(catalog["mmproj-auto"]["requires_value"])
+
+    def test_model_card_preset_and_flag_parameter_validation(self) -> None:
+        desktop_source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        self.assertIn("import React from 'react'", desktop_source)
+        self.assertIn("import pluginSdk from '@hermes/plugin-sdk'", desktop_source)
+        self.assertNotIn("react/jsx-runtime", desktop_source)
+        self.assertIn("const jsxs = jsx", desktop_source)
+        self.assertIn("const validateDraft = (next, extraMetadata = {})", desktop_source)
+        self.assertIn("persist(next, { [selectedKey]: selected })", desktop_source)
+        self.assertIn("if (option && !option.requires_value) return jsx('span'", desktop_source)
+        self.assertIn("option?.value_kind === 'number' ? 'any'", desktop_source)
+        self.assertIn("method: 'PATCH', body: { name: presetRename.trim() }", desktop_source)
+        self.assertIn("children: '이름 변경'", desktop_source)
+        self.assertIn("children: '저장'", desktop_source)
+        self.assertIn(
+            "jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),\n"
+            "        jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [",
+            desktop_source,
+        )
 
 
     @unittest.skipUnless(os.name == "nt", "Windows Job Objects are Windows-only")

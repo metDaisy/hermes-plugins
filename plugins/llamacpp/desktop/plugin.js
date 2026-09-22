@@ -1,6 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
-import { jsx, jsxs } from 'react/jsx-runtime'
-import { ROUTES_AREA, SIDEBAR_NAV_AREA, queryClient, useQuery } from '@hermes/plugin-sdk'
+import React from 'react'
+import pluginSdk from '@hermes/plugin-sdk'
+
+const { createElement, useEffect, useMemo, useState } = React
+const { ROUTES_AREA, SIDEBAR_NAV_AREA, queryClient, useQuery } = pluginSdk
+const jsx = (type, props, key) => createElement(type, key === undefined ? props : { ...props, key })
+const jsxs = jsx
 
 const ID = 'llamacpp'
 const LOG_NEWLINE = String.fromCharCode(10)
@@ -129,16 +133,29 @@ function ParameterSummary({ options, order }) {
 
 function ModelRow({ model, status, refresh }) {
   const [busy, setBusy] = useState(false)
-  const [parameterOpen, setParameterOpen] = useState(false)
+  const [selectedPresetId, setSelectedPresetId] = useState('')
+  const [presetMessage, setPresetMessage] = useState('')
   const loaded = Boolean(status?.loaded_models && Object.prototype.hasOwnProperty.call(status.loaded_models, model.id))
   const isActive = status?.active_model_id === model.id
   const display = model.id || 'unknown model'
   const parameterQuery = useQuery({ queryKey: [ID, 'model-settings', model.id], queryFn: () => api(`/settings/${encodeURIComponent(model.id)}`), refetchOnWindowFocus: false })
+  const presetsQuery = useQuery({ queryKey: [ID, 'model-card-presets'], queryFn: () => api('/presets'), refetchOnWindowFocus: false })
   const source = model.hf_repo ? 'HF cache · native serving' : 'local GGUF path'
   const serverUsing = Boolean(status?.server_running && isActive)
   const activate = async () => { setBusy(true); try { await api('/activate', { method: 'POST', body: { model_id: model.id } }); refresh() } finally { setBusy(false) } }
   const eject = async () => { setBusy(true); try { await api('/eject', { method: 'POST', body: { model_id: model.id } }); refresh() } finally { setBusy(false) } }
   const remove = async () => { if (!window.confirm(`'${display}' 모델을 삭제할까요?`)) return; setBusy(true); try { await api(`/models/${encodeURIComponent(model.id)}`, { method: 'DELETE' }); refresh() } finally { setBusy(false) } }
+  const applyPreset = async () => {
+    if (!selectedPresetId) return
+    setBusy(true); setPresetMessage('')
+    try {
+      const result = await api(`/presets/${encodeURIComponent(selectedPresetId)}/apply`, { method: 'POST', body: { model_id: model.id } })
+      await parameterQuery.refetch()
+      const omitted = result.omitted_options?.length ? ` · 제외: ${result.omitted_options.join(', ')}` : ''
+      setPresetMessage(`preset을 병합했습니다. 기존 모델 설정은 유지되며 다음 server 시작에 반영됩니다${omitted}`)
+      refresh()
+    } catch (cause) { setPresetMessage(`preset 적용 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
+  }
   return jsxs('article', { className: 'border-b border-(--ui-stroke-secondary) py-5 last:border-0', 'aria-label': `${display} 등록 모델`, children: [
     jsxs('div', { className: 'grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]', children: [
       jsxs('div', { className: 'min-w-0', children: [
@@ -148,7 +165,13 @@ function ModelRow({ model, status, refresh }) {
           jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '소스' }), jsx('dd', { className: 'mt-0.5 text-(--ui-text-secondary)', children: source })] }),
           jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '상태' }), jsx('dd', { className: 'mt-0.5 text-(--ui-text-secondary)', children: serverUsing ? 'server 사용 중' : loaded ? '메모리에 적재됨' : '등록됨' })] })
         ] }),
-        jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order })
+        jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),
+        jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [
+          jsx('label', { className: 'shrink-0 text-xs font-medium text-(--ui-text-primary)', htmlFor: `model-preset-${model.id}`, children: '모델 시작 preset' }),
+          jsx('select', { id: `model-preset-${model.id}`, className: 'min-w-44 flex-1 rounded-md border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-xs text-(--ui-text-primary)', style: themedSelect(), value: selectedPresetId, onChange: event => setSelectedPresetId(event.target.value), 'aria-label': `${display} 시작 preset 선택`, children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : '공용 preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
+          jsx('button', { className: compactPrimary, disabled: busy || !selectedPresetId, onClick: applyPreset, children: '저장' }),
+          presetMessage ? jsx('span', { className: `basis-full text-xs ${presetMessage.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-secondary)'}`, role: 'status', children: presetMessage }) : null
+        ] })
       ] }),
       jsxs('div', { className: 'flex flex-wrap items-center gap-2 md:justify-end', children: [isActive ? jsx('button', { className: button, disabled: true, 'aria-label': `${display} 선택됨`, children: '선택됨' }) : jsx('button', { className: primary, disabled: busy || status?.server_running, onClick: activate, 'aria-label': `${display} 선택`, title: status?.server_running ? 'server 중지 후 다른 모델을 선택할 수 있습니다.' : undefined, children: '선택' }), jsx('button', { className: danger, disabled: busy || status?.server_running, onClick: remove, 'aria-label': `${display} 삭제`, children: '삭제' })] })
     ] }),
@@ -167,11 +190,14 @@ function SettingsAdder({ settings, options, query, setQuery, selectedKey, setSel
 }
 
 function ParameterControl({ id, option, value, onChange, onKeyDown, error, describedBy, ariaLabel, className = input }) {
+  if (option && !option.requires_value) return jsx('span', { className: `flex h-8 items-center px-2 text-xs ${muted}`, role: 'status', children: '값 없는 flag' })
   const common = { id, value, 'aria-label': ariaLabel, 'aria-invalid': Boolean(error), 'aria-describedby': describedBy, onChange, onKeyDown }
   if (option?.choices?.length) {
     return jsx('select', { ...common, className, style: themedSelect(), children: option.choices.map(choice => jsx('option', { style: themedOption, value: choice, children: choice }, choice)) })
   }
-  return jsx('input', { ...common, className })
+  const type = option?.value_kind === 'integer' || option?.value_kind === 'number' ? 'number' : 'text'
+  const step = option?.value_kind === 'integer' ? '1' : option?.value_kind === 'number' ? 'any' : undefined
+  return jsx('input', { ...common, className, type, step, inputMode: type === 'number' ? 'decimal' : undefined })
 }
 
 function ModelSettingsEditor({ modelId, refresh, open }) {
@@ -183,18 +209,24 @@ function ModelSettingsEditor({ modelId, refresh, open }) {
   const [fieldErrors, setFieldErrors] = useState({})
   const [message, setMessage] = useState('')
   const [presetName, setPresetName] = useState('')
+  const [presetRename, setPresetRename] = useState('')
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const settings = useQuery({ queryKey: [ID, 'model-settings', modelId], queryFn: () => api(`/settings/${encodeURIComponent(modelId)}`), enabled: open, refetchOnWindowFocus: false })
   const options = useQuery({ queryKey: [ID, 'model-settings-options', query], queryFn: () => api(`/settings?q=${encodeURIComponent(query)}&limit=20`), enabled: open && query.trim().length > 0, refetchOnWindowFocus: false })
   const presetsQuery = useQuery({ queryKey: [ID, 'parameter-presets'], queryFn: () => api('/presets'), enabled: open, refetchOnWindowFocus: false })
+  const selectedPreset = (presetsQuery.data?.presets || []).find(preset => preset.id === selectedPresetId)
   const availableOptions = (options.data?.options || []).filter(option => !Object.prototype.hasOwnProperty.call(draft, option.key))
   const selected = availableOptions.find(option => option.key === selectedKey)
   useEffect(() => {
     if (open && settings.data) { setDraft(settings.data.options || {}); setFieldErrors({}) }
   }, [open, settings.data?.model_id])
-  const validateDraft = next => Object.fromEntries(Object.entries(next).map(([key, current]) => [key, optionValueError(settings.data?.metadata?.[key] || { key, requires_value: true }, current)]).filter(([, error]) => error))
-  const persist = async next => {
-    const errors = validateDraft(next)
+  useEffect(() => { setPresetRename(selectedPreset?.name || '') }, [selectedPresetId, selectedPreset?.name])
+  const validateDraft = (next, extraMetadata = {}) => {
+    const metadata = { ...(settings.data?.metadata || {}), ...extraMetadata }
+    return Object.fromEntries(Object.entries(next).map(([key, current]) => [key, optionValueError(metadata[key] || { key, requires_value: true }, current)]).filter(([, error]) => error))
+  }
+  const persist = async (next, extraMetadata = {}) => {
+    const errors = validateDraft(next, extraMetadata)
     if (Object.keys(errors).length) { setFieldErrors(errors); setMessage('입력값을 확인하세요.'); return false }
     setSaving(true)
     setMessage('')
@@ -220,7 +252,7 @@ function ModelSettingsEditor({ modelId, refresh, open }) {
     const validationError = optionValueError(selected, value)
     if (validationError) { setMessage(validationError); return }
     const next = { ...draft, [selectedKey]: selected.requires_value ? value.trim() : '' }
-    if (await persist(next)) { setDraft(next); setSelectedKey(''); setValue('') }
+    if (await persist(next, { [selectedKey]: selected })) { setDraft(next); setSelectedKey(''); setValue('') }
   }
   const remove = async key => {
     const next = { ...draft }
@@ -244,9 +276,17 @@ function ModelSettingsEditor({ modelId, refresh, open }) {
       setDraft(result.options || {})
       await settings.refetch()
       const omitted = result.omitted_options?.length ? ` Prism-ML에서 관리하지 않는 ${result.omitted_options.join(', ')}은 제외했습니다.` : ''
-      setMessage((result.requires_restart ? 'preset을 적용했습니다. 현재 server는 유지되며 다음 start에 반영됩니다.' : 'preset을 적용했습니다.') + omitted)
+      setMessage((result.requires_restart ? 'preset 값을 기존 모델 설정에 병합했습니다. 현재 server는 유지되며 다음 start에 반영됩니다.' : 'preset 값을 기존 모델 설정에 병합했습니다.') + omitted)
       refresh()
     } catch (cause) { setMessage(`preset 적용 실패: ${cause?.message || String(cause)}`) }
+  }
+  const renamePreset = async () => {
+    if (!selectedPresetId || !presetRename.trim()) { setMessage('변경할 preset 이름을 입력하세요.'); return }
+    try {
+      await api(`/presets/${encodeURIComponent(selectedPresetId)}`, { method: 'PATCH', body: { name: presetRename.trim() } })
+      await presetsQuery.refetch()
+      setMessage('preset 이름을 변경했습니다.')
+    } catch (cause) { setMessage(`preset 이름 변경 실패: ${cause?.message || String(cause)}`) }
   }
   const deletePreset = async () => {
     if (!selectedPresetId) return
@@ -258,16 +298,17 @@ function ModelSettingsEditor({ modelId, refresh, open }) {
     } catch (cause) { setMessage(`preset 삭제 실패: ${cause?.message || String(cause)}`) }
   }
   return open ? jsxs('div', { className: 'mt-3 rounded-md border border-(--ui-stroke-secondary) p-3 sm:p-4', children: [
-      jsxs('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('p', { className: `text-xs ${muted}`, children: '이 등록 모델에 적용할 llama-server parameter를 수정합니다.' }), jsx('button', { className: compactPrimary, disabled: saving, onClick: () => persist(draft), 'aria-label': `${modelId} parameter 저장`, children: '저장' })] }),
+      jsxs('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('p', { className: `text-xs ${muted}`, children: '이 등록 모델의 llama-server parameter입니다. 수정 후 모델 설정 저장을 눌러야 유지됩니다.' }), jsx('button', { className: compactPrimary, disabled: saving, onClick: () => persist(draft), 'aria-label': `${modelId} 모델 설정 저장`, children: '모델 설정 저장' })] }),
       jsxs('div', { className: 'mb-4 rounded-md bg-(--ui-bg-tertiary) p-3', children: [
         jsx('p', { className: 'mb-1 text-xs font-medium text-(--ui-text-primary)', children: '공용 parameter preset' }),
-        jsx('p', { className: `mb-2 text-xs ${muted}`, children: 'runtime·모델과 무관하게 공유됩니다. 적용하면 현재 선택 모델에 저장되고, server는 다음 시작에 반영됩니다.' }),
+        jsx('p', { className: `mb-2 text-xs ${muted}`, children: '저장은 preset 값을 현재 모델 설정에 병합합니다. --no-mmproj 같은 기존 추가 설정은 지우지 않습니다.' }),
         jsxs('div', { className: 'flex flex-wrap gap-2', children: [
           jsx('select', { className: compactInput, style: themedSelect(), value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: `${preset.name} · 공용` }, preset.id))] }),
-          jsx('button', { className: compactPrimary, disabled: !selectedPresetId || saving, onClick: applyPreset, children: '적용' }),
+          jsx('button', { className: compactPrimary, disabled: !selectedPresetId || saving, onClick: applyPreset, children: '저장' }),
           jsx('button', { className: compactDanger, disabled: !selectedPresetId || saving, onClick: deletePreset, children: '삭제' })
         ] }),
-        jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx('input', { className: compactInput, value: presetName, 'aria-label': `${modelId} 새 preset 이름`, placeholder: '새 preset 이름', onChange: event => setPresetName(event.target.value), onKeyDown: event => { if (event.key === 'Enter') savePreset() } }), jsx('button', { className: compactPrimary, disabled: saving || !presetName.trim(), onClick: savePreset, children: '현재 설정 저장' })] })
+        selectedPreset ? jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx('input', { className: compactInput, value: presetRename, 'aria-label': `${selectedPreset.name} preset 이름`, onChange: event => setPresetRename(event.target.value), onKeyDown: event => { if (event.key === 'Enter') renamePreset() } }), jsx('button', { className: compactPrimary, disabled: saving || !presetRename.trim(), onClick: renamePreset, children: '이름 변경' })] }) : null,
+        jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx('input', { className: compactInput, value: presetName, 'aria-label': `${modelId} 새 preset 이름`, placeholder: '새 preset 이름', onChange: event => setPresetName(event.target.value), onKeyDown: event => { if (event.key === 'Enter') savePreset() } }), jsx('button', { className: compactPrimary, disabled: saving || !presetName.trim(), onClick: savePreset, children: '새 preset 만들기' })] })
       ] }),
       settings.isLoading ? jsx('p', { className: muted, role: 'status', children: '현재 설정을 불러오는 중…' }) : null,
       jsx('div', { className: 'grid gap-x-4 gap-y-1 sm:grid-cols-2', children: Object.entries(draft).map(([key, current]) => jsxs('div', { className: 'flex min-w-0 items-start gap-2 border-b border-(--ui-stroke-secondary) py-1.5', children: [jsx('label', { className: 'w-24 shrink-0 truncate pt-2 text-xs font-medium text-(--ui-text-primary)', htmlFor: `parameter-${modelId}-${key}`, children: key }), jsxs('div', { className: 'min-w-0 flex-1', children: [jsxs('div', { className: 'flex min-w-0 items-center gap-1.5', children: [jsx(ParameterControl, { id: `parameter-${modelId}-${key}`, option: settings.data?.metadata?.[key], value: current, className: compactInput, error: fieldErrors[key], describedBy: fieldErrors[key] ? `parameter-error-${modelId}-${key}` : undefined, ariaLabel: `${key} 값`, onChange: event => update(key, event.target.value) }), jsx('button', { className: compactDanger, disabled: saving, onClick: () => remove(key), 'aria-label': `${key} parameter 삭제`, children: '삭제' })] }), fieldErrors[key] ? jsx('p', { id: `parameter-error-${modelId}-${key}`, className: 'mt-1 text-[11px] text-(--dt-destructive)', role: 'alert', children: fieldErrors[key] }) : null] })] }, key)) }),

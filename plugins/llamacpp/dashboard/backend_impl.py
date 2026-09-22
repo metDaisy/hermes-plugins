@@ -979,9 +979,9 @@ def _option_cache_identity(executable: Path) -> tuple[str, str, str, str, int, i
     tag, backend = target if target else ("", "")
     try:
         stat = executable.stat()
-        return ("2", str(executable.resolve()), tag, backend, stat.st_mtime_ns, stat.st_size)
+        return ("3", str(executable.resolve()), tag, backend, stat.st_mtime_ns, stat.st_size)
     except OSError:
-        return ("2", str(executable), tag, backend, 0, 0)
+        return ("3", str(executable), tag, backend, 0, 0)
 
 
 def _option_list() -> list[dict[str, Any]]:
@@ -1020,10 +1020,18 @@ def _option_list() -> list[dict[str, Any]]:
             key = primary.lstrip("-")
             description = line[separator.end():].strip() if separator else ""
             value_hint = _OPTION_RE.sub("", option_part).strip(" ,")
+            if not value_hint and any(name.startswith("--no-") for name in names):
+                for name in names:
+                    flag_key = name.lstrip("-")
+                    options.setdefault(flag_key, {"key": flag_key, "name": name, "aliases": [name],
+                                                  "value_hint": "", "description": description,
+                                                  "requires_value": False, "default_value": None,
+                                                  "choices": [], "value_kind": "string", "toggle": False})
+                continue
             choices_match = re.search(r"(?:\[([^\]]+)\]|\{([^}]+)\})", value_hint)
             choices_text = next((value for value in choices_match.groups() if value), "") if choices_match else ""
             choices = [value.strip().strip("'\"") for value in re.split(r"[|,]", choices_text) if value.strip()] if choices_text else []
-            toggle = any(name == f"--no-{key}" for name in names)
+            toggle = any(name == f"--no-{key}" for name in names) and bool(value_hint)
             if key in _KNOWN_OPTION_CHOICES:
                 choices = list(_KNOWN_OPTION_CHOICES[key])
                 value_hint = "|".join(choices)
@@ -1036,10 +1044,10 @@ def _option_list() -> list[dict[str, Any]]:
                 choices = ["on", "off"]
                 value_kind = "choice"
                 default_value = "on" if str(default_value or "").lower() in {"enabled", "on", "true", "1"} else "off"
-            if re.search(r"\b(?:N|NUM|NUMBER|COUNT|SIZE|PORT|LAYERS?)\b", value_upper):
-                value_kind = "integer"
-            elif re.search(r"\b(?:FLOAT|PROB|PROBABILITY)\b", value_upper):
+            if re.fullmatch(r"[+-]?\d+\.\d+", str(default_value or "")) or re.search(r"\b(?:FLOAT|PROB|PROBABILITY)\b", value_upper):
                 value_kind = "number"
+            elif re.search(r"\b(?:N|NUM|NUMBER|COUNT|SIZE|PORT|LAYERS?)\b", value_upper):
+                value_kind = "integer"
             options.setdefault(key, {"key": key, "name": primary, "aliases": names,
                                      "value_hint": value_hint or line, "description": description,
                                      "requires_value": bool(value_hint) or toggle, "default_value": default_value,
@@ -1587,18 +1595,38 @@ def apply_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     model_id = str(body.get("model_id") or value.get("model_id") or "").strip()
     if not model_id:
         raise HTTPException(status_code=422, detail="model_id is required to apply a preset")
-    normalized = _normalize_options(value.get("options") or {})
+    preset_options = _normalize_options(value.get("options") or {})
+    all_options = _load_options()
+    merged = dict(all_options.get(model_id, {}))
+    merged.update(preset_options)
     omitted_options: list[str] = []
     if _runtime_kind(_state()) == "prism_ml":
-        omitted_options = sorted(key for key in normalized if key.startswith("spec-"))
-        normalized = {key: option_value for key, option_value in normalized.items() if key not in omitted_options}
-    all_options = _load_options()
-    all_options[model_id] = normalized
+        omitted_options = sorted(key for key in merged if key.startswith("spec-"))
+        merged = {key: option_value for key, option_value in merged.items() if key not in omitted_options}
+    _validate_option_values(merged)
+    all_options[model_id] = merged
     _save_options(all_options)
     state = _state()
     server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
-    return {"preset_id": preset_id, "model_id": model_id, "options": normalized,
+    return {"preset_id": preset_id, "model_id": model_id, "options": merged,
             "omitted_options": omitted_options, "applied": False, "requires_restart": server_running}
+
+
+@router.patch("/presets/{preset_id}")
+def rename_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="preset name is required")
+    if len(name) > 100:
+        raise HTTPException(status_code=422, detail="preset name must be at most 100 characters")
+    state = _state()
+    stored = state.get("parameter_presets")
+    if not isinstance(stored, dict) or preset_id not in stored or not isinstance(stored[preset_id], dict):
+        raise HTTPException(status_code=404, detail="preset not found")
+    stored[preset_id]["name"] = name
+    stored[preset_id]["updated_at"] = time.time()
+    _save_state(state)
+    return {"preset": _preset_row(preset_id, stored[preset_id])}
 
 
 @router.delete("/presets/{preset_id}")
