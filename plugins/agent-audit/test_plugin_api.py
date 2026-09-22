@@ -84,6 +84,20 @@ def test_events_filter_by_profile_and_preserve_timestamp_order(tmp_path: Path) -
     }
 
 
+def test_events_support_offset_and_limit_pagination(tmp_path: Path) -> None:
+    database_path = _database_with_events(tmp_path / "audit.db")
+
+    first_page = _API_MODULE.read_events(database_path, offset=0, limit=1)
+    second_page = _API_MODULE.read_events(database_path, offset=1, limit=1)
+
+    assert first_page["total"] == 2
+    assert len(first_page["events"]) == 1
+    assert first_page["events"][0]["event"] == "validation_result"
+    assert second_page["total"] == 2
+    assert len(second_page["events"]) == 1
+    assert second_page["events"][0]["event"] == "tool_call"
+
+
 def test_summary_groups_sqlite_events_by_profile(tmp_path: Path) -> None:
     database_path = _database_with_events(tmp_path / "audit.db")
 
