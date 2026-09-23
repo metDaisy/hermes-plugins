@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
 import uuid
-import zipfile
+
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,12 +27,52 @@ from fastapi import APIRouter, HTTPException
 
 try:
     from dashboard.backends import backend_view, get_backend
+    from dashboard.application.device_discovery import DeviceDiscoveryService
     from dashboard.application.download_progress import DownloadProgressTracker
+    from dashboard.application.huggingface_cache import HuggingFaceCacheService
+    from dashboard.application.huggingface_download import HuggingFaceDownloadService
+    from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
+    from dashboard.application.job_manager import JobManager
+    from dashboard.application.json_http import JsonHttpClient
+    from dashboard.application.model_lifecycle import ModelLifecycleService
+    from dashboard.application.model_registry import RegisteredModelService
     from dashboard.application.model_policy import ModelPolicyService
+    from dashboard.application.option_catalog import ServerOptionCatalog
+    from dashboard.application.official_runtime import OfficialRuntimeService
+    from dashboard.application.parameter_settings import ParameterSettingsService
+    from dashboard.application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
+    from dashboard.application.prism_runtime import PrismRuntimeInstaller
+    from dashboard.application.runtime_inspector import RuntimeInspector
+    from dashboard.application.server_lifecycle import ServerLifecycleService
+    from dashboard.application.server_startup import ServerStartupService
+    from dashboard.application.state_store import StateStore
+    from dashboard.routes.model_routes import ModelRouteContext, create_router as create_model_router
+    from dashboard.routes.parameter_routes import ParameterRouteContext, create_router as create_parameter_router
+    from dashboard.routes.server_routes import ServerRouteContext, create_router as create_server_router
 except ImportError:
     from backends import backend_view, get_backend
+    from application.device_discovery import DeviceDiscoveryService
     from application.download_progress import DownloadProgressTracker
+    from application.huggingface_cache import HuggingFaceCacheService
+    from application.huggingface_download import HuggingFaceDownloadService
+    from application.huggingface_model_workflow import HuggingFaceModelWorkflow
+    from application.job_manager import JobManager
+    from application.json_http import JsonHttpClient
+    from application.model_lifecycle import ModelLifecycleService
+    from application.model_registry import RegisteredModelService
     from application.model_policy import ModelPolicyService
+    from application.option_catalog import ServerOptionCatalog
+    from application.official_runtime import OfficialRuntimeService
+    from application.parameter_settings import ParameterSettingsService
+    from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
+    from application.prism_runtime import PrismRuntimeInstaller
+    from application.runtime_inspector import RuntimeInspector
+    from application.server_lifecycle import ServerLifecycleService
+    from application.server_startup import ServerStartupService
+    from application.state_store import StateStore
+    from routes.model_routes import ModelRouteContext, create_router as create_model_router
+    from routes.parameter_routes import ParameterRouteContext, create_router as create_parameter_router
+    from routes.server_routes import ServerRouteContext, create_router as create_server_router
 
 router = APIRouter()
 
@@ -53,16 +93,18 @@ CUSTOM_ENDPOINT_BEGIN = "# BEGIN llamacpp endpoint (managed)"
 CUSTOM_ENDPOINT_END = "# END llamacpp endpoint (managed)"
 _custom_endpoint_lock = threading.RLock()
 _SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
-_OPTION_RE = re.compile(r"(?<![-\w])(?:--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z][A-Za-z0-9-]*)")
-_KNOWN_OPTION_CHOICES = {"load-mode": ["auto", "mmap", "none"]}
 _option_catalog_cache: tuple[tuple[str, str, str, str, int, int], list[dict[str, Any]]] | None = None
 _job_store: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.RLock()
 _state_lock = threading.RLock()
 _option_cache_lock = threading.RLock()
-_latest_cache: tuple[float, str] | None = None
 _model_policy = ModelPolicyService()
 _download_progress = DownloadProgressTracker()
+_state_store: StateStore | None = None
+_state_store_path: Path | None = None
+_official_runtime_service: OfficialRuntimeService | None = None
+_official_runtime_root: Path | None = None
+_endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BEGIN, CUSTOM_ENDPOINT_END)
 
 
 def _default_state() -> dict[str, Any]:
@@ -72,32 +114,31 @@ def _default_state() -> dict[str, Any]:
             "runtime_mode": "official", "custom_runtime_path": None}
 
 
+def _store() -> StateStore:
+    """Return a path-aware store so tests may replace ``STATE_PATH`` safely."""
+    global _state_store, _state_store_path
+    if _state_store is None or _state_store_path != STATE_PATH:
+        _state_store = StateStore(STATE_PATH, _default_state)
+        _state_store_path = STATE_PATH
+    return _state_store
+
+
 def _read_json(path: Path, fallback: Any) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return fallback
+    return _store().read(fallback, path)
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    _store().write(path, value)
 
 
 def _state() -> dict[str, Any]:
     with _state_lock:
-        value = _read_json(STATE_PATH, {})
-        state = _default_state()
-        if isinstance(value, dict):
-            state.update(value)
-        return state
+        return _store().load()
 
 
 def _save_state(state: dict[str, Any]) -> None:
     with _state_lock:
-        _write_json(STATE_PATH, state)
+        _store().save(state)
 
 
 def _hf_env() -> dict[str, str]:
@@ -116,214 +157,73 @@ def _hf_storage() -> tuple[Path, Path]:
 
 
 def _http_json(url: str) -> Any:
-    headers = {"Accept": "application/json", "User-Agent": "llamacpp"}
-    token = os.environ.get("HF_TOKEN") or os.environ.get("hf_token")
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    if token and (host == "huggingface.co" or host.endswith(".huggingface.co") or host == "hf.co"):
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace").strip()
-            last_error = RuntimeError(
-                f"HTTP {exc.code} from {urllib.parse.urlsplit(url).netloc}"
-                + (f": {body[:240]}" if body else "")
-            )
-            if exc.code not in (408, 429, 500, 502, 503, 504) or attempt == 2:
-                raise last_error from exc
-        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            last_error = RuntimeError(f"request failed for {urllib.parse.urlsplit(url).netloc}: {exc}")
-            if attempt == 2:
-                raise last_error from exc
-        time.sleep(1.0 * (attempt + 1))
-    raise last_error or RuntimeError("request failed")
+    return JsonHttpClient(
+        lambda: os.environ.get("HF_TOKEN") or os.environ.get("hf_token"),
+        lambda request: urllib.request.urlopen(request, timeout=60),
+        time.sleep,
+    ).get(url)
+
+
+def _hf_cache() -> HuggingFaceCacheService:
+    def run(argv: list[str]) -> tuple[int, str]:
+        result = subprocess.run(
+            argv, capture_output=True, check=False, text=True, encoding="utf-8",
+            errors="replace", env=_hf_env(), timeout=30,
+        )
+        return result.returncode, result.stdout or ""
+
+    return HuggingFaceCacheService(lambda: shutil.which("hf"), run)
 
 
 def _hf_downloaded_models() -> tuple[list[dict[str, str]], str | None, str | None]:
-    executable = shutil.which("hf")
-    if not executable:
-        return [], None, "hf CLI was not found on PATH"
-    result = subprocess.run(
-        [executable, "cache", "ls", "--format", "json"],
-        capture_output=True, check=False, text=True, encoding="utf-8", errors="replace",
-        env=_hf_env(), timeout=30,
-    )
-    if result.returncode != 0:
-        return [], executable, "hf cache listing failed"
-    try:
-        payload = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError:
-        return [], executable, "hf cache listing returned invalid JSON"
-    if isinstance(payload, dict):
-        payload = payload.get("items", [])
-    if not isinstance(payload, list):
-        return [], executable, "hf cache listing returned an unexpected JSON shape"
-    models = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        repo_id = item.get("repo_id")
-        size = item.get("size")
-        if isinstance(repo_id, str) and repo_id and isinstance(size, str):
-            models.append({"repo_id": repo_id, "size": size})
-    return models, executable, None
+    return _hf_cache().downloaded_models()
 
 
 def _hf_cached_files(repo_id: str) -> tuple[list[dict[str, Any]], str | None]:
-    executable = shutil.which("hf")
-    if not executable:
-        return [], "hf CLI was not found on PATH"
-    result = subprocess.run(
-        [executable, "cache", "ls", "--revisions", "--format", "json"],
-        capture_output=True, check=False, text=True, encoding="utf-8", errors="replace",
-        env=_hf_env(), timeout=30,
-    )
-    if result.returncode != 0:
-        return [], "HF cache revision listing failed"
-    try:
-        payload = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError:
-        return [], "HF cache revision listing returned invalid JSON"
-    revision = next((item for item in payload if isinstance(item, dict)
-                     and item.get("repo_id") == repo_id and item.get("snapshot_path")), None)
-    if not revision:
-        return [], "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
-    snapshot = Path(str(revision["snapshot_path"]))
-    if not snapshot.is_dir():
-        return [], "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
-    grouped: dict[str, dict[str, Any]] = {}
-    for path in snapshot.rglob("*.gguf"):
-        if not path.is_file() or "mmproj" in path.name.lower() or "draft" in path.name.lower():
-            continue
-        relative = path.relative_to(snapshot).as_posix()
-        label = _SPLIT_RE.sub("", path.stem)
-        group = grouped.setdefault(label, {"label": label, "paths": [], "total_bytes": 0,
-                                           "fit": "downloaded"})
-        group["paths"].append(relative)
-        group["total_bytes"] += path.stat().st_size
-    return sorted(grouped.values(), key=lambda item: item["total_bytes"], reverse=True), None
+    return _hf_cache().cached_files(repo_id)
 
 
 def _model_id(path: Path) -> str:
     return _SPLIT_RE.sub("", path.stem)
 
 
+def _models() -> RegisteredModelService:
+    return RegisteredModelService(_state, _save_state, _hf_cached_files)
+
+
 def _model_rows() -> list[dict[str, Any]]:
-    """Return only models explicitly registered in plugin state.
-
-    Files found in HF_HOME are inventory, not registrations. This distinction
-    prevents an ordinary HF download from silently becoming an active candidate.
-    """
-    state = _state()
-    registered = state.get("models", {})
-    if not isinstance(registered, dict):
-        return []
-
-    rows: list[dict[str, Any]] = []
-    state_dirty = False
-    active = state.get("active_model_id")
-    for model_id, entry in registered.items():
-        if not isinstance(entry, dict):
-            continue
-        paths: list[str] = []
-        size_bytes = 0
-        for raw_path in entry.get("paths", []):
-            path = Path(str(raw_path))
-            if path.suffix.lower() != ".gguf" or path.name.lower().startswith("mmproj"):
-                continue
-            resolved = str(path.resolve())
-            if resolved in paths:
-                continue
-            paths.append(resolved)
-            try:
-                size_bytes += path.stat().st_size
-            except OSError:
-                pass
-        if not size_bytes:
-            try:
-                size_bytes = max(0, int(entry.get("size_bytes") or 0))
-            except (TypeError, ValueError):
-                size_bytes = 0
-        if not size_bytes and entry.get("hf_repo") and entry.get("hf_file"):
-            cached_groups, _ = _hf_cached_files(str(entry["hf_repo"]))
-            cached_group = next((group for group in cached_groups
-                                 if str(entry["hf_file"]) in group.get("paths", [])), None)
-            if cached_group:
-                size_bytes = int(cached_group.get("total_bytes") or 0)
-                if size_bytes:
-                    entry["size_bytes"] = size_bytes
-                    state_dirty = True
-        row: dict[str, Any] = {
-            "id": str(model_id),
-            "model_id": str(model_id),
-            "paths": sorted(paths),
-            "size_bytes": size_bytes,
-            "owned": bool(entry.get("owned", False)),
-            "active": str(model_id) == str(active),
-        }
-        if entry.get("hf_repo"):
-            row["hf_repo"] = str(entry["hf_repo"])
-        if entry.get("hf_file"):
-            row["hf_file"] = str(entry["hf_file"])
-        row["path"] = row["paths"][0] if row["paths"] else None
-        row["size_label"] = f"{size_bytes / (1 << 30):.1f} GB" if size_bytes else "size unknown"
-        rows.append(row)
-    if state_dirty:
-        _save_state(state)
-    return sorted(rows, key=lambda item: item["id"].lower())
+    """Return only models explicitly registered in plugin state."""
+    return _models().rows()
 
 
 def _register_model(model_id: str, paths: list[Path], owned: bool,
                     hf_repo: str | None = None, hf_file: str | None = None,
                     size_bytes: int = 0) -> None:
-    state = _state()
-    models = state.setdefault("models", {})
-    entry: dict[str, Any] = {"paths": [str(path.resolve()) for path in paths], "owned": owned}
-    if size_bytes > 0:
-        entry["size_bytes"] = size_bytes
-    if hf_repo:
-        entry["hf_repo"] = hf_repo
-    if hf_file:
-        entry["hf_file"] = hf_file
-    models[model_id] = entry
-    _save_state(state)
+    _models().register(model_id, paths, owned, hf_repo, hf_file, size_bytes)
+
+
+def _job_manager() -> JobManager:
+    return JobManager(_job_store, _jobs_lock, lambda: uuid.uuid4().hex[:12], time.time, threading.Thread)
 
 
 def _job(kind: str, detail: str) -> dict[str, Any]:
-    value = {"job_id": uuid.uuid4().hex[:12], "kind": kind, "detail": detail,
-             "status": "running", "phase": "starting", "percent": None,
-             "created_at": time.time()}
-    with _jobs_lock:
-        _job_store[value["job_id"]] = value
-    return value
+    return _job_manager().create(kind, detail)
 
 
 def _finish(job: dict[str, Any], detail: str) -> None:
-    job.update({"status": "done", "phase": "done", "percent": 100, "detail": detail})
+    _job_manager().finish(job, detail)
 
 
 def _fail(job: dict[str, Any], exc: Exception) -> None:
-    job.update({"status": "error", "phase": "error", "detail": "작업 실패", "error": str(exc)})
+    _job_manager().fail(job, exc)
 
 
 def _spawn(job: dict[str, Any], target: Callable[[], None], name: str) -> None:
-    def run() -> None:
-        try:
-            target()
-        except Exception as exc:  # noqa: BLE001
-            _fail(job, exc)
-    threading.Thread(target=run, daemon=True, name=name).start()
+    _job_manager().launch(job, name, target)
 
 
 def _jobs() -> list[dict[str, Any]]:
-    with _jobs_lock:
-        values = list(_job_store.values())
-    values.sort(key=lambda item: (item.get("status") != "running", -item.get("created_at", 0)))
-    return values[:20]
+    return _job_manager().recent()
 
 
 def _backend() -> str:
@@ -338,127 +238,43 @@ def _backend() -> str:
         return "cpu"
 
 
+def _official_runtime() -> OfficialRuntimeService:
+    """Compose the official-runtime module with this facade's I/O adapters."""
+    global _official_runtime_service, _official_runtime_root
+    if _official_runtime_service is None or _official_runtime_root != RUNTIME_ROOT:
+        _official_runtime_service = OfficialRuntimeService(
+            root=RUNTIME_ROOT,
+            load_state=_state,
+            save_state=_save_state,
+            release_loader=lambda: _http_json(
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100"
+            ),
+            backend_detector=_backend,
+            platform_name=platform.system,
+            architecture=platform.machine,
+        )
+        _official_runtime_root = RUNTIME_ROOT
+    return _official_runtime_service
+
+
 def _detected_devices() -> list[dict[str, Any]]:
-    executable = _server_executable()
-    if executable is None:
-        return []
-    try:
-        result = subprocess.run([str(executable), "--list-devices"], capture_output=True,
-                                check=False, text=True, encoding="utf-8", errors="replace",
-                                timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if result.returncode != 0:
-        return []
-    devices: list[dict[str, Any]] = []
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        if not line or line.lower().startswith("available devices"):
-            continue
-        line = re.sub(r"^[-*]\s*", "", line)
-        if ":" not in line:
-            continue
-        device_id, detail = (part.strip() for part in line.split(":", 1))
-        memory_match = re.search(r"\(([^()]*)\)\s*$", detail)
-        memory = memory_match.group(1).strip() if memory_match else ""
-        name = detail[:memory_match.start()].strip() if memory_match else detail
-        if not name:
-            continue
-        device: dict[str, Any] = {"id": device_id, "name": name, "memory": memory}
-        vram_match = re.search(
-            r"(?P<total>[\d.]+)\s*(?P<total_unit>MiB|GiB|MB|GB)\s*,\s*"
-            r"(?P<free>[\d.]+)\s*(?P<free_unit>MiB|GiB|MB|GB)\s+free",
-            memory, re.IGNORECASE)
-        if vram_match:
-            def to_bytes(value: str, unit: str) -> int:
-                factor = 1024 ** 3 if unit.lower() in {"gib", "gb"} else 1024 ** 2
-                return int(float(value) * factor)
-
-            device["vram_total_bytes"] = to_bytes(vram_match.group("total"), vram_match.group("total_unit"))
-            device["vram_free_bytes"] = to_bytes(vram_match.group("free"), vram_match.group("free_unit"))
-        devices.append(device)
-    return devices
-
-
-def _release_number(tag: str) -> int:
-    return int(tag[1:]) if tag.startswith("b") and tag[1:].isdigit() else 0
-
-
-def _asset_names(tag: str, backend: str) -> list[str]:
-    if platform.system().lower() != "windows":
-        raise RuntimeError("standalone runtime installer currently supports Windows only")
-    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
-    if backend == "cuda":
-        version = "13.4" if arch == "arm64" else "13.3"
-        return [f"llama-{tag}-bin-win-cuda-{version}-{arch}.zip",
-                f"cudart-llama-bin-win-cuda-{version}-{arch}.zip"]
-    if backend == "cpu":
-        return [f"llama-{tag}-bin-win-cpu-{arch}.zip"]
-    if backend == "vulkan":
-        return [f"llama-{tag}-bin-win-vulkan-x64.zip"]
-    raise RuntimeError(f"unsupported Windows backend: {backend}")
-
-
-def _latest_build(backend: str, force: bool = False) -> str:
-    global _latest_cache
-    now = time.monotonic()
-    if not force and _latest_cache and now - _latest_cache[0] < 300:
-        return _latest_cache[1]
-    payload = _http_json("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=100")
-    candidates = []
-    for release in payload if isinstance(payload, list) else []:
-        if not isinstance(release, dict) or release.get("draft"):
-            continue
-        tag = str(release.get("tag_name", ""))
-        names = {str(item.get("name", "")) for item in release.get("assets", []) if isinstance(item, dict)}
-        if tag.startswith("b") and tag[1:].isdigit() and all(x in names for x in _asset_names(tag, backend)):
-            candidates.append(tag)
-    if not candidates:
-        raise RuntimeError(f"GitHub has no complete llama.cpp build for {backend}")
-    tag = max(candidates, key=_release_number)
-    _latest_cache = (now, tag)
-    return tag
+    def run(argv: list[str]) -> tuple[int, str]:
+        result = subprocess.run(argv, capture_output=True, check=False, text=True,
+                                encoding="utf-8", errors="replace", timeout=10)
+        return result.returncode, result.stdout or ""
+    return DeviceDiscoveryService(_server_executable, run).devices()
 
 
 def _runtime_target(force_latest: bool = False, requested_backend: Any = None) -> tuple[str, str]:
-    state = _state()
-    requested = str(requested_backend or "auto").lower()
-    backend = requested if requested in {"auto", "cuda", "cpu", "vulkan"} else "auto"
-    if backend == "auto":
-        backend = _backend()
-    configured = str(state.get("tag") or "latest")
-    return (_latest_build(backend, force=force_latest) if configured == "latest" else configured), backend
+    return _official_runtime().resolve_target(force_latest, requested_backend)
 
 
 def _installed_target() -> tuple[str, str] | None:
-    state = _state()
-    preferred = (str(state.get("installed_tag") or ""), str(state.get("installed_backend") or ""))
-    candidates = [preferred] if all(preferred) else []
-    if RUNTIME_ROOT.is_dir():
-        discovered = []
-        for tag_dir in RUNTIME_ROOT.iterdir():
-            if not tag_dir.is_dir() or not tag_dir.name.startswith("b"):
-                continue
-            for backend_dir in tag_dir.iterdir():
-                if not backend_dir.is_dir():
-                    continue
-                manifest = _read_json(backend_dir / "manifest.json", {})
-                if isinstance(manifest, dict) and manifest.get("verified_version") and _server_executable_in(backend_dir):
-                    discovered.append((tag_dir.name, backend_dir.name))
-        candidates += sorted(discovered, key=lambda item: _release_number(item[0]), reverse=True)
-    for tag, backend in candidates:
-        if tag and backend and _server_executable_in(RUNTIME_ROOT / tag / backend):
-            return tag, backend
-    return None
+    return _official_runtime().installed_target()
 
 
 def _server_executable_in(root: Path) -> Path | None:
-    if not root.is_dir():
-        return None
-    for candidate in (root / "llama-server.exe", root / "llama-server", *root.rglob("llama-server.exe")):
-        if candidate.is_file():
-            return candidate
-    return None
+    return _official_runtime().executable_in(root)
 
 
 def _runtime_kind(state: dict[str, Any] | None = None) -> str:
@@ -502,6 +318,24 @@ def _pid_alive(pid: Any) -> bool:
             return False
 
 
+def _terminate_server(pid: int) -> None:
+    if platform.system().lower() == "windows":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+    else:
+        os.kill(pid, 15)
+
+
+def _server_lifecycle() -> ServerLifecycleService:
+    return ServerLifecycleService(
+        load_state=_state,
+        save_state=_save_state,
+        pid_alive=_pid_alive,
+        terminate=_terminate_server,
+        unregister_endpoint=_unregister_custom_endpoint,
+        log_path=SERVER_LOG_PATH,
+    )
+
+
 def _health(port: int) -> bool:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
@@ -526,97 +360,16 @@ def _profile_config_paths() -> list[Path]:
     return sorted(set(paths), key=lambda path: str(path).lower())
 
 
-def _config_newline(text: str) -> str:
-    return "\r\n" if "\r\n" in text else "\n"
-
-
-def _managed_endpoint_lines(base_url: str, model_id: str, context_length: int, indent: str) -> list[str]:
-    prefix = indent
-    child = indent + "  "
-    model_child = child + "  "
-    quoted_model = json.dumps(model_id, ensure_ascii=False)
-    quoted_url = json.dumps(base_url, ensure_ascii=False)
-    return [
-        f"{prefix}{CUSTOM_ENDPOINT_BEGIN}",
-        f"{child}{CUSTOM_ENDPOINT_KEY}:",
-        f"{model_child}name: llama.cpp (local)",
-        f"{model_child}api: {quoted_url}",
-        f"{model_child}transport: chat_completions",
-        f"{model_child}default_model: {quoted_model}",
-        f"{model_child}models:",
-        f"{model_child}  {quoted_model}:",
-        f"{model_child}    context_length: {context_length}",
-        f"{prefix}{CUSTOM_ENDPOINT_END}",
-    ]
-
-
-def _find_managed_endpoint(lines: list[str]) -> tuple[int, int] | None:
-    begin = next((index for index, line in enumerate(lines)
-                  if line.strip() == CUSTOM_ENDPOINT_BEGIN), None)
-    if begin is None:
-        return None
-    end = next((index for index in range(begin + 1, len(lines))
-                if lines[index].strip() == CUSTOM_ENDPOINT_END), None)
-    if end is None:
-        raise RuntimeError("llamacpp endpoint block is incomplete")
-    return begin, end
-
-
 def _config_with_managed_endpoint(text: str, base_url: str, model_id: str, context_length: int) -> str:
-    newline = _config_newline(text)
-    lines = text.splitlines()
-    managed = _find_managed_endpoint(lines)
-    if managed is not None:
-        begin, end = managed
-        indent = lines[begin][:len(lines[begin]) - len(lines[begin].lstrip())]
-        replacement = _managed_endpoint_lines(base_url, model_id, context_length, indent)
-        lines[begin:end + 1] = replacement
-        return newline.join(lines) + (newline if text.endswith(("\n", "\r")) else "")
-
-    providers_index = next((index for index, line in enumerate(lines)
-                            if line.strip() == "providers:" and not line.startswith((" ", "\	"))), None)
-    if providers_index is not None:
-        key_prefix = "  "
-        if any(line.startswith(key_prefix + CUSTOM_ENDPOINT_KEY + ":")
-               for line in lines[providers_index + 1:]):
-            raise RuntimeError("a non-plugin provider already owns the llamacpp endpoint key")
-        insert_at = providers_index + 1
-        while insert_at < len(lines) and (not lines[insert_at].strip() or lines[insert_at].startswith((" ", "\	"))):
-            insert_at += 1
-        block = _managed_endpoint_lines(base_url, model_id, context_length, key_prefix)
-        lines[insert_at:insert_at] = block
-    else:
-        block = ["providers:"] + _managed_endpoint_lines(base_url, model_id, context_length, "  ")
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.extend(block)
-    return newline.join(lines) + newline
+    return _endpoint_config.upsert(text, base_url, model_id, context_length)
 
 
 def _remove_managed_endpoint(text: str) -> tuple[str, bool]:
-    lines = text.splitlines()
-    managed = _find_managed_endpoint(lines)
-    if managed is None:
-        return text, False
-    begin, end = managed
-    # A root-level block created by this plugin includes the providers: line immediately before it.
-    root_created = begin >= 1 and lines[begin - 1].strip() == "providers:" and not lines[begin - 1].startswith((" ", "\	"))
-    start = begin - 1 if root_created else begin
-    del lines[start:end + 1]
-    while start < len(lines) and not lines[start].strip() and (start == 0 or not lines[start - 1].strip()):
-        del lines[start]
-    newline = _config_newline(text)
-    result = newline.join(lines)
-    if text.endswith(("\n", "\r")) and result:
-        result += newline
-    return result, True
+    return _endpoint_config.remove(text)
 
 
 def _write_profile_config(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".llamacpp.tmp")
-    tmp.write_text(text, encoding="utf-8", newline="")
-    os.replace(tmp, path)
+    write_text_atomically(path, text)
 
 
 def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
@@ -651,34 +404,11 @@ def _unregister_custom_endpoint() -> None:
 
 
 def _stop_server(*, preserve_log: bool = False) -> None:
-    state = _state()
-    pid = state.get("pid")
-    if _pid_alive(pid):
-        if platform.system().lower() == "windows":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
-        else:
-            os.kill(pid, 15)
-    state["pid"] = None
-    state["custom_endpoint"] = None
-    _save_state(state)
-    _unregister_custom_endpoint()
-    if not preserve_log:
-        SERVER_LOG_PATH.unlink(missing_ok=True)
+    _server_lifecycle().stop(preserve_log)
 
 
 def _watch_server_process(process: subprocess.Popen[Any]) -> None:
-    def wait_for_exit() -> None:
-        process.wait()
-        state = _state()
-        if state.get("pid") != process.pid:
-            return
-        state["pid"] = None
-        state["custom_endpoint"] = None
-        _save_state(state)
-        _unregister_custom_endpoint()
-        # An unexpected exit is diagnostic evidence, not normal cleanup.
-
-    threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
+    _server_lifecycle().watch(process)
 
 
 def _shutdown_server_on_backend_exit() -> None:
@@ -718,16 +448,7 @@ def _save_options(options: dict[str, dict[str, str]]) -> None:
 
 
 def _canonical_option_value(metadata: dict[str, Any] | None, value: Any) -> str:
-    text = str(value)
-    if metadata and metadata.get("key") == "spec-type" and len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-        text = text[1:-1]
-    if metadata and metadata.get("toggle"):
-        lowered = text.strip().lower()
-        if lowered in {"true", "enabled", "1", "on"}:
-            return "on"
-        if lowered in {"false", "disabled", "0", "off"}:
-            return "off"
-    return text
+    return ServerOptionCatalog.canonical(metadata, value)
 
 
 def _option_cli_args(options: dict[str, str]) -> list[str]:
@@ -746,148 +467,62 @@ def _option_cli_args(options: dict[str, str]) -> list[str]:
 
 
 def _active_path(model_id: str) -> Path:
-    for row in _model_rows():
-        if row["id"] == model_id:
-            if not row["paths"]:
-                break
-            return Path(row["paths"][0])
-    raise RuntimeError(f"model is not registered: {model_id}")
+    return _models().active_path(model_id)
+
+
+def _server_startup() -> ServerStartupService:
+    def spawn(command: list[str], log: Any, executable: Path) -> subprocess.Popen[Any]:
+        return subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    return ServerStartupService(_state, _save_state, _server_executable, _stop_server, _active_path, _load_options,
+                                _runtime_kind, get_backend, _option_cli_args, _watch_server_process, _health,
+                                _register_custom_endpoint, _server_log_tail, SERVER_LOG_PATH, spawn, time.time, time.sleep)
 
 
 def _start_server() -> None:
-    state = _state()
-    model_id = str(state.get("active_model_id") or "")
-    if not model_id:
-        raise RuntimeError("select a model before starting llama-server")
-    executable = _server_executable()
-    if executable is None:
-        raise RuntimeError("llama-server runtime is not installed")
-    _stop_server()
-    entry = state.get("models", {}).get(model_id, {}) if isinstance(state.get("models"), dict) else {}
-    stored_options = _load_options().get(model_id, {})
-    raw_port = stored_options.get("port", state.get("port") or 18434)
-    try:
-        port = int(raw_port)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"invalid server port: {raw_port}") from exc
-    model_path = None if isinstance(entry, dict) and entry.get("hf_repo") else _active_path(model_id)
-    adapter = get_backend(_runtime_kind(state))
-    command = adapter.build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, stored_options,
-                                   model_path=model_path)
-    command.extend(_option_cli_args({key: value for key, value in stored_options.items() if key != "port"}))
-    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    log = SERVER_LOG_PATH.open("wb")
-    log.write(f"\n--- llama-server start: model={model_id}, port={port} ---\n".encode("utf-8"))
-    log.flush()
-    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    try:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                   cwd=str(executable.parent), creationflags=flags)
-    except OSError as exc:
-        log.write(f"llama-server spawn failed: {exc}\n".encode("utf-8", errors="replace"))
-        log.close()
-        raise
-    log.close()
-    state["pid"] = process.pid
-    state["port"] = port
-    _save_state(state)
-    _watch_server_process(process)
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        if process.poll() is not None:
-            _stop_server(preserve_log=True)
-            tail = _server_log_tail(limit=40).get("lines", [])
-            detail = "\n".join(tail[-40:])
-            raise RuntimeError("llama-server exited during startup" + (f"\n{detail}" if detail else ""))
-        if _health(port):
-            try:
-                endpoint = _register_custom_endpoint(port, model_id)
-            except Exception as exc:
-                _stop_server(preserve_log=True)
-                raise RuntimeError(f"custom endpoint registration failed: {exc}") from exc
-            state = _state()
-            if state.get("pid") == process.pid:
-                state["custom_endpoint"] = endpoint
-                _save_state(state)
-            return
-        time.sleep(0.5)
-    _stop_server(preserve_log=True)
-    raise RuntimeError("llama-server did not become healthy within 60 seconds")
+    _server_startup().start()
 
 
 def _server_log_tail(limit: int = 250) -> dict[str, Any]:
-    bounded = max(1, min(int(limit), 500))
-    try:
-        size_bytes = SERVER_LOG_PATH.stat().st_size
-        with SERVER_LOG_PATH.open("rb") as stream:
-            stream.seek(max(0, size_bytes - 256 * 1024))
-            text = stream.read().decode("utf-8", errors="replace")
-    except OSError:
-        return {"path": str(SERVER_LOG_PATH), "lines": [], "size_bytes": 0}
-    lines = text.splitlines()
-    return {"path": str(SERVER_LOG_PATH), "lines": lines[-bounded:], "size_bytes": size_bytes}
+    return _server_lifecycle().log_tail(limit)
 
 
 def _server_rows() -> list[dict[str, Any]]:
-    kind = _runtime_kind(_state())
-    visible = [row for row in _model_rows() if _model_policy.accepts(kind, str(row.get("hf_repo") or ""), [str(row.get("hf_file") or path) for path in row.get("paths", [])] or [str(row.get("hf_file") or "")])]
-    return [
-        {key: row[key] for key in ("id", "size_bytes", "size_label", "hf_repo", "hf_file", "paths") if key in row}
-        for row in visible
-    ]
+    return _model_lifecycle().server_rows()
+
+
+def _is_server_running() -> bool:
+    state = _state()
+    return bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
+
+
+def _model_lifecycle() -> ModelLifecycleService:
+    return ModelLifecycleService(
+        registry=_models(), load_state=_state, save_state=_save_state, runtime_kind=_runtime_kind,
+        accepts=lambda kind, repo, paths: _model_policy.accepts(kind, repo, paths),
+        server_running=_is_server_running, stop_server=_stop_server, models_root=MODELS_ROOT,
+        model_id=_model_id, model_rows=_model_rows,
+    )
+
+
+def _runtime_inspector() -> RuntimeInspector:
+    return RuntimeInspector(
+        load_state=_state, save_state=_save_state, runtime_kind=_runtime_kind,
+        executable=_server_executable, installed_target=_installed_target,
+        executable_in=_server_executable_in, backend_detector=_backend, backend=get_backend,
+        backend_view=backend_view, machine_root=MACHINE_ROOT, runtime_root=RUNTIME_ROOT,
+        prism_root=PRISM_RUNTIME_ROOT, pid_alive=_pid_alive, health=_health,
+        unregister_endpoint=_unregister_custom_endpoint, devices=_detected_devices,
+        server_rows=_server_rows, models_root=MODELS_ROOT,
+    )
 
 
 def _runtime_info() -> dict[str, Any]:
-    state = _state()
-    kind = _runtime_kind(state)
-    mode = "official" if kind == "official" else "custom"
-    raw_path = state.get("runtime_path") or state.get("custom_runtime_path")
-    path = str(Path(str(raw_path)).expanduser().resolve()) if raw_path else None
-    executable = _server_executable()
-    adapter = get_backend(kind)
-    view = backend_view(kind, state, MACHINE_ROOT)
-    return {"kind": kind, "mode": mode, "label": view.label, "description": adapter.description,
-            "repository": getattr(adapter, "repository", None), "path": path,
-            "managed_root": view.managed_root, "version": view.version,
-            "install_action": view.install_action, "executable": str(executable) if executable else None,
-            "installed": executable is not None, "official": kind == "official"}
+    return _runtime_inspector().info()
 
 
 def _status() -> dict[str, Any]:
-    state = _state()
-    runtime = _runtime_info()
-    target = _installed_target() if runtime["kind"] == "official" else None
-    tag, backend = target or (str(state.get("installed_tag") or ""), str(state.get("installed_backend") or ""))
-    runtime_version = runtime["version"] or (tag if runtime["kind"] == "official" else None)
-    process_alive = _pid_alive(state.get("pid"))
-    running = process_alive and _health(int(state.get("port") or 18434))
-    if not process_alive:
-        if state.get("pid"):
-            state["pid"] = None
-            state["custom_endpoint"] = None
-            _save_state(state)
-        _unregister_custom_endpoint()
-    elif not running:
-        state["custom_endpoint"] = None
-        _save_state(state)
-        _unregister_custom_endpoint()
-    return {"enabled": True, "tag": tag, "runtime_version": runtime_version, "configured_tag": str(state.get("tag") or "latest"),
-            "latest_tag": None, "update_available": False, "runtime_installed": bool(_server_executable()),
-            "runtime_backend": backend or (_backend() if tag else None), "backend": backend or (_backend() if tag else None),
-            "runtime_mode": runtime["mode"], "runtime_path": runtime["path"],
-            "runtime_executable": runtime["executable"], "runtime_kind": runtime["kind"],
-            "runtime_label": runtime["label"], "runtime_repository": runtime["repository"],
-            "runtime_managed_root": runtime["managed_root"], "runtime_install_action": runtime["install_action"],
-            "runtime_options": {"official": {"version": str(state.get("installed_tag") or "") or None, "installed": _server_executable_in(RUNTIME_ROOT) is not None},
-                                "prism_ml": {"version": str(state.get("prism_release_tag") or "") or None, "installed": _server_executable_in(PRISM_RUNTIME_ROOT) is not None}},
-            "devices": _detected_devices(), "server_running": running,
-            "server_base_url": f"http://127.0.0.1:{int(state.get('port') or 18434)}" if running else None,
-            "custom_endpoint": state.get("custom_endpoint") if running else None,
-            "active_model_id": state.get("active_model_id"), "loaded_models": {},
-            "models": _server_rows(), "models_dir": str(MODELS_ROOT), "loading": {}, "placement": {}}
-
-
-_HF_PERCENT_RE = re.compile(r"(?<!\d)(\d{1,3})\s*%")
+    return _runtime_inspector().status()
 
 
 def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
@@ -895,62 +530,16 @@ def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
     executable = shutil.which("hf")
     if not executable:
         raise RuntimeError("hf CLI was not found on PATH")
-    uri = f"hf://{repo}/{path}"
     if job is not None:
         _download_progress.begin(job, f"다운로드 중: {Path(path).name}")
-    process = subprocess.Popen(
-        [executable, "download", uri, "--format", "quiet"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-        env=_hf_env(),
-    )
-    stdout_chunks: list[str] = []
-    stderr_tail = ""
+    def start(argv: list[str]) -> subprocess.Popen[Any]:
+        return subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+            env=_hf_env(),
+        )
 
-    def consume_stdout() -> None:
-        if process.stdout is None:
-            return
-        while chunk := process.stdout.read(4096):
-            stdout_chunks.append(chunk.decode("utf-8", errors="replace")
-                                 if isinstance(chunk, bytes) else str(chunk))
-
-    def consume_stderr() -> None:
-        nonlocal stderr_tail
-        if process.stderr is None:
-            return
-        while chunk := process.stderr.read(4096):
-            text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
-            stderr_tail = (stderr_tail + text)[-4096:]
-            if job is None:
-                continue
-            matches = _HF_PERCENT_RE.findall(stderr_tail)
-            if not matches:
-                continue
-            file_percent = min(100, max(0, int(matches[-1])))
-            _download_progress.observe_percent(job, file_percent, part_index, part_count)
-
-    stdout_thread = threading.Thread(target=consume_stdout, daemon=True, name="llamacpp-hf-stdout")
-    stderr_thread = threading.Thread(target=consume_stderr, daemon=True, name="llamacpp-hf-progress")
-    stdout_thread.start()
-    stderr_thread.start()
-    try:
-        returncode = process.wait(timeout=6 * 60 * 60)
-    except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
-        raise RuntimeError(f"hf download timed out for {uri}") from exc
-    stdout_thread.join()
-    stderr_thread.join()
-    if returncode != 0:
-        raise RuntimeError(f"hf download failed for {uri} (exit {returncode})")
-    output_lines = [line.strip() for line in "".join(stdout_chunks).splitlines() if line.strip()]
-    if not output_lines:
-        raise RuntimeError(f"hf download returned no local path for {uri}")
-    reported = Path(output_lines[-1])
-    if not reported.is_absolute():
-        reported = (Path.cwd() / reported).resolve()
-    if not reported.is_file():
-        raise RuntimeError(f"hf download returned a missing local path for {uri}")
-    return reported.resolve()
+    observe = None if job is None else lambda percent: _download_progress.observe_percent(job, percent, part_index, part_count)
+    return HuggingFaceDownloadService(start, Path.cwd).download(executable, repo, path, observe)
 
 
 def _require_compatible_model(kind: str, repo_id: str, paths: list[str]) -> None:
@@ -959,19 +548,35 @@ def _require_compatible_model(kind: str, repo_id: str, paths: list[str]) -> None
         raise HTTPException(status_code=422, detail="Prism-ML backend에는 catalog에 등록된 Prism Bonsai/Ternary GGUF quant만 등록할 수 있습니다")
 
 
+def _remove_hf_cache(repo_id: str) -> bool:
+    executable = shutil.which("hf")
+    if not executable:
+        raise RuntimeError("hf CLI was not found on PATH")
+    result = subprocess.run(
+        [executable, "cache", "rm", repo_id, "--yes", "--format", "quiet"],
+        capture_output=True, check=False, text=True, encoding="utf-8", errors="replace",
+        env=_hf_env(), timeout=120,
+    )
+    return result.returncode == 0
+
+
+def _hf_workflow() -> HuggingFaceModelWorkflow:
+    return HuggingFaceModelWorkflow(
+        load_state=_state, runtime_kind=_runtime_kind,
+        accepts=lambda kind, repo, paths, version: _model_policy.accepts(kind, repo, paths, version),
+        cache_models=_hf_downloaded_models, cached_files=_hf_cached_files, http_json=_http_json,
+        download=_hf_download, register=_register_model, remove_cache=_remove_hf_cache,
+        model_id=_model_id,
+        visible_repositories=lambda kind, repositories: _model_policy.visible_repositories(kind, repositories),
+    )
+
+
 def _local_hf_models() -> dict[str, Any]:
-    models, executable, warning = _hf_downloaded_models()
-    kind = _runtime_kind(_state())
-    visible_repositories = set(_model_policy.visible_repositories(
-        kind, (str(model.get("repo_id") or "") for model in models),
-    ))
-    visible = [model for model in models if str(model.get("repo_id") or "") in visible_repositories]
-    return {"models": visible, "warning": warning, "runtime_kind": kind}
+    return _hf_workflow().local_models()
 
 
 def _copy_options(options: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [dict(option, aliases=list(option.get("aliases", [])), choices=list(option.get("choices", [])))
-            for option in options]
+    return ServerOptionCatalog.copy(options)
 
 
 def _option_cache_identity(executable: Path) -> tuple[str, str, str, str, int, int]:
@@ -1006,53 +611,7 @@ def _option_list() -> list[dict[str, Any]]:
                                 text=True, encoding="utf-8", errors="replace", timeout=30)
         if result.returncode != 0:
             return []
-        options: dict[str, dict[str, Any]] = {}
-        for raw in result.stdout.splitlines():
-            line = raw.strip()
-            if not line.startswith("-") or "--" not in line:
-                continue
-            separator = re.search(r"\s{2,}(?=[A-Za-z(])", line)
-            option_part = line[:separator.start()] if separator else line
-            names = _OPTION_RE.findall(option_part)
-            if not names:
-                continue
-            primary = next((name for name in names if name.startswith("--") and not name.startswith("--no-")), names[0])
-            key = primary.lstrip("-")
-            description = line[separator.end():].strip() if separator else ""
-            value_hint = _OPTION_RE.sub("", option_part).strip(" ,")
-            if not value_hint and any(name.startswith("--no-") for name in names):
-                for name in names:
-                    flag_key = name.lstrip("-")
-                    options.setdefault(flag_key, {"key": flag_key, "name": name, "aliases": [name],
-                                                  "value_hint": "", "description": description,
-                                                  "requires_value": False, "default_value": None,
-                                                  "choices": [], "value_kind": "string", "toggle": False})
-                continue
-            choices_match = re.search(r"(?:\[([^\]]+)\]|\{([^}]+)\})", value_hint)
-            choices_text = next((value for value in choices_match.groups() if value), "") if choices_match else ""
-            choices = [value.strip().strip("'\"") for value in re.split(r"[|,]", choices_text) if value.strip()] if choices_text else []
-            toggle = any(name == f"--no-{key}" for name in names) and bool(value_hint)
-            if key in _KNOWN_OPTION_CHOICES:
-                choices = list(_KNOWN_OPTION_CHOICES[key])
-                value_hint = "|".join(choices)
-            default_match = re.search(r"default:\s*([^,)]+)", line, re.IGNORECASE)
-            default_value = default_match.group(1).strip().strip("'\"") if default_match else None
-            value_upper = value_hint.upper()
-            value_kind = "choice" if choices else "string"
-            if toggle:
-                value_hint = "on|off"
-                choices = ["on", "off"]
-                value_kind = "choice"
-                default_value = "on" if str(default_value or "").lower() in {"enabled", "on", "true", "1"} else "off"
-            if re.fullmatch(r"[+-]?\d+\.\d+", str(default_value or "")) or re.search(r"\b(?:FLOAT|PROB|PROBABILITY)\b", value_upper):
-                value_kind = "number"
-            elif re.search(r"\b(?:N|NUM|NUMBER|COUNT|SIZE|PORT|LAYERS?)\b", value_upper):
-                value_kind = "integer"
-            options.setdefault(key, {"key": key, "name": primary, "aliases": names,
-                                     "value_hint": value_hint or line, "description": description,
-                                     "requires_value": bool(value_hint) or toggle, "default_value": default_value,
-                                     "choices": choices, "value_kind": value_kind, "toggle": toggle})
-        catalog = list(options.values())
+        catalog = ServerOptionCatalog.parse_help(result.stdout)
         _option_catalog_cache = (identity, catalog)
         try:
             _write_json(OPTION_METADATA_CACHE_PATH, {"identity": list(identity), "options": catalog})
@@ -1061,6 +620,15 @@ def _option_list() -> list[dict[str, Any]]:
         return _copy_options(catalog)
 
 
+router.include_router(create_model_router(ModelRouteContext(
+    lifecycle=_model_lifecycle, workflow=_hf_workflow, create_job=_job,
+    launch=_spawn, finish=_finish, begin_download=_download_progress.begin,
+)))
+router.include_router(create_server_router(ServerRouteContext(
+    state=_state, stop=_stop_server, start=_start_server, create_job=_job, launch=_spawn,
+    finish=_finish, recent_jobs=_jobs, find_job=lambda job_id: _job_manager().find(job_id),
+    logs=_server_log_tail,
+)))
 @router.get("/status")
 def status() -> dict[str, Any]:
     return _status()
@@ -1111,60 +679,6 @@ def catalog() -> dict[str, Any]:
     return {"models": []}
 
 
-@router.get("/hf-models")
-def hf_models() -> dict[str, Any]:
-    return _local_hf_models()
-
-
-@router.get("/hf-models/files")
-def hf_model_files(repo_id: str) -> dict[str, Any]:
-    files, warning = _hf_cached_files(repo_id)
-    return {"repo_id": repo_id, "files": files, "warning": warning}
-
-
-@router.post("/hf-models/delete")
-def delete_hf_model(body: dict[str, Any]) -> dict[str, Any]:
-    """Delete one repository from the user's HF cache via the HF CLI."""
-    repo_id = str(body.get("repo_id") or "")
-    if not repo_id or repo_id != repo_id.strip():
-        raise HTTPException(status_code=422, detail="repo_id is required")
-
-    state = _state()
-    registered = [
-        model_id
-        for model_id, entry in (state.get("models") or {}).items()
-        if isinstance(entry, dict) and entry.get("hf_repo") == repo_id
-    ]
-    if registered:
-        raise HTTPException(
-            status_code=409,
-            detail="등록된 모델을 먼저 삭제해야 cache를 삭제할 수 있습니다: " + ", ".join(registered),
-        )
-
-    executable = shutil.which("hf")
-    if not executable:
-        raise HTTPException(status_code=503, detail="hf CLI was not found on PATH")
-    result = subprocess.run(
-        [executable, "cache", "rm", repo_id, "--yes", "--format", "quiet"],
-        capture_output=True,
-        check=False,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=_hf_env(),
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=502, detail="HF cache deletion failed")
-
-    remaining, _, warning = _hf_downloaded_models()
-    if warning:
-        raise HTTPException(status_code=502, detail="HF cache deletion completed but verification failed")
-    if any(item.get("repo_id") == repo_id for item in remaining):
-        raise HTTPException(status_code=502, detail="HF cache deletion could not be verified")
-    return {"ok": True, "repo_id": repo_id, "deleted": True}
-
-
 def _download_archive(url: str, destination: Path, job: dict[str, Any], floor: int, ceiling: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(url, timeout=120) as response, destination.open("wb") as output:
@@ -1174,43 +688,28 @@ def _download_archive(url: str, destination: Path, job: dict[str, Any], floor: i
             if total: job["percent"] = floor + round(done / total * (ceiling - floor))
 
 
+def _prism_installer() -> PrismRuntimeInstaller:
+    def clone(git: str, url: str, destination: Path) -> int:
+        result = subprocess.run(
+            [git, "clone", "--depth", "1", url, str(destination)], capture_output=True,
+            check=False, text=True, encoding="utf-8", errors="replace", timeout=180,
+        )
+        return result.returncode
+
+    return PrismRuntimeInstaller(
+        PRISM_RUNTIME_ROOT, _state, _save_state, lambda: shutil.which("git"), clone, _backend,
+        _download_archive, OfficialRuntimeService.extract_archive,
+        lambda root: get_backend("prism_ml").resolve_executable(root),
+    )
+
+
 def _install_prism_runtime() -> dict[str, Any]:
     job = _job("prism-runtime-install", "Prism-ML GitHub runtime 준비")
+
     def run() -> None:
-        target = PRISM_RUNTIME_ROOT
-        staging = target.with_name(f".Bonsai-demo-{job['job_id']}")
-        archive = PRISM_RUNTIME_ROOT.parent / "downloads" / f"prism-{job['job_id']}.zip"
-        try:
-            git = shutil.which("git")
-            if not git: raise RuntimeError("git is required to download Prism-ML Bonsai-demo")
-            job.update({"phase":"cloning","detail":"Downloading PrismML-Eng/Bonsai-demo","percent":5})
-            result = subprocess.run([git,"clone","--depth","1","https://github.com/PrismML-Eng/Bonsai-demo.git",str(staging)], capture_output=True, check=False, text=True, encoding="utf-8", errors="replace", timeout=180)
-            if result.returncode: raise RuntimeError("Prism-ML GitHub clone failed")
-            setup = (staging / "setup.ps1").read_text(encoding="utf-8", errors="replace")
-            tag_match, cuda_match = re.search(r'\$ReleaseTag\s*=\s*"([^"]+)"', setup), re.search(r'\$CudaTag\s*=\s*"([^"]+)"', setup)
-            if not tag_match or not cuda_match: raise RuntimeError("Prism-ML setup metadata did not expose release/CUDA tags")
-            tag, cuda_tag = tag_match.group(1), cuda_match.group(1)
-            backend = "cuda" if _backend() == "cuda" else "cpu"
-            asset = f"llama-{tag}-bin-win-cuda-{cuda_tag}-x64.zip" if backend == "cuda" else f"llama-{tag}-bin-win-cpu-x64.zip"
-            base_url = f"https://github.com/PrismML-Eng/llama.cpp/releases/download/{tag}"
-            job.update({"phase":"downloading","detail":f"Downloading Prism llama-server ({backend})","percent":15})
-            _download_archive(f"{base_url}/{asset}", archive, job, 15, 80)
-            bin_dir = staging / "bin" / backend; bin_dir.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(archive) as package: package.extractall(bin_dir)
-            if backend == "cuda":
-                try:
-                    cuda_archive = PRISM_RUNTIME_ROOT.parent / "downloads" / f"prism-cudart-{job['job_id']}.zip"
-                    _download_archive(f"{base_url}/cudart-llama-bin-win-cuda-{cuda_tag}-x64.zip", cuda_archive, job, 82, 94)
-                    with zipfile.ZipFile(cuda_archive) as package: package.extractall(bin_dir)
-                    cuda_archive.unlink(missing_ok=True)
-                except Exception: pass
-            get_backend("prism_ml").resolve_executable(staging)
-            if target.exists(): shutil.rmtree(target)
-            target.parent.mkdir(parents=True, exist_ok=True); shutil.move(str(staging), str(target))
-            state = _state(); state.update({"runtime_kind":"prism_ml","runtime_path":str(target.resolve()),"runtime_mode":"custom","custom_runtime_path":str(target.resolve()),"prism_release_tag":tag,"prism_backend":backend}); _save_state(state)
-            _finish(job, f"Prism-ML {tag} ready")
-        finally:
-            archive.unlink(missing_ok=True); shutil.rmtree(staging, ignore_errors=True)
+        tag, _ = _prism_installer().install(job)
+        _finish(job, f"Prism-ML {tag} ready")
+
     _spawn(job, run, "prism-runtime-install")
     return {"job_id":job["job_id"],"kind":"prism_ml","repository":"PrismML-Eng/Bonsai-demo"}
 
@@ -1248,285 +747,40 @@ def runtime_install(body: dict[str, Any]) -> dict[str, Any]:
     job = _job("runtime-install", f"llama.cpp {tag} ({backend})")
 
     def run() -> None:
-        assets = _asset_names(tag, backend)
-        download_root = RUNTIME_ROOT / "downloads"
-        extract_root = RUNTIME_ROOT / f".{tag}-{backend}-{job['job_id']}"
-        install_root = RUNTIME_ROOT / tag / backend
-        extract_root.mkdir(parents=True, exist_ok=True)
-        try:
-            for index, asset in enumerate(assets):
-                url = f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{asset}"
-                archive = download_root / asset
-                download_root.mkdir(parents=True, exist_ok=True)
-                job["phase"] = "downloading"
-                job["detail"] = f"Downloading {asset}"
-                with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as output:
-                    total = int(response.headers.get("Content-Length") or 0)
-                    done = 0
-                    while chunk := response.read(1 << 20):
-                        output.write(chunk)
-                        done += len(chunk)
-                        job["percent"] = min(90, round((index + (done / total if total else 0)) / len(assets) * 80))
-                job["phase"] = "extracting"
-                with zipfile.ZipFile(archive) as package:
-                    package.extractall(extract_root)
-            executable = next(extract_root.rglob("llama-server.exe"), None)
-            if executable is None:
-                raise RuntimeError("runtime archive did not contain llama-server.exe")
-            install_root.parent.mkdir(parents=True, exist_ok=True)
-            if install_root.exists():
-                shutil.rmtree(install_root)
-            shutil.move(str(extract_root), str(install_root))
-            _write_json(install_root / "manifest.json", {"tag": tag, "backend": backend, "verified_version": tag})
-            state = _state()
-            state.update({"installed_tag": tag, "installed_backend": backend})
-            _save_state(state)
-            job["percent"] = 100
-            _finish(job, f"llama.cpp {tag} ready")
-        finally:
-            shutil.rmtree(extract_root, ignore_errors=True)
+        _official_runtime().install(tag, backend, job, _download_archive)
+        _finish(job, f"llama.cpp {tag} ready")
 
     _spawn(job, run, "llamacpp-runtime-install")
     return {"job_id": job["job_id"], "tag": tag, "backend": backend}
 
 
-@router.post("/server")
-def server(body: dict[str, Any]) -> dict[str, Any]:
-    action = str(body.get("action") or "")
-    if action == "stop":
-        _stop_server()
-        return {"ok": True, "server_running": False}
-    if action == "start":
-        state = _state()
-        if not state.get("active_model_id"):
-            raise HTTPException(status_code=400, detail="select a model before starting llama-server")
-        job = _job("server-start", "llama-server 시작 중")
-
-        def run() -> None:
-            _start_server()
-            _finish(job, "llama-server is healthy")
-
-        _spawn(job, run, "llamacpp-server-start")
-        return {"ok": True, "server_running": False, "job_id": job["job_id"]}
-    raise HTTPException(status_code=400, detail="action must be start or stop")
+def _parameter_error(detail: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=detail)
 
 
-@router.post("/activate")
-def activate(body: dict[str, Any]) -> dict[str, Any]:
-    model_id = str(body.get("model_id") or "")
-    state = _state()
-    entry = state.get("models", {}).get(model_id) if isinstance(state.get("models"), dict) else None
-    if not isinstance(entry, dict):
-        raise HTTPException(status_code=404, detail="model is not registered")
-    if not entry.get("hf_repo"):
-        _active_path(model_id)
-    server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
-    if server_running and state.get("active_model_id") != model_id:
-        raise HTTPException(status_code=409, detail="stop llama-server before selecting another model")
-    state["active_model_id"] = model_id
-    _save_state(state)
-    return {"ok": True, "model_id": model_id, "server_running": server_running}
+def _server_requires_restart() -> bool:
+    return _is_server_running()
 
 
-@router.post("/eject")
-def eject(body: dict[str, Any]) -> dict[str, Any]:
-    model_id = str(body.get("model_id") or "")
-    state = _state()
-    if state.get("active_model_id") == model_id:
-        _stop_server()
-        state["active_model_id"] = None
-        _save_state(state)
-    return {"ok": True, "model_id": model_id}
-
-
-@router.delete("/models/{model_id}")
-def delete(model_id: str) -> dict[str, Any]:
-    if _state().get("active_model_id") == model_id:
-        _stop_server()
-        state = _state()
-        state["active_model_id"] = None
-        _save_state(state)
-    state = _state()
-    entry = state.get("models", {}).get(model_id) if isinstance(state.get("models"), dict) else None
-    rows = [row for row in _model_rows() if row["id"] == model_id]
-    if not entry and not rows:
-        raise HTTPException(status_code=404, detail="model not found")
-    if isinstance(entry, dict) and entry.get("owned"):
-        for raw_path in entry.get("paths", []):
-            Path(str(raw_path)).unlink(missing_ok=True)
-    elif not entry:
-        for path in rows[0]["paths"] if rows else []:
-            candidate = Path(path)
-            if MODELS_ROOT in candidate.parents:
-                candidate.unlink(missing_ok=True)
-    if isinstance(state.get("models"), dict):
-        state["models"].pop(model_id, None)
-    _save_state(state)
-    return {"ok": True, "model_id": model_id}
-
-
-@router.get("/search")
-def search(q: str = "", limit: int = 20) -> dict[str, Any]:
-    if not q.strip():
-        return {"hits": []}
-    url = "https://huggingface.co/api/models?" + urllib.parse.urlencode(
-        {"search": q, "filter": "gguf", "sort": "downloads", "direction": "-1", "limit": max(1, min(limit, 50))})
-    try:
-        payload = _http_json(url)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Hugging Face search failed: {exc}") from exc
-    kind = _runtime_kind(_state())
-    hits = [{"repo": str(item.get("id", "")), "downloads": int(item.get("downloads") or 0)}
-            for item in payload if isinstance(item, dict) and item.get("id")]
-    return {"hits": [hit for hit in hits if _model_policy.accepts(kind, hit["repo"], ["candidate.gguf"])]}
-
-
-@router.get("/repo")
-def repo(repo_id: str) -> dict[str, Any]:
-    url = f"https://huggingface.co/api/models/{urllib.parse.quote(repo_id, safe='/')}/tree/main?recursive=true&expand=true"
-    try:
-        payload = _http_json(url)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Could not list {repo_id}: {exc}") from exc
-    kind = _runtime_kind(_state())
-    groups: dict[str, dict[str, Any]] = {}
-    for item in payload if isinstance(payload, list) else []:
-        path = str(item.get("path", ""))
-        if not path.lower().endswith(".gguf") or "mmproj" in path.lower() or "draft" in path.lower():
-            continue
-        name = Path(path).name
-        label = _SPLIT_RE.sub("", Path(name).stem)
-        row = groups.setdefault(label, {"label": label, "paths": [], "total_bytes": 0, "fit": "available"})
-        row["paths"].append(path)
-        row["total_bytes"] += int(item.get("size") or 0)
-    files = sorted(groups.values(), key=lambda item: item["total_bytes"], reverse=True)
-    _require_compatible_model(kind, repo_id, [path for group in files for path in group["paths"]]) if files else None
-    return {"files": files}
-
-
-@router.post("/download-browsed")
-def download_browsed(body: dict[str, Any]) -> dict[str, Any]:
-    repo_id = str(body.get("repo") or "")
-    paths = [str(path) for path in body.get("paths") or [] if str(path).lower().endswith(".gguf")]
-    if not repo_id or not paths:
-        raise HTTPException(status_code=422, detail="repo and .gguf paths are required")
-    _require_compatible_model(_runtime_kind(_state()), repo_id, paths)
-    model_id = _model_id(Path(paths[0]))
-    job = _job("model-download", model_id)
-    _download_progress.begin(job, f"다운로드 준비: {model_id}")
-
-    def run() -> None:
-        downloaded: list[Path] = []
-        for path in paths:
-            downloaded.append(_hf_download(repo_id, path, job=job,
-                                           part_index=len(downloaded), part_count=len(paths)))
-        _finish(job, f"{model_id} downloaded; not registered")
-
-    _spawn(job, run, "llamacpp-hf-download")
-    return {"job_id": job["job_id"], "model_id": model_id}
-
-
-@router.post("/register")
-def register(body: dict[str, Any]) -> dict[str, Any]:
-    """Explicitly register an HF repo/file without downloading it."""
-    repo_id = str(body.get("repo") or "")
-    paths = [str(path) for path in body.get("paths") or [] if str(path).lower().endswith(".gguf")]
-    if not repo_id or not paths:
-        raise HTTPException(status_code=422, detail="repo and .gguf paths are required")
-    _require_compatible_model(_runtime_kind(_state()), repo_id, paths)
-    model_id = _model_id(Path(paths[0]))
-    cached_groups, warning = _hf_cached_files(repo_id)
-    selected_group = next((group for group in cached_groups if set(group["paths"]) == set(paths)), None)
-    if selected_group is None:
-        raise HTTPException(status_code=422, detail=warning or "선택한 GGUF가 HF cache에 없습니다")
-    size_bytes = int(selected_group.get("total_bytes") or 0)
-    _register_model(model_id, [], False, hf_repo=repo_id, hf_file=paths[0], size_bytes=size_bytes)
-    return {"ok": True, "model_id": model_id, "registered": True, "downloaded": False, "size_bytes": size_bytes}
-
-
-@router.get("/jobs")
-def jobs() -> dict[str, Any]:
-    return {"jobs": _jobs()}
-
-
-@router.get("/jobs/{job_id}")
-def job(job_id: str) -> dict[str, Any]:
-    with _jobs_lock:
-        value = _job_store.get(job_id)
-    if value is None:
-        raise HTTPException(status_code=404, detail="job not found")
-    return value
-
-
-@router.get("/logs")
-def logs(limit: int = 250) -> dict[str, Any]:
-    return _server_log_tail(limit)
-
-
-@router.get("/settings")
-def settings(q: str = "", limit: int = 50) -> dict[str, Any]:
-    query = q.strip().lower()
-    options = [option for option in _option_list() if query and (query in option["key"].lower() or query in option["name"].lower()
-                                                               or query in option["description"].lower())]
-    return {"editable": True, "query": q, "options": options[:max(1, min(limit, 100))],
-            "runtime": str(_server_executable() or ""), "message": "plugin이 관리하는 llama-server --help에서 검색합니다."}
+def _parameters() -> ParameterSettingsService:
+    return ParameterSettingsService(
+        _option_list, _canonical_option_value, _load_options, _save_options, _state, _save_state,
+        _parameter_error, time.time, lambda: uuid.uuid4().hex[:12],
+    )
 
 
 def _validate_option_values(options: dict[str, str]) -> None:
-    catalog = {option["key"]: option for option in _option_list()}
-    unknown = sorted(key for key in options if key not in catalog)
-    if unknown:
-        raise HTTPException(status_code=422, detail=f"unsupported llama-server parameter(s): {', '.join(unknown)}")
-    for key, value in options.items():
-        metadata = catalog[key]
-        text = str(value)
-        if metadata["requires_value"] and not text.strip():
-            raise HTTPException(status_code=422, detail=f"parameter '{key}' requires a value")
-        if not metadata["requires_value"] and text.strip():
-            raise HTTPException(status_code=422, detail=f"parameter '{key}' does not accept a value")
-        if metadata["choices"] and text not in metadata["choices"]:
-            allowed = ", ".join(metadata["choices"])
-            raise HTTPException(status_code=422, detail=f"parameter '{key}' must be one of: {allowed}")
-        if metadata["value_kind"] == "integer" and not re.fullmatch(r"[+-]?\d+", text):
-            raise HTTPException(status_code=422, detail=f"parameter '{key}' requires an integer")
-        if metadata["value_kind"] == "number":
-            try:
-                float(text)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=f"parameter '{key}' requires a number") from exc
+    _parameters().validate(options)
 
 
 def _normalize_options(options: Any) -> dict[str, str]:
-    if not isinstance(options, dict):
-        raise HTTPException(status_code=422, detail="options must be an object")
-    catalog = {option["key"]: option for option in _option_list()}
-    normalized = {str(key).lstrip("-"): _canonical_option_value(catalog.get(str(key).lstrip("-")), value)
-                  for key, value in options.items()}
-    _validate_option_values(normalized)
-    return normalized
+    return _parameters().normalize(options)
 
 
 def _load_presets() -> dict[str, dict[str, Any]]:
-    state = _state()
-    raw = state.get("parameter_presets")
-    if not isinstance(raw, dict):
-        state["parameter_presets"] = {}
-        _save_state(state)
-        return {}
-    migrated = False
-    presets: dict[str, dict[str, Any]] = {}
-    for preset_id, value in raw.items():
-        if not isinstance(value, dict):
-            continue
-        preset = dict(value)
-        if preset.get("model_id") is not None:
-            preset["model_id"] = None
-            raw[preset_id] = preset
-            migrated = True
-        presets[str(preset_id)] = preset
-    if migrated:
-        _save_state(state)
-    return presets
+    return {row["id"]: {"name": row["name"], "model_id": row["model_id"], "options": row["options"],
+                        "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            for row in _parameters().presets()}
 
 
 def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -1535,116 +789,40 @@ def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
             "created_at": value.get("created_at"), "updated_at": value.get("updated_at")}
 
 
-@router.get("/settings/{model_id}")
 def model_settings(model_id: str) -> dict[str, Any]:
-    stored = _load_options().get(model_id, {})
-    catalog = _option_list()
-    ordered = {option["key"]: _canonical_option_value(option, stored[option["key"]])
-               for option in catalog if option["key"] in stored}
-    metadata = {option["key"]: option for option in catalog if option["key"] in ordered}
-    return {"model_id": model_id, "options": ordered, "order": [option["key"] for option in catalog], "metadata": metadata}
+    return _parameters().model_settings(model_id)
 
 
-@router.put("/settings/{model_id}")
 def save_model_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    normalized = _normalize_options(body.get("options") or {})
-    all_options = _load_options()
-    all_options[model_id] = normalized
-    _save_options(all_options)
-    state = _state()
-    server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
-    return {"model_id": model_id, "options": normalized, "applied": False,
-            "requires_restart": server_running, "job_id": None}
+    return _parameters().save_model(model_id, body.get("options") or {}, _server_requires_restart())
 
 
-@router.get("/presets")
 def presets(model_id: str = "") -> dict[str, Any]:
-    rows = [_preset_row(preset_id, value) for preset_id, value in _load_presets().items()]
-    rows.sort(key=lambda item: (item["name"].lower(), item["id"]))
-    return {"presets": rows}
+    return {"presets": _parameters().presets()}
 
 
-@router.post("/presets")
 def create_preset(body: dict[str, Any]) -> dict[str, Any]:
-    name = str(body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="preset name is required")
-    if len(name) > 100:
-        raise HTTPException(status_code=422, detail="preset name must be at most 100 characters")
-    options = body.get("options")
-    if options is None:
-        source_model_id = str(body.get("model_id") or "").strip()
-        options = _load_options().get(source_model_id, {})
-    normalized = _normalize_options(options)
-    now = time.time()
-    preset_id = uuid.uuid4().hex[:12]
-    state = _state()
-    stored = state.setdefault("parameter_presets", {})
-    stored[preset_id] = {"name": name, "model_id": None, "options": normalized,
-                         "created_at": now, "updated_at": now}
-    _save_state(state)
-    return {"preset": _preset_row(preset_id, stored[preset_id])}
+    return {"preset": _parameters().create_preset(
+        body.get("name"), body.get("options"), str(body.get("model_id") or "").strip(),
+    )}
 
 
-@router.post("/presets/{preset_id}/apply")
 def apply_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    stored = _load_presets()
-    value = stored.get(preset_id)
-    if value is None:
-        raise HTTPException(status_code=404, detail="preset not found")
-    model_id = str(body.get("model_id") or value.get("model_id") or "").strip()
-    if not model_id:
-        raise HTTPException(status_code=422, detail="model_id is required to apply a preset")
-    preset_options = _normalize_options(value.get("options") or {})
-    all_options = _load_options()
-    merged = dict(all_options.get(model_id, {}))
-    merged.update(preset_options)
-    omitted_options: list[str] = []
-    if _runtime_kind(_state()) == "prism_ml":
-        omitted_options = sorted(key for key in merged if key.startswith("spec-"))
-        merged = {key: option_value for key, option_value in merged.items() if key not in omitted_options}
-    _validate_option_values(merged)
-    all_options[model_id] = merged
-    _save_options(all_options)
-    state = _state()
-    server_running = bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
-    return {"preset_id": preset_id, "model_id": model_id, "options": merged,
-            "omitted_options": omitted_options, "applied": False, "requires_restart": server_running}
+    stored = _load_presets().get(preset_id)
+    model_id = str(body.get("model_id") or (stored or {}).get("model_id") or "").strip()
+    return _parameters().apply_preset(preset_id, model_id, _runtime_kind(_state()), _server_requires_restart())
 
 
-@router.patch("/presets/{preset_id}")
 def rename_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    name = str(body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="preset name is required")
-    if len(name) > 100:
-        raise HTTPException(status_code=422, detail="preset name must be at most 100 characters")
-    state = _state()
-    stored = state.get("parameter_presets")
-    if not isinstance(stored, dict) or preset_id not in stored or not isinstance(stored[preset_id], dict):
-        raise HTTPException(status_code=404, detail="preset not found")
-    stored[preset_id]["name"] = name
-    stored[preset_id]["updated_at"] = time.time()
-    _save_state(state)
-    return {"preset": _preset_row(preset_id, stored[preset_id])}
+    return {"preset": _parameters().rename_preset(preset_id, body.get("name"))}
 
 
-@router.delete("/presets/{preset_id}")
 def delete_preset(preset_id: str) -> dict[str, Any]:
-    state = _state()
-    stored = state.get("parameter_presets")
-    if not isinstance(stored, dict) or preset_id not in stored:
-        raise HTTPException(status_code=404, detail="preset not found")
-    stored.pop(preset_id, None)
-    _save_state(state)
+    _parameters().delete_preset(preset_id)
     return {"ok": True, "preset_id": preset_id}
 
 
-@router.post("/sideload")
-def sideload(body: dict[str, Any]) -> dict[str, Any]:
-    source = Path(str(body.get("path") or ""))
-    if not source.is_file() or source.suffix.lower() != ".gguf":
-        raise HTTPException(status_code=422, detail="Pick a .gguf model file")
-    model_id = _model_id(source)
-    _register_model(model_id, [source], False)
-    return {"ok": True, "model_id": model_id, "link_mode": "direct-path", "path": str(source.resolve())}
+router.include_router(create_parameter_router(ParameterRouteContext(
+    options=_option_list, executable=_server_executable, parameters=_parameters,
+    server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
+)))
