@@ -32,8 +32,15 @@ class ParameterSettingsService:
         if not isinstance(options, dict):
             raise self._error("options must be an object")
         catalog = self._catalog_by_key()
-        normalized = {str(key).lstrip("-"): self._canonical(catalog.get(str(key).lstrip("-")), value)
-                      for key, value in options.items()}
+        normalized: dict[str, str] = {}
+        for raw_key, value in options.items():
+            key = str(raw_key).lstrip("-")
+            canonical = self._canonical(catalog.get(key), value)
+            # ``reasoning-effort=default`` means the flag is omitted. Do not
+            # persist an empty required-value flag that would fail on startup.
+            if catalog.get(key, {}).get("requires_value") and not canonical.strip():
+                continue
+            normalized[key] = canonical
         self.validate(normalized)
         return normalized
 
@@ -60,8 +67,15 @@ class ParameterSettingsService:
 
     def model_settings(self, model_id: str) -> dict[str, Any]:
         stored, catalog = self._load_options().get(model_id, {}), self._catalog()
-        ordered = {option["key"]: self._canonical(option, stored[option["key"]])
-                   for option in catalog if option["key"] in stored}
+        ordered = {}
+        for option in catalog:
+            key = option["key"]
+            if key not in stored:
+                continue
+            value = self._canonical(option, stored[key])
+            if option.get("requires_value") and not value.strip():
+                continue
+            ordered[key] = value
         return {"model_id": model_id, "options": ordered, "order": [option["key"] for option in catalog],
                 "metadata": {option["key"]: option for option in catalog}}
 

@@ -250,6 +250,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("persistPreset(next)", desktop_source)
         self.assertIn("if (option && !option.requires_value) return jsx('span'", desktop_source)
         self.assertIn("option?.value_kind === 'number' ? 'any'", desktop_source)
+        self.assertIn("allowEmpty: true", desktop_source)
+        self.assertIn("option.choices?.length ? option.choices.join(' | ')", desktop_source)
         self.assertIn("method: 'PATCH', body: { name: presetRename.trim() }", desktop_source)
         self.assertIn("children: '이름 변경'", desktop_source)
         self.assertNotIn("모델 설정 저장", desktop_source)

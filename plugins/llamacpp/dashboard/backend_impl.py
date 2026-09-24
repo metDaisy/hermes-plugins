@@ -523,6 +523,8 @@ def _option_cli_args(options: dict[str, str]) -> list[str]:
     for key, value in options.items():
         metadata = catalog.get(key)
         canonical = _canonical_option_value(metadata, value)
+        if metadata and metadata.get("requires_value") and not canonical.strip():
+            continue
         if metadata and metadata.get("toggle"):
             args.append(f"--{key}" if canonical == "on" else f"--no-{key}")
             continue
@@ -660,9 +662,9 @@ def _option_cache_identity(executable: Path) -> tuple[str, str, str, str, int, i
     tag, backend = target if target else ("", "")
     try:
         stat = executable.stat()
-        return ("4", str(executable.resolve()), tag, backend, stat.st_mtime_ns, stat.st_size)
+        return ("5", str(executable.resolve()), tag, backend, stat.st_mtime_ns, stat.st_size)
     except OSError:
-        return ("4", str(executable), tag, backend, 0, 0)
+        return ("5", str(executable), tag, backend, 0, 0)
 
 
 def _option_list() -> list[dict[str, Any]]:

@@ -95,6 +95,26 @@ class ServerOptionCatalogTests(unittest.TestCase):
         self.assertEqual(by_key["cache-type-k"]["choices"], expected)
         self.assertEqual(by_key["cache-type-v"]["choices"], expected)
 
+    def test_parses_llama_choice_descriptions_and_reasoning_effort(self) -> None:
+        from dashboard.application.option_catalog import ServerOptionCatalog
+
+        catalog = ServerOptionCatalog.parse_help(
+            "--reasoning-format FORMAT               controls thoughts; one of:\n"
+            "                                        - none: leave thoughts in content\n"
+            "                                        - deepseek: extract reasoning\n"
+            "                                        - deepseek-legacy: keep tags\n"
+            "--reasoning-effort LEVEL                reasoning effort: 'default' to keep template default,\n"
+            "                                        or a level such as 'minimal', 'low', 'medium', 'high', 'xhigh' or\n"
+            "                                        'max' (default: default)\n"
+            "--pooling {none,mean,cls,last,rank}     pooling type\n"
+        )
+
+        by_key = {option["key"]: option for option in catalog}
+        self.assertEqual(by_key["reasoning-format"]["choices"], ["none", "deepseek", "deepseek-legacy"])
+        self.assertEqual(by_key["reasoning-effort"]["choices"], ["minimal", "low", "medium", "high", "xhigh", "max"])
+        self.assertIsNone(by_key["reasoning-effort"]["default_value"])
+        self.assertEqual(by_key["pooling"]["choices"], ["none", "mean", "cls", "last", "rank"])
+
 
 class RegisteredModelServiceTests(unittest.TestCase):
     def test_registered_local_paths_are_deduplicated_and_resolved(self) -> None:
