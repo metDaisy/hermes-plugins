@@ -18,7 +18,7 @@ class RuntimeInspector:
         runtime_root: Path, prism_root: Path, pid_alive: Callable[[Any], bool],
         health: Callable[[int], bool], unregister_endpoint: Callable[[], None],
         devices: Callable[[], list[dict[str, Any]]], server_rows: Callable[[], list[dict[str, Any]]],
-        models_root: Path,
+        models_root: Path, model_presets: Callable[[], dict[str, str]],
     ) -> None:
         self._load_state, self._save_state = load_state, save_state
         self._runtime_kind, self._executable = runtime_kind, executable
@@ -27,6 +27,7 @@ class RuntimeInspector:
         self._machine_root, self._runtime_root, self._prism_root = machine_root, runtime_root, prism_root
         self._pid_alive, self._health, self._unregister_endpoint = pid_alive, health, unregister_endpoint
         self._devices, self._server_rows, self._models_root = devices, server_rows, models_root
+        self._model_presets = model_presets
 
     def info(self) -> dict[str, Any]:
         state = self._load_state()
@@ -44,6 +45,7 @@ class RuntimeInspector:
             "install_action": view.install_action, "executable": str(executable) if executable else None,
             "installed": executable is not None, "official": kind == "official",
         }
+
 
     def status(self) -> dict[str, Any]:
         state = self._load_state()
@@ -78,6 +80,7 @@ class RuntimeInspector:
                 "prism_ml": {"version": str(state.get("prism_release_tag") or "") or None, "installed": self._executable_in(self._prism_root) is not None},
             },
             "devices": self._devices(), "server_running": running,
+            "model_presets": self._model_presets(),
             "server_base_url": f"http://127.0.0.1:{int(state.get('port') or 18434)}" if running else None,
             "custom_endpoint": state.get("custom_endpoint") if running else None,
             "active_model_id": state.get("active_model_id"), "loaded_models": {},

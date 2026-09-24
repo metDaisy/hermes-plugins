@@ -19,6 +19,52 @@ class ParameterRouteContext:
     state: Callable[[], dict[str, Any]]
 
 
+# --- Framework-independent transport handlers -----------------------------
+#
+# Each handler owns the transport-shaped response for one HTTP operation. The
+# router in ``create_router`` only wires a request path to one of these. The
+# facade re-exports them (bound to its context) so the public entrypoint keeps
+# its ``api.<name>(...)`` contract without duplicating any transport logic.
+
+def model_settings(context: ParameterRouteContext, model_id: str) -> dict[str, Any]:
+    return context.parameters().model_settings(model_id)
+
+
+def save_model_settings(context: ParameterRouteContext, model_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    return context.parameters().save_model(
+        model_id, body.get("options") or {}, context.server_requires_restart(),
+    )
+
+
+def presets(context: ParameterRouteContext, model_id: str = "") -> dict[str, Any]:
+    return {"presets": context.parameters().presets()}
+
+
+def create_preset(context: ParameterRouteContext, body: dict[str, Any]) -> dict[str, Any]:
+    return {"preset": context.parameters().create_preset(
+        body.get("name"), body.get("options"), str(body.get("model_id") or "").strip(),
+    )}
+
+
+def apply_preset(context: ParameterRouteContext, preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    row = next((row for row in context.parameters().presets() if row["id"] == preset_id), None)
+    model_id = str(body.get("model_id") or (row or {}).get("model_id") or "").strip()
+    return context.parameters().apply_preset(
+        preset_id, model_id, context.runtime_kind(context.state()),
+        context.server_requires_restart(),
+    )
+
+
+def rename_preset(context: ParameterRouteContext, preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    options = body.get("options") if "options" in body else None
+    return {"preset": context.parameters().rename_preset(preset_id, body.get("name"), options)}
+
+
+def delete_preset(context: ParameterRouteContext, preset_id: str) -> dict[str, Any]:
+    context.parameters().delete_preset(preset_id)
+    return {"ok": True, "preset_id": preset_id}
+
+
 def create_router(context: ParameterRouteContext) -> APIRouter:
     """Return the stable settings/preset transport contract."""
     router = APIRouter()
@@ -38,38 +84,31 @@ def create_router(context: ParameterRouteContext) -> APIRouter:
         }
 
     @router.get("/settings/{model_id}")
-    def model_settings(model_id: str) -> dict[str, Any]:
-        return context.parameters().model_settings(model_id)
+    def settings_model(model_id: str) -> dict[str, Any]:
+        return model_settings(context, model_id)
 
     @router.put("/settings/{model_id}")
-    def save_model_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        return context.parameters().save_model(model_id, body.get("options") or {}, context.server_requires_restart())
+    def save_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return save_model_settings(context, model_id, body)
 
     @router.get("/presets")
-    def presets(model_id: str = "") -> dict[str, Any]:
-        return {"presets": context.parameters().presets()}
+    def presets_route(model_id: str = "") -> dict[str, Any]:
+        return presets(context, model_id)
 
     @router.post("/presets")
-    def create_preset(body: dict[str, Any]) -> dict[str, Any]:
-        return {"preset": context.parameters().create_preset(
-            body.get("name"), body.get("options"), str(body.get("model_id") or "").strip(),
-        )}
+    def create_preset_route(body: dict[str, Any]) -> dict[str, Any]:
+        return create_preset(context, body)
 
     @router.post("/presets/{preset_id}/apply")
-    def apply_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        stored = next((row for row in context.parameters().presets() if row["id"] == preset_id), None)
-        model_id = str(body.get("model_id") or (stored or {}).get("model_id") or "").strip()
-        return context.parameters().apply_preset(
-            preset_id, model_id, context.runtime_kind(context.state()), context.server_requires_restart(),
-        )
+    def apply_preset_route(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return apply_preset(context, preset_id, body)
 
     @router.patch("/presets/{preset_id}")
-    def rename_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        return {"preset": context.parameters().rename_preset(preset_id, body.get("name"))}
+    def rename_preset_route(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return rename_preset(context, preset_id, body)
 
     @router.delete("/presets/{preset_id}")
-    def delete_preset(preset_id: str) -> dict[str, Any]:
-        context.parameters().delete_preset(preset_id)
-        return {"ok": True, "preset_id": preset_id}
+    def delete_preset_route(preset_id: str) -> dict[str, Any]:
+        return delete_preset(context, preset_id)
 
     return router

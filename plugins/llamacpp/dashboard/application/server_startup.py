@@ -4,13 +4,48 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+import re
+
+
+def _quant_base(stem: str) -> str:
+    """Return the language-model base name, with a trailing -<quant> suffix stripped."""
+    match = re.search(r"-[A-Za-z][A-Za-z0-9_]*$", stem)
+    return stem[: match.start()] if match else stem
+
+
+def _find_mmproj_near(model_path: Path | None) -> Path | None:
+    """Find a `.gguf` mmproj file in the same directory as ``model_path``.
+
+    The stock ``--mmproj-auto`` flag only auto-discovers the projector when
+    ``--hf-repo`` is used; for a local ``--model`` file it is a no-op. So we
+    locate the projector ourselves and emit an explicit ``--mmproj`` flag.
+    """
+    if model_path is None:
+        return None
+    try:
+        if not model_path.is_file():
+            return None
+        parent = model_path.parent
+        stem = model_path.stem
+        # Prefer <base>-mmproj-<quant>.gguf (e.g. Foo-mmproj-Q8_0.gguf).
+        for candidate in sorted(parent.glob(f"{_quant_base(stem)}-mmproj*.gguf")):
+            if "mmproj" in candidate.name.lower():
+                return candidate
+        # Fall back to any mmproj gguf in the directory.
+        candidates = [item for item in sorted(parent.glob("*.gguf"))
+                      if "mmproj" in item.name.lower()]
+        return candidates[0] if candidates else None
+    except OSError:
+        return None
+
 
 class ServerStartupService:
     """Own command assembly, startup persistence, health polling, and cleanup."""
 
-    def __init__(self, load_state: Callable[[], dict[str, Any]], save_state: Callable[[dict[str, Any]], None], executable: Callable[[], Path | None], stop: Callable[..., None], active_path: Callable[[str], Path], load_options: Callable[[], dict[str, dict[str, str]]], runtime_kind: Callable[[dict[str, Any]], str], backend: Callable[[str], Any], option_args: Callable[[dict[str, str]], list[str]], watch: Callable[[Any], None], health: Callable[[int], bool], register_endpoint: Callable[[int, str], dict[str, Any]], log_tail: Callable[[int], dict[str, Any]], log_path: Path | None, spawn: Callable[..., Any], now: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    def __init__(self, load_state: Callable[[], dict[str, Any]], save_state: Callable[[dict[str, Any]], None], executable: Callable[[], Path | None], stop: Callable[..., None], active_path: Callable[[str], Path], load_options: Callable[[], dict[str, dict[str, str]]], runtime_kind: Callable[[dict[str, Any]], str], backend: Callable[[str], Any], serving_model_name: Callable[[str], str], option_args: Callable[[dict[str, str]], list[str]], watch: Callable[[Any], None], health: Callable[[int], bool], register_endpoint: Callable[[int, str], dict[str, Any]], log_tail: Callable[[int], dict[str, Any]], log_path: Path | None, spawn: Callable[..., Any], now: Callable[[], float], sleep: Callable[[float], None]) -> None:
         self._load_state, self._save_state, self._executable, self._stop = load_state, save_state, executable, stop
         self._active_path, self._load_options, self._runtime_kind, self._backend = active_path, load_options, runtime_kind, backend
+        self._serving_model_name = serving_model_name
         self._option_args, self._watch, self._health, self._register_endpoint = option_args, watch, health, register_endpoint
         self._log_tail, self._log_path, self._spawn, self._now, self._sleep = log_tail, log_path, spawn, now, sleep
 
@@ -29,9 +64,17 @@ class ServerStartupService:
             port = int(options.get("port", state.get("port") or 18434))
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"invalid server port: {options.get('port')}") from exc
-        model_path = None if isinstance(entry, dict) and entry.get("hf_repo") else self._active_path(model_id)
+        model_path = self._active_path(model_id)
+        serving_model = self._serving_model_name(model_id)
         command = self._backend(self._runtime_kind(state)).build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, options, model_path=model_path)
-        command.extend(self._option_args({key: value for key, value in options.items() if key != "port"}))
+        if "mmproj-auto" in options and "no-mmproj" not in options and self._log_path is not None:
+            mmproj_path = _find_mmproj_near(model_path)
+            if mmproj_path is not None:
+                command.extend(["--mmproj", str(mmproj_path)])
+            else:
+                print("mmproj-auto enabled but no projector gguf found next to the model; starting without image support.", flush=True)
+        command.extend(["--alias", serving_model])
+        command.extend(self._option_args({key: value for key, value in options.items() if key not in {"port", "alias", "mmproj-auto"}}))
         if self._log_path is None:
             raise RuntimeError("server log path is required")
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +94,7 @@ class ServerStartupService:
                 detail = "\n".join(self._log_tail(40).get("lines", [])[-40:])
                 raise RuntimeError("llama-server exited during startup" + (f"\n{detail}" if detail else ""))
             if self._health(port):
-                try: endpoint = self._register_endpoint(port, model_id)
+                try: endpoint = self._register_endpoint(port, serving_model)
                 except Exception as exc:
                     self._stop(preserve_log=True); raise RuntimeError(f"custom endpoint registration failed: {exc}") from exc
                 state = self._load_state()

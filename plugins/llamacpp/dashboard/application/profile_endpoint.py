@@ -69,7 +69,14 @@ class ManagedEndpointConfig:
             return None
         end = next((index for index in range(begin + 1, len(lines)) if lines[index].strip() == self._end), None)
         if end is None:
-            raise RuntimeError("llamacpp endpoint block is incomplete")
+            # Recover from an interrupted atomic update. The next root-level
+            # section is the boundary of the orphaned managed block.
+            next_root = next(
+                (index for index in range(begin + 1, len(lines))
+                 if lines[index].strip() and not lines[index].startswith((" ", "\t"))),
+                len(lines),
+            )
+            end = next_root - 1
         return begin, end
 
 

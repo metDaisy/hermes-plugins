@@ -14,8 +14,7 @@ class ParameterSettingsService:
         canonical: Callable[[dict[str, Any] | None, Any], str],
         load_options: Callable[[], dict[str, dict[str, str]]],
         save_options: Callable[[dict[str, dict[str, str]]], None],
-        load_state: Callable[[], dict[str, Any]],
-        save_state: Callable[[dict[str, Any]], None],
+        preset_store: Any,
         error: Callable[[str], Exception],
         now: Callable[[], float],
         new_id: Callable[[], str],
@@ -24,8 +23,7 @@ class ParameterSettingsService:
         self._canonical = canonical
         self._load_options = load_options
         self._save_options = save_options
-        self._load_state = load_state
-        self._save_state = save_state
+        self._preset_store = preset_store
         self._error = error
         self._now = now
         self._new_id = new_id
@@ -65,7 +63,7 @@ class ParameterSettingsService:
         ordered = {option["key"]: self._canonical(option, stored[option["key"]])
                    for option in catalog if option["key"] in stored}
         return {"model_id": model_id, "options": ordered, "order": [option["key"] for option in catalog],
-                "metadata": {option["key"]: option for option in catalog if option["key"] in ordered}}
+                "metadata": {option["key"]: option for option in catalog}}
 
     def save_model(self, model_id: str, options: Any, requires_restart: bool) -> dict[str, Any]:
         normalized, all_options = self.normalize(options), self._load_options()
@@ -82,12 +80,9 @@ class ParameterSettingsService:
         name = self._valid_name(name)
         if options is None:
             options = self._load_options().get(source_model_id, {})
-        now, preset_id, state = self._now(), self._new_id(), self._load_state()
-        stored = state.setdefault("parameter_presets", {})
-        stored[preset_id] = {"name": name, "model_id": None, "options": self.normalize(options),
-                             "created_at": now, "updated_at": now}
-        self._save_state(state)
-        return self._preset_row(preset_id, stored[preset_id])
+        now, preset_id = self._now(), self._new_id()
+        stored = self._preset_store.create(preset_id, name, self.normalize(options), now)
+        return self._preset_row(preset_id, stored)
 
     def apply_preset(self, preset_id: str, model_id: str, runtime_kind: str, requires_restart: bool) -> dict[str, Any]:
         value = self._load_presets().get(preset_id)
@@ -95,56 +90,34 @@ class ParameterSettingsService:
             raise self._error("preset not found")
         if not model_id:
             raise self._error("model_id is required to apply a preset")
-        merged = dict(self._load_options().get(model_id, {}))
-        merged.update(self.normalize(value.get("options") or {}))
-        omitted = sorted(key for key in merged if runtime_kind == "prism_ml" and key.startswith("spec-"))
-        merged = {key: value for key, value in merged.items() if key not in omitted}
-        self.validate(merged)
+        applied = self.normalize(value.get("options") or {})
+        omitted = sorted(key for key in applied if runtime_kind == "prism_ml" and key.startswith("spec-"))
+        applied = {key: value for key, value in applied.items() if key not in omitted}
+        self.validate(applied)
         all_options = self._load_options()
-        all_options[model_id] = merged
+        all_options[model_id] = applied
         self._save_options(all_options)
-        return {"preset_id": preset_id, "model_id": model_id, "options": merged, "omitted_options": omitted,
+        self._preset_store.assign(str(model_id), preset_id)
+        return {"preset_id": preset_id, "model_id": model_id, "options": applied, "omitted_options": omitted,
                 "applied": False, "requires_restart": requires_restart}
 
-    def rename_preset(self, preset_id: str, name: Any) -> dict[str, Any]:
-        state = self._load_state()
-        stored = state.get("parameter_presets")
-        if not isinstance(stored, dict) or preset_id not in stored or not isinstance(stored[preset_id], dict):
+    def rename_preset(self, preset_id: str, name: Any = None, options: Any = None) -> dict[str, Any]:
+        if self._preset_store.get(preset_id) is None:
             raise self._error("preset not found")
-        stored[preset_id]["name"], stored[preset_id]["updated_at"] = self._valid_name(name), self._now()
-        state["parameter_presets"] = stored
-        self._save_state(state)
-        return self._preset_row(preset_id, stored[preset_id])
+        stored = self._preset_store.update(
+            preset_id,
+            self._valid_name(name) if name is not None else None,
+            self.normalize(options) if options is not None else None,
+            self._now(),
+        )
+        return self._preset_row(preset_id, stored or {})
 
     def delete_preset(self, preset_id: str) -> None:
-        state = self._load_state()
-        stored = state.get("parameter_presets")
-        if not isinstance(stored, dict) or preset_id not in stored:
+        if not self._preset_store.delete(preset_id):
             raise self._error("preset not found")
-        stored.pop(preset_id, None)
-        state["parameter_presets"] = stored
-        self._save_state(state)
 
     def _load_presets(self) -> dict[str, dict[str, Any]]:
-        state = self._load_state()
-        raw = state.get("parameter_presets")
-        if not isinstance(raw, dict):
-            state["parameter_presets"] = {}
-            self._save_state(state)
-            return {}
-        presets, migrated = {}, False
-        for preset_id, value in raw.items():
-            if not isinstance(value, dict):
-                continue
-            preset = dict(value)
-            if preset.get("model_id") is not None:
-                preset["model_id"] = None
-                raw[preset_id], migrated = preset, True
-            presets[str(preset_id)] = preset
-        if migrated:
-            state["parameter_presets"] = raw
-            self._save_state(state)
-        return presets
+        return self._preset_store.presets()
 
     def _catalog_by_key(self) -> dict[str, dict[str, Any]]:
         return {option["key"]: option for option in self._catalog()}

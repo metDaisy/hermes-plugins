@@ -6,13 +6,13 @@ lifecycle while keeping machine-scoped assets in the conventional Hermes paths.
 """
 from __future__ import annotations
 
-import atexit
 import json
 import os
 import platform
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -26,30 +26,47 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException
 
 try:
-    from dashboard.backends import backend_view, get_backend
-    from dashboard.application.device_discovery import DeviceDiscoveryService
-    from dashboard.application.download_progress import DownloadProgressTracker
-    from dashboard.application.huggingface_cache import HuggingFaceCacheService
-    from dashboard.application.huggingface_download import HuggingFaceDownloadService
-    from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
-    from dashboard.application.job_manager import JobManager
-    from dashboard.application.json_http import JsonHttpClient
-    from dashboard.application.model_lifecycle import ModelLifecycleService
-    from dashboard.application.model_registry import RegisteredModelService
-    from dashboard.application.model_policy import ModelPolicyService
-    from dashboard.application.option_catalog import ServerOptionCatalog
-    from dashboard.application.official_runtime import OfficialRuntimeService
-    from dashboard.application.parameter_settings import ParameterSettingsService
-    from dashboard.application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
-    from dashboard.application.prism_runtime import PrismRuntimeInstaller
-    from dashboard.application.runtime_inspector import RuntimeInspector
-    from dashboard.application.server_lifecycle import ServerLifecycleService
-    from dashboard.application.server_startup import ServerStartupService
-    from dashboard.application.state_store import StateStore
-    from dashboard.routes.model_routes import ModelRouteContext, create_router as create_model_router
-    from dashboard.routes.parameter_routes import ParameterRouteContext, create_router as create_parameter_router
-    from dashboard.routes.server_routes import ServerRouteContext, create_router as create_server_router
+    from .backends import backend_view, get_backend
+    from .application.device_discovery import DeviceDiscoveryService
+    from .application.download_progress import DownloadProgressTracker
+    from .application.huggingface_cache import HuggingFaceCacheService
+    from .application.huggingface_download import HuggingFaceDownloadService
+    from .application.huggingface_model_workflow import HuggingFaceModelWorkflow
+    from .application.job_manager import JobManager
+    from .application.json_http import JsonHttpClient
+    from .application.model_lifecycle import ModelLifecycleService
+    from .application.model_registry import RegisteredModelService
+    from .application.model_policy import ModelPolicyService
+    from .application.option_catalog import ServerOptionCatalog
+    from .application.official_runtime import OfficialRuntimeService
+    from .application.parameter_settings import ParameterSettingsService
+    from .application.preset_store import PresetStore
+    from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
+    from .application.prism_runtime import PrismRuntimeInstaller
+    from .application.runtime_inspector import RuntimeInspector
+    from .application.runtime_management import RuntimeManagementWorkflow
+    from .application.server_lifecycle import ServerLifecycleService
+    from .application.server_startup import ServerStartupService
+    from .application.state_store import StateStore
+    from .routes.model_routes import ModelRouteContext, create_router as create_model_router
+    from .routes.parameter_routes import (
+        ParameterRouteContext, create_router as create_parameter_router,
+        model_settings as _transport_model_settings,
+        save_model_settings as _transport_save_model_settings,
+        presets as _transport_presets,
+        create_preset as _transport_create_preset,
+        apply_preset as _transport_apply_preset,
+        rename_preset as _transport_rename_preset,
+        delete_preset as _transport_delete_preset,
+    )
+    from .routes.runtime_routes import RuntimeRouteContext, create_router as create_runtime_router
+    from .routes.server_routes import ServerRouteContext, create_router as create_server_router
 except ImportError:
+    # Direct module loading (used by focused plugin tests and the coordinator)
+    # has no package parent; expose this dashboard directory for local imports.
+    _DASHBOARD_DIR = str(Path(__file__).resolve().parent)
+    if _DASHBOARD_DIR not in sys.path:
+        sys.path.insert(0, _DASHBOARD_DIR)
     from backends import backend_view, get_backend
     from application.device_discovery import DeviceDiscoveryService
     from application.download_progress import DownloadProgressTracker
@@ -64,14 +81,26 @@ except ImportError:
     from application.option_catalog import ServerOptionCatalog
     from application.official_runtime import OfficialRuntimeService
     from application.parameter_settings import ParameterSettingsService
+    from application.preset_store import PresetStore
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
     from application.runtime_inspector import RuntimeInspector
+    from application.runtime_management import RuntimeManagementWorkflow
     from application.server_lifecycle import ServerLifecycleService
     from application.server_startup import ServerStartupService
     from application.state_store import StateStore
     from routes.model_routes import ModelRouteContext, create_router as create_model_router
-    from routes.parameter_routes import ParameterRouteContext, create_router as create_parameter_router
+    from routes.parameter_routes import (
+        ParameterRouteContext, create_router as create_parameter_router,
+        model_settings as _transport_model_settings,
+        save_model_settings as _transport_save_model_settings,
+        presets as _transport_presets,
+        create_preset as _transport_create_preset,
+        apply_preset as _transport_apply_preset,
+        rename_preset as _transport_rename_preset,
+        delete_preset as _transport_delete_preset,
+    )
+    from routes.runtime_routes import RuntimeRouteContext, create_router as create_runtime_router
     from routes.server_routes import ServerRouteContext, create_router as create_server_router
 
 router = APIRouter()
@@ -86,6 +115,7 @@ MODELS_ROOT = HF_HOME
 ASSETS_ROOT = HF_HOME / "assets"
 STATE_PATH = RUNTIME_ROOT / "state.json"
 OPTIONS_PATH = RUNTIME_ROOT / "model-options.json"
+PRESET_DB_PATH = RUNTIME_ROOT / "presets.db"
 OPTION_METADATA_CACHE_PATH = RUNTIME_ROOT / "parameter-metadata-cache.json"
 SERVER_LOG_PATH = RUNTIME_ROOT / "logs" / "llama-server.log"
 CUSTOM_ENDPOINT_KEY = "llamacpp-local"
@@ -93,6 +123,7 @@ CUSTOM_ENDPOINT_BEGIN = "# BEGIN llamacpp endpoint (managed)"
 CUSTOM_ENDPOINT_END = "# END llamacpp endpoint (managed)"
 _custom_endpoint_lock = threading.RLock()
 _SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
+_QUANT_SUFFIX_RE = re.compile(r"-(?:P?Q\d+(?:_[A-Za-z0-9]+)*|IQ\d+(?:_[A-Za-z0-9]+)*|F(?:16|32)|BF16)$", re.IGNORECASE)
 _option_catalog_cache: tuple[tuple[str, str, str, str, int, int], list[dict[str, Any]]] | None = None
 _job_store: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.RLock()
@@ -102,6 +133,8 @@ _model_policy = ModelPolicyService()
 _download_progress = DownloadProgressTracker()
 _state_store: StateStore | None = None
 _state_store_path: Path | None = None
+_preset_store: PresetStore | None = None
+_preset_store_path: Path | None = None
 _official_runtime_service: OfficialRuntimeService | None = None
 _official_runtime_root: Path | None = None
 _endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BEGIN, CUSTOM_ENDPOINT_END)
@@ -110,7 +143,7 @@ _endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BE
 def _default_state() -> dict[str, Any]:
     return {"active_model_id": None, "tag": "latest", "backend": "auto", "port": 18434,
             "pid": None, "custom_endpoint": None, "models": {}, "model_settings": {},
-            "parameter_presets": {}, "runtime_kind": "official", "runtime_path": None,
+            "runtime_kind": "official", "runtime_path": None,
             "runtime_mode": "official", "custom_runtime_path": None}
 
 
@@ -139,6 +172,20 @@ def _state() -> dict[str, Any]:
 def _save_state(state: dict[str, Any]) -> None:
     with _state_lock:
         _store().save(state)
+
+
+def _presets_store() -> PresetStore:
+    """Return SQLite-backed presets after one-time legacy JSON migration."""
+    global _preset_store, _preset_store_path
+    if _preset_store is None or _preset_store_path != PRESET_DB_PATH:
+        _preset_store = PresetStore(PRESET_DB_PATH)
+        _preset_store_path = PRESET_DB_PATH
+    state = _state()
+    if _preset_store.migrate_legacy_state(state):
+        state.pop("parameter_presets", None)
+        state.pop("model_presets", None)
+        _save_state(state)
+    return _preset_store
 
 
 def _hf_env() -> dict[str, str]:
@@ -183,12 +230,36 @@ def _hf_cached_files(repo_id: str) -> tuple[list[dict[str, Any]], str | None]:
     return _hf_cache().cached_files(repo_id)
 
 
+def _hf_cached_paths(repo_id: str, paths: list[str]) -> tuple[list[Path], str | None]:
+    resolved, warning = _hf_cache().cached_paths(repo_id, paths)
+    if resolved:
+        return resolved, None
+    repo_directory = "models--" + repo_id.replace("/", "--").casefold()
+    fallback: list[Path] = []
+    for raw_path in paths:
+        name = Path(raw_path).name
+        candidates = [
+            candidate.resolve() for candidate in HF_HOME.rglob(name)
+            if candidate.is_file() and candidate.suffix.casefold() == ".gguf"
+            and any(parent.name.casefold() == repo_directory for parent in candidate.parents)
+        ]
+        if not candidates:
+            return [], warning or "선택한 GGUF가 로컬 HF 저장소에 없습니다."
+        fallback.append(max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns))
+    return fallback, None
+
+
 def _model_id(path: Path) -> str:
     return _SPLIT_RE.sub("", path.stem)
 
 
+def _serving_model_name(model_id: str) -> str:
+    """Expose a stable API alias without changing the registered quant identity."""
+    return _QUANT_SUFFIX_RE.sub("", model_id) or model_id
+
+
 def _models() -> RegisteredModelService:
-    return RegisteredModelService(_state, _save_state, _hf_cached_files)
+    return RegisteredModelService(_state, _save_state, _hf_cached_files, _hf_cached_paths)
 
 
 def _model_rows() -> list[dict[str, Any]]:
@@ -412,13 +483,8 @@ def _watch_server_process(process: subprocess.Popen[Any]) -> None:
 
 
 def _shutdown_server_on_backend_exit() -> None:
-    try:
-        _stop_server()
-    except OSError:
-        return
-
-
-atexit.register(_shutdown_server_on_backend_exit)
+    # llama-server is machine-scoped and must outlive a profile backend restart.
+    return
 
 
 def _load_options() -> dict[str, dict[str, str]]:
@@ -475,7 +541,7 @@ def _server_startup() -> ServerStartupService:
         return subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     return ServerStartupService(_state, _save_state, _server_executable, _stop_server, _active_path, _load_options,
-                                _runtime_kind, get_backend, _option_cli_args, _watch_server_process, _health,
+                                _runtime_kind, get_backend, _serving_model_name, _option_cli_args, _watch_server_process, _health,
                                 _register_custom_endpoint, _server_log_tail, SERVER_LOG_PATH, spawn, time.time, time.sleep)
 
 
@@ -513,12 +579,21 @@ def _runtime_inspector() -> RuntimeInspector:
         backend_view=backend_view, machine_root=MACHINE_ROOT, runtime_root=RUNTIME_ROOT,
         prism_root=PRISM_RUNTIME_ROOT, pid_alive=_pid_alive, health=_health,
         unregister_endpoint=_unregister_custom_endpoint, devices=_detected_devices,
-        server_rows=_server_rows, models_root=MODELS_ROOT,
+        server_rows=_server_rows, models_root=MODELS_ROOT, model_presets=_presets_store().model_preset_map,
     )
 
 
 def _runtime_info() -> dict[str, Any]:
     return _runtime_inspector().info()
+
+
+def _runtime_management() -> RuntimeManagementWorkflow:
+    return RuntimeManagementWorkflow(
+        _state, _save_state, get_backend, MACHINE_ROOT, _runtime_kind, _runtime_info, _pid_alive,
+        lambda path: os.startfile(str(path)), _install_prism_runtime, _runtime_target, _job, _spawn,
+        _finish, lambda tag, backend, job, download: _official_runtime().install(tag, backend, job, download),
+        _download_archive,
+    )
 
 
 def _status() -> dict[str, Any]:
@@ -564,7 +639,8 @@ def _hf_workflow() -> HuggingFaceModelWorkflow:
     return HuggingFaceModelWorkflow(
         load_state=_state, runtime_kind=_runtime_kind,
         accepts=lambda kind, repo, paths, version: _model_policy.accepts(kind, repo, paths, version),
-        cache_models=_hf_downloaded_models, cached_files=_hf_cached_files, http_json=_http_json,
+        cache_models=_hf_downloaded_models, cached_files=_hf_cached_files, cached_paths=_hf_cached_paths,
+        http_json=_http_json,
         download=_hf_download, register=_register_model, remove_cache=_remove_hf_cache,
         model_id=_model_id,
         visible_repositories=lambda kind, repositories: _model_policy.visible_repositories(kind, repositories),
@@ -584,9 +660,9 @@ def _option_cache_identity(executable: Path) -> tuple[str, str, str, str, int, i
     tag, backend = target if target else ("", "")
     try:
         stat = executable.stat()
-        return ("3", str(executable.resolve()), tag, backend, stat.st_mtime_ns, stat.st_size)
+        return ("4", str(executable.resolve()), tag, backend, stat.st_mtime_ns, stat.st_size)
     except OSError:
-        return ("3", str(executable), tag, backend, 0, 0)
+        return ("4", str(executable), tag, backend, 0, 0)
 
 
 def _option_list() -> list[dict[str, Any]]:
@@ -629,52 +705,70 @@ router.include_router(create_server_router(ServerRouteContext(
     finish=_finish, recent_jobs=_jobs, find_job=lambda job_id: _job_manager().find(job_id),
     logs=_server_log_tail,
 )))
-@router.get("/status")
 def status() -> dict[str, Any]:
     return _status()
 
 
-@router.get("/runtime")
+def registered_models() -> dict[str, Any]:
+    """Return registered models and the current selection for agent tools."""
+    state = _state()
+    return {
+        "models": _server_rows(),
+        "active_model_id": state.get("active_model_id"),
+        "server_running": _is_server_running(),
+    }
+
+
+def activate_model(model_id: str) -> dict[str, Any]:
+    """Select a registered model without starting llama-server."""
+    return _model_lifecycle().activate(model_id)
+
+
+def start_server() -> dict[str, Any]:
+    """Launch the selected model asynchronously and return its tracked job."""
+    if not _state().get("active_model_id"):
+        raise RuntimeError("select a model before starting llama-server")
+    if _is_server_running():
+        return {"ok": True, "server_running": True, "already_running": True}
+    job = _job("server-start", "llama-server 시작 중")
+
+    def run() -> None:
+        _start_server()
+        _finish(job, "llama-server is healthy")
+
+    _spawn(job, run, "llamacpp-server-start")
+    return {"ok": True, "server_running": False, "job_id": job["job_id"]}
+
+
+def stop_server() -> dict[str, Any]:
+    """Stop only the plugin-managed llama-server process and its endpoint."""
+    _stop_server()
+    return {"ok": True, "server_running": False}
+
+
 def runtime_info() -> dict[str, Any]:
     return _runtime_info()
 
 
-@router.put("/runtime")
+# --- Runtime/preset public entrypoints ------------------------------------
+#
+# The public entrypoint keeps these names so external callers
+# (``api.save_runtime(...)``, ``api.open_runtime(...)``, ``api.runtime_install(...)``)
+# work unchanged. Each one simply forwards to the framework-independent
+# ``RuntimeManagementWorkflow``; the FastAPI HTTP mapping lives in
+# ``runtime_routes`` (same as the other route groups), so the facade owns no
+# transport contract.
+
+
 def save_runtime(body: dict[str, Any]) -> dict[str, Any]:
-    requested = body.get("kind") or body.get("mode") or "llamacpp"
-    try:
-        kind = get_backend(requested).key
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    mode = "official" if kind == "official" else "custom"
-    custom_path = None
-    if kind != "official":
-        adapter = get_backend(kind)
-        raw_path = str(body.get("path") or adapter.managed_root(MACHINE_ROOT)).strip()
-        try:
-            adapter.resolve_executable(raw_path)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=422, detail="Prism-ML runtime이 아직 준비되지 않았습니다. 먼저 다운로드를 완료하세요.") from exc
-        custom_path = str(Path(raw_path).expanduser().resolve())
-    state = _state()
-    state["runtime_kind"] = kind
-    state["runtime_path"] = custom_path
-    state["runtime_mode"] = mode
-    state["custom_runtime_path"] = custom_path
-    _save_state(state)
-    selected = _runtime_info()
-    selected["installed"] = bool(selected["executable"])
-    selected["requires_restart"] = bool(_pid_alive(state.get("pid")))
-    return selected
+    return _runtime_management().select(body)
 
 
-@router.get("/hardware")
 def hardware() -> dict[str, Any]:
     return {"gpu_name": None, "gpu_util_percent": None, "vram_total_bytes": None,
             "vram_usable_bytes": None, "models_dir": str(MODELS_ROOT)}
 
 
-@router.get("/catalog")
 def catalog() -> dict[str, Any]:
     return {"models": []}
 
@@ -716,42 +810,12 @@ def _install_prism_runtime() -> dict[str, Any]:
 
 
 
-@router.post("/runtime/open")
 def open_runtime(body: dict[str, Any]) -> dict[str, Any]:
-    kind = get_backend((body or {}).get("kind") or _runtime_kind(_state())).key
-    target = get_backend(kind).managed_root(MACHINE_ROOT)
-    target.mkdir(parents=True, exist_ok=True)
-    try:
-        os.startfile(str(target))  # type: ignore[attr-defined]
-    except OSError as exc:
-        raise HTTPException(status_code=503, detail="runtime folder could not be opened") from exc
-    return {"ok": True, "kind": kind}
+    return _runtime_management().open(body or {})
 
 
-@router.post("/runtime/install")
 def runtime_install(body: dict[str, Any]) -> dict[str, Any]:
-    requested = body.get("kind") if isinstance(body, dict) else None
-    try:
-        kind = get_backend(requested or "official").key
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if kind == "prism_ml":
-        return _install_prism_runtime()
-    try:
-        tag, backend = _runtime_target(
-            force_latest=True,
-            requested_backend=body.get("backend") if isinstance(body, dict) else None,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"runtime target resolution failed: {exc}") from exc
-    job = _job("runtime-install", f"llama.cpp {tag} ({backend})")
-
-    def run() -> None:
-        _official_runtime().install(tag, backend, job, _download_archive)
-        _finish(job, f"llama.cpp {tag} ready")
-
-    _spawn(job, run, "llamacpp-runtime-install")
-    return {"job_id": job["job_id"], "tag": tag, "backend": backend}
+    return _runtime_management().install(body if isinstance(body, dict) else {})
 
 
 def _parameter_error(detail: str) -> HTTPException:
@@ -764,9 +828,40 @@ def _server_requires_restart() -> bool:
 
 def _parameters() -> ParameterSettingsService:
     return ParameterSettingsService(
-        _option_list, _canonical_option_value, _load_options, _save_options, _state, _save_state,
+        _option_list, _canonical_option_value, _load_options, _save_options, _presets_store(),
         _parameter_error, time.time, lambda: uuid.uuid4().hex[:12],
     )
+
+
+# --- Parameter/preset public entrypoints ----------------------------------
+#
+# The public entrypoint keeps these names so external callers
+# (``api.save_model_settings(...)``, ``api.create_preset(...)``, ...) work
+# unchanged. Each one simply forwards to the framework-independent transport
+# handler in ``parameter_routes``, so all the real logic lives in a single
+# module instead of being duplicated in the facade.
+
+_PARAMETER_ROUTE_CONTEXT: ParameterRouteContext | None = None
+
+
+def _parameter_route_context() -> ParameterRouteContext:
+    # NOTE: keep the module-level cache so ``patch.object(api, ...)`` in the
+    # public-API regression tests is still honoured every call. A stale cached
+    # context would otherwise bind an old ``_state``/``_runtime_kind`` and hide
+    # per-test patches.
+    global _PARAMETER_ROUTE_CONTEXT
+    _PARAMETER_ROUTE_CONTEXT = None
+    return ParameterRouteContext(
+        options=_option_list, executable=_server_executable, parameters=_parameters,
+        server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
+    )
+
+
+def _load_presets() -> dict[str, dict[str, Any]]:
+    return {row["id"]: {
+        "name": row["name"], "model_id": row["model_id"], "options": row["options"],
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+    } for row in _parameters().presets()}
 
 
 def _validate_option_values(options: dict[str, str]) -> None:
@@ -777,52 +872,39 @@ def _normalize_options(options: Any) -> dict[str, str]:
     return _parameters().normalize(options)
 
 
-def _load_presets() -> dict[str, dict[str, Any]]:
-    return {row["id"]: {"name": row["name"], "model_id": row["model_id"], "options": row["options"],
-                        "created_at": row["created_at"], "updated_at": row["updated_at"]}
-            for row in _parameters().presets()}
-
-
-def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
-    return {"id": preset_id, "name": str(value.get("name") or preset_id),
-            "model_id": value.get("model_id"), "options": dict(value.get("options") or {}),
-            "created_at": value.get("created_at"), "updated_at": value.get("updated_at")}
-
-
 def model_settings(model_id: str) -> dict[str, Any]:
-    return _parameters().model_settings(model_id)
+    return _transport_model_settings(_parameter_route_context(), model_id)
 
 
 def save_model_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    return _parameters().save_model(model_id, body.get("options") or {}, _server_requires_restart())
+    return _transport_save_model_settings(_parameter_route_context(), model_id, body)
 
 
 def presets(model_id: str = "") -> dict[str, Any]:
-    return {"presets": _parameters().presets()}
+    return _transport_presets(_parameter_route_context(), model_id)
 
 
 def create_preset(body: dict[str, Any]) -> dict[str, Any]:
-    return {"preset": _parameters().create_preset(
-        body.get("name"), body.get("options"), str(body.get("model_id") or "").strip(),
-    )}
+    return _transport_create_preset(_parameter_route_context(), body)
 
 
 def apply_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    stored = _load_presets().get(preset_id)
-    model_id = str(body.get("model_id") or (stored or {}).get("model_id") or "").strip()
-    return _parameters().apply_preset(preset_id, model_id, _runtime_kind(_state()), _server_requires_restart())
+    return _transport_apply_preset(_parameter_route_context(), preset_id, body)
 
 
 def rename_preset(preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    return {"preset": _parameters().rename_preset(preset_id, body.get("name"))}
+    return _transport_rename_preset(_parameter_route_context(), preset_id, body)
 
 
 def delete_preset(preset_id: str) -> dict[str, Any]:
-    _parameters().delete_preset(preset_id)
-    return {"ok": True, "preset_id": preset_id}
+    return _transport_delete_preset(_parameter_route_context(), preset_id)
 
 
 router.include_router(create_parameter_router(ParameterRouteContext(
     options=_option_list, executable=_server_executable, parameters=_parameters,
     server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
+)))
+router.include_router(create_runtime_router(RuntimeRouteContext(
+    status=status, runtime_info=runtime_info, save=save_runtime, hardware=hardware, catalog=catalog,
+    open_runtime=open_runtime, install=runtime_install,
 )))

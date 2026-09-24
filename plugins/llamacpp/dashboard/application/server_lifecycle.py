@@ -7,6 +7,7 @@ endpoint registration adapters.
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,7 +39,18 @@ class ServerLifecycleService:
         self._clear_owned_state(state)
         self._unregister_endpoint()
         if not preserve_log:
-            self._log_path.unlink(missing_ok=True)
+            self._remove_log_when_released()
+
+    def _remove_log_when_released(self) -> None:
+        """Avoid reporting a failed stop for Windows' short-lived file-handle race."""
+        for attempt in range(20):
+            try:
+                self._log_path.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    return
+                time.sleep(0.1)
 
     def watch(self, process: Any) -> None:
         def wait_for_exit() -> None:

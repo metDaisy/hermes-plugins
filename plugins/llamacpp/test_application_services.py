@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 
 class ManagedEndpointConfigTests(unittest.TestCase):
@@ -34,6 +35,35 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         self.assertIn("  other:\n", removed)
         self.assertNotIn("llamacpp-local", removed)
 
+    def test_recovers_from_an_incomplete_managed_block(self) -> None:
+        from dashboard.application.profile_endpoint import ManagedEndpointConfig
+
+        config = ManagedEndpointConfig(
+            key="llamacpp-local",
+            begin="# BEGIN llamacpp endpoint (managed)",
+            end="# END llamacpp endpoint (managed)",
+        )
+        incomplete = (
+            "providers:\n"
+            "  llamacpp-local:\n"
+            "    api: http://127.0.0.1:18434/v1\n"
+            "  # BEGIN llamacpp endpoint (managed)\n"
+            "fallback_providers:\n"
+            "  - provider: openai-codex\n"
+        )
+
+        removed, changed = config.remove(incomplete)
+
+        self.assertTrue(changed)
+        self.assertNotIn("BEGIN llamacpp endpoint", removed)
+        self.assertIn("fallback_providers:\n", removed)
+        self.assertIn("  - provider: openai-codex\n", removed)
+
+        repaired = config.upsert(incomplete, "http://127.0.0.1:18434/v1", "model-a", 8192)
+        self.assertIn("END llamacpp endpoint (managed)", repaired)
+        self.assertIn('default_model: "model-a"', repaired)
+        self.assertIn("fallback_providers:\n", repaired)
+
 
 class ServerOptionCatalogTests(unittest.TestCase):
     def test_parses_toggle_aliases_and_numeric_defaults(self) -> None:
@@ -49,6 +79,21 @@ class ServerOptionCatalogTests(unittest.TestCase):
         self.assertEqual(by_key["temp"]["value_kind"], "number")
         self.assertFalse(by_key["no-mmproj"]["requires_value"])
         self.assertFalse(by_key["mmproj-auto"]["requires_value"])
+
+    def test_parses_cache_type_allowed_values(self) -> None:
+        from dashboard.application.option_catalog import ServerOptionCatalog
+
+        catalog = ServerOptionCatalog.parse_help(
+            "-ctk, --cache-type-k TYPE  KV cache data type for K allowed values: "
+            "f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16)\n"
+            "-ctv, --cache-type-v TYPE  KV cache data type for V allowed values: "
+            "f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16)\n"
+        )
+
+        by_key = {option["key"]: option for option in catalog}
+        expected = ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+        self.assertEqual(by_key["cache-type-k"]["choices"], expected)
+        self.assertEqual(by_key["cache-type-v"]["choices"], expected)
 
 
 class RegisteredModelServiceTests(unittest.TestCase):
@@ -69,6 +114,78 @@ class RegisteredModelServiceTests(unittest.TestCase):
                 rows = service.rows()
                 self.assertEqual(rows[0]["paths"], [str(model_path.resolve())])
                 self.assertEqual(service.active_path("model"), model_path.resolve())
+
+    def test_legacy_hf_registration_is_migrated_to_cached_local_paths(self) -> None:
+        from dashboard.application.model_registry import RegisteredModelService
+
+        with self.subTest("legacy Hugging Face registration"):
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as raw_root:
+                model_path = Path(raw_root) / "model.gguf"
+                model_path.write_bytes(b"gguf")
+                state = {"models": {"model": {"paths": [], "hf_repo": "owner/repo", "hf_file": "model.gguf"}}}
+                service = RegisteredModelService(
+                    lambda: state, lambda value: state.update(value),
+                    lambda _repo: ([{"paths": ["model.gguf"]}], None),
+                    lambda _repo, _paths: ([model_path], None),
+                )
+
+                self.assertEqual(service.active_path("model"), model_path.resolve())
+                self.assertEqual(state["models"]["model"]["paths"], [str(model_path.resolve())])
+
+
+class RuntimeRouteAdapterTests(unittest.TestCase):
+    def test_keeps_runtime_control_and_inventory_paths(self) -> None:
+        from dashboard.routes.runtime_routes import RuntimeRouteContext, create_router
+
+        context = RuntimeRouteContext(
+            status=lambda: {}, runtime_info=lambda: {}, save=lambda _body: {},
+            hardware=lambda: {}, catalog=lambda: {}, open_runtime=lambda _body: {}, install=lambda _body: {},
+        )
+        paths = {route.path for route in create_router(context).routes}
+
+        self.assertTrue({"/status", "/runtime", "/hardware", "/catalog", "/runtime/open", "/runtime/install"}.issubset(paths))
+
+
+class RuntimeManagementWorkflowTests(unittest.TestCase):
+    def test_selects_custom_runtime_and_projects_installed_state(self) -> None:
+        from dashboard.application.runtime_management import RuntimeManagementWorkflow
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            executable = root / "llama-server.exe"
+            executable.write_bytes(b"server")
+            state: dict[str, object] = {}
+
+            class Backend:
+                key = "prism_ml"
+                def managed_root(self, _machine_root): return root
+                def resolve_executable(self, raw_path):
+                    path = Path(raw_path)
+                    if path == root:
+                        return executable
+                    raise RuntimeError("missing")
+
+            workflow = RuntimeManagementWorkflow(
+                load_state=lambda: state, save_state=lambda value: state.update(value),
+                get_backend=lambda _kind: Backend(), machine_root=root,
+                runtime_kind=lambda _state: "official", runtime_info=lambda: {"executable": str(executable), "mode": "custom"},
+                pid_alive=lambda _pid: False, open_directory=lambda _path: None,
+                install_prism=lambda: {"job_id": "prism"}, runtime_target=lambda *_: ("b1", "cpu"),
+                create_job=lambda kind, detail: {"kind": kind, "detail": detail, "job_id": "job"},
+                launch=lambda _job, _work, _name: None, finish=lambda _job, _detail: None,
+                install_official=lambda *_args: None, download_archive=lambda *_args: None,
+            )
+
+            selected = workflow.select({"kind": "prism_ml", "path": str(root)})
+
+            self.assertEqual(selected["mode"], "custom")
+            self.assertEqual(state["runtime_kind"], "prism_ml")
+            self.assertEqual(state["runtime_path"], str(root.resolve()))
 
 
 class ParameterRouteAdapterTests(unittest.TestCase):
@@ -190,7 +307,7 @@ class RuntimeInspectorTests(unittest.TestCase):
             machine_root=Path("machine"), runtime_root=Path("runtime"), prism_root=Path("prism"),
             pid_alive=lambda _pid: False, health=lambda _port: False,
             unregister_endpoint=lambda: unregistered.append(True), devices=lambda: [{"id": "0"}],
-            server_rows=lambda: [{"id": "model"}], models_root=Path("models"),
+            server_rows=lambda: [{"id": "model"}], models_root=Path("models"), model_presets=lambda: {},
         )
 
         status = inspector.status()
@@ -200,6 +317,37 @@ class RuntimeInspectorTests(unittest.TestCase):
         self.assertEqual(status["devices"], [{"id": "0"}])
         self.assertIsNone(state["pid"])
         self.assertEqual(unregistered, [True])
+
+    def test_does_not_infer_model_preset_from_equal_parameter_values(self) -> None:
+        from dashboard.application.runtime_inspector import RuntimeInspector
+
+        from pathlib import Path
+        from types import SimpleNamespace
+        general = {"ctx-size": "131072", "flash-attn": "on"}
+        state: dict[str, object] = {
+            "runtime_kind": "official", "installed_tag": "b1", "installed_backend": "cuda",
+            "pid": 42, "port": 18434, "models": {}, "active_model_id": "tiel",
+            "model_settings": {"tiel": dict(general)},
+            "parameter_presets": {"general-id": {"name": "general", "options": dict(general)}},
+            "model_presets": {},
+        }
+        inspector = RuntimeInspector(
+            load_state=lambda: state, save_state=lambda value: state.update(value),
+            runtime_kind=lambda current: str(current["runtime_kind"]),
+            executable=lambda: Path("server.exe"), installed_target=lambda: ("b1", "cuda"),
+            executable_in=lambda _root: Path("server.exe"), backend_detector=lambda: "cuda",
+            backend=lambda _kind: SimpleNamespace(description="desc", repository="repo"),
+            backend_view=lambda _kind, _state, _root: SimpleNamespace(label="official", managed_root="root", version="b1", install_action="install"),
+            machine_root=Path("machine"), runtime_root=Path("runtime"), prism_root=Path("prism"),
+            pid_alive=lambda _pid: True, health=lambda _port: True,
+            unregister_endpoint=lambda: None, devices=lambda: [],
+            server_rows=lambda: [{"id": "tiel"}], models_root=Path("models"), model_presets=lambda: {},
+        )
+
+        status = inspector.status()
+
+        self.assertEqual(status["model_presets"], {})
+        self.assertTrue(status["server_running"])
 
 
 class DeviceDiscoveryServiceTests(unittest.TestCase):
@@ -299,7 +447,58 @@ class ModelLifecycleServiceTests(unittest.TestCase):
 
 
 class ParameterSettingsServiceTests(unittest.TestCase):
-    def test_prism_preset_merge_preserves_existing_values_and_omits_spec_options(self) -> None:
+    class _MemoryPresetStore:
+        def __init__(self, state):
+            self.state = state
+            self.state.setdefault("parameter_presets", {})
+            self.state.setdefault("model_presets", {})
+
+        def presets(self): return self.state["parameter_presets"]
+        def get(self, preset_id): return self.presets().get(preset_id)
+
+        def create(self, preset_id, name, options, now):
+            value = {"name": name, "model_id": None, "options": options, "created_at": now, "updated_at": now}
+            self.presets()[preset_id] = value
+            return value
+
+        def update(self, preset_id, name, options, now):
+            value = self.get(preset_id)
+            if value is None: return None
+            if name is not None: value["name"] = name
+            if options is not None: value["options"] = options
+            value["updated_at"] = now
+            return value
+
+        def delete(self, preset_id):
+            if preset_id not in self.presets(): return False
+            self.presets().pop(preset_id)
+            self.state["model_presets"] = {model_id: assigned for model_id, assigned in self.state["model_presets"].items() if assigned != preset_id}
+            return True
+
+        def assign(self, model_id, preset_id): self.state["model_presets"][model_id] = preset_id
+    def test_apply_preset_replaces_twelve_model_parameters_with_six_preset_parameters(self) -> None:
+        from dashboard.application.parameter_settings import ParameterSettingsService
+
+        preset_options = {f"option-{index}": str(index) for index in range(6)}
+        stored_options = {"model": {f"option-{index}": str(index) for index in range(12)}}
+        state = {"parameter_presets": {"test2": {"name": "test2", "options": preset_options}}}
+        catalog = [
+            {"key": f"option-{index}", "requires_value": True, "choices": [], "value_kind": "integer"}
+            for index in range(12)
+        ]
+        service = ParameterSettingsService(
+            catalog=lambda: catalog, canonical=lambda _, value: str(value),
+            load_options=lambda: stored_options, save_options=lambda value: stored_options.update(value),
+            preset_store=self._MemoryPresetStore(state),
+            error=lambda message: ValueError(message), now=lambda: 1.0, new_id=lambda: "new",
+        )
+
+        applied = service.apply_preset("test2", "model", runtime_kind="official", requires_restart=False)
+
+        self.assertEqual(applied["options"], preset_options)
+        self.assertEqual(stored_options["model"], preset_options)
+
+    def test_prism_preset_apply_replaces_existing_values_and_omits_spec_options(self) -> None:
         from dashboard.application.parameter_settings import ParameterSettingsService
 
         state = {"parameter_presets": {"shared": {"name": "shared", "options": {"ctx-size": "8192", "spec-type": "draft"}}}}
@@ -314,8 +513,7 @@ class ParameterSettingsServiceTests(unittest.TestCase):
             canonical=lambda _, value: str(value),
             load_options=lambda: stored_options,
             save_options=lambda value: stored_options.update(value),
-            load_state=lambda: state,
-            save_state=lambda value: state.update(value),
+            preset_store=self._MemoryPresetStore(state),
             error=lambda message: ValueError(message),
             now=lambda: 1.0,
             new_id=lambda: "new",
@@ -323,8 +521,27 @@ class ParameterSettingsServiceTests(unittest.TestCase):
 
         applied = service.apply_preset("shared", "model", runtime_kind="prism_ml", requires_restart=False)
 
-        self.assertEqual(applied["options"], {"ctx-size": "8192", "no-mmproj": ""})
+        self.assertEqual(applied["options"], {"ctx-size": "8192"})
         self.assertEqual(applied["omitted_options"], ["spec-type"])
+        self.assertEqual(state["model_presets"], {"model": "shared"})
+
+    def test_delete_preset_clears_explicit_model_assignments(self) -> None:
+        from dashboard.application.parameter_settings import ParameterSettingsService
+
+        state = {
+            "parameter_presets": {"shared": {"name": "shared", "options": {}}},
+            "model_presets": {"model-a": "shared", "model-b": "other"},
+        }
+        service = ParameterSettingsService(
+            catalog=lambda: [], canonical=lambda _, value: str(value),
+            load_options=lambda: {}, save_options=lambda _: None,
+            preset_store=self._MemoryPresetStore(state),
+            error=lambda message: ValueError(message), now=lambda: 1.0, new_id=lambda: "new",
+        )
+
+        service.delete_preset("shared")
+
+        self.assertEqual(state["model_presets"], {"model-b": "other"})
 
 
 class OfficialRuntimeServiceTests(unittest.TestCase):
@@ -397,6 +614,32 @@ class ServerLifecycleServiceTests(unittest.TestCase):
             self.assertEqual(unregistered, [True])
             self.assertFalse(log_path.exists())
 
+    def test_stop_retries_a_transient_windows_log_lock_without_failing(self) -> None:
+        from dashboard.application.server_lifecycle import ServerLifecycleService
+        from unittest.mock import patch
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            log_path = Path(raw_root) / "llama-server.log"
+            log_path.write_text("diagnostic", encoding="utf-8")
+            state: dict[str, object] = {"pid": None, "custom_endpoint": {"key": "llamacpp-local"}}
+            service = ServerLifecycleService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                pid_alive=lambda _pid: False,
+                terminate=lambda _pid: None,
+                unregister_endpoint=lambda: None,
+                log_path=log_path,
+            )
+
+            with patch.object(Path, "unlink", side_effect=[PermissionError("locked"), None]) as unlink:
+                service.stop()
+
+            self.assertEqual(unlink.call_count, 2)
+            self.assertIsNone(state["pid"])
+            self.assertIsNone(state["custom_endpoint"])
+
 
 class HuggingFaceCacheServiceTests(unittest.TestCase):
     def test_groups_cached_gguf_parts_and_excludes_projectors(self) -> None:
@@ -453,6 +696,7 @@ class HuggingFaceModelWorkflowTests(unittest.TestCase):
             accepts=lambda _kind, repo, paths, _version: repo != "blocked/repo" and bool(paths),
             cache_models=lambda: ([{"repo_id": "owner/repo", "size": "1 GB"}], "hf", None),
             cached_files=lambda repo: ([{"label": "model", "paths": ["model.gguf"], "total_bytes": 3, "fit": "downloaded"}], None),
+            cached_paths=lambda repo, paths: ([Path("E:/gguf/models") / path for path in paths], None),
             http_json=lambda url: (
                 [{"path": "model.gguf", "size": 3}]
                 if "/tree/main" in url else [
@@ -471,6 +715,7 @@ class HuggingFaceModelWorkflowTests(unittest.TestCase):
         registered_model = workflow.register("owner/repo", ["model.gguf"])
         self.assertEqual(registered_model["model_id"], "model")
         self.assertEqual(registered[0][0], "model")
+        self.assertEqual(registered[0][1], [Path("E:/gguf/models/model.gguf")])
         with self.assertRaisesRegex(RuntimeError, "HF cache"):
             workflow.register("owner/repo", ["missing.gguf"])
 
@@ -510,7 +755,7 @@ class ServerStartupServiceTests(unittest.TestCase):
             load_state=lambda: {"active_model_id": None}, save_state=lambda _: None,
             executable=lambda: None, stop=lambda preserve_log=False: None,
             active_path=lambda _: None, load_options=lambda: {}, runtime_kind=lambda _: "official",
-            backend=lambda _: None, option_args=lambda _: [], watch=lambda _: None,
+            backend=lambda _: None, serving_model_name=lambda model_id: model_id, option_args=lambda _: [], watch=lambda _: None,
             health=lambda _: False, register_endpoint=lambda _, __: {}, log_tail=lambda _: {"lines": []},
             log_path=None, spawn=lambda *_: None, now=lambda: 0.0, sleep=lambda _: None,
         )
@@ -518,6 +763,182 @@ class ServerStartupServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "select a model"):
             service.start()
 
+    def test_uses_a_stable_serving_alias_for_command_and_endpoint(self) -> None:
+        from dashboard.application.server_startup import ServerStartupService
+
+        import tempfile
+
+        class Backend:
+            def __init__(self): self.command = []
+            def build_command(self, _executable, _port, _model_id, _entry, _options, model_path=None):
+                self.command = ["llama-server", "--model", str(model_path)]
+                return self.command
+
+        class Process:
+            pid = 99
+            def poll(self): return None
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "Ternary-Bonsai-2-27B-PQ2_0.gguf"
+            model.write_bytes(b"gguf")
+            log_path = root / "llama-server.log"
+            state: dict[str, object] = {
+                "active_model_id": "Ternary-Bonsai-2-27B-PQ2_0",
+                "models": {"Ternary-Bonsai-2-27B-PQ2_0": {}},
+            }
+            endpoint_models: list[str] = []
+            backend = Backend()
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda value: state.update(value),
+                executable=lambda: root / "llama-server.exe", stop=lambda **_: None,
+                active_path=lambda _model_id: model, load_options=lambda: {"Ternary-Bonsai-2-27B-PQ2_0": {}},
+                runtime_kind=lambda _state: "prism_ml", backend=lambda _kind: backend,
+                serving_model_name=lambda _model_id: "Ternary-Bonsai-2-27B",
+                option_args=lambda _: [], watch=lambda _: None, health=lambda _: True,
+                register_endpoint=lambda _port, model_name: endpoint_models.append(model_name) or {"model": model_name},
+                log_tail=lambda _: {"lines": []}, log_path=log_path,
+                spawn=lambda *_: Process(), now=lambda: 0.0, sleep=lambda _: None,
+            )
+
+            service.start()
+
+            self.assertEqual(backend.command[-2:], ["--alias", "Ternary-Bonsai-2-27B"])
+            self.assertEqual(endpoint_models, ["Ternary-Bonsai-2-27B"])
+
+
+
+class MmprojAutoTests(unittest.TestCase):
+    """Custom mmproj-auto behavior: discover a projector gguf next to the model
+    and emit an explicit --mmproj flag (stock --mmproj-auto is a no-op for --model)."""
+
+    def test_find_prefers_base_mmproj_then_falls_back_to_any(self):
+        import tempfile
+        from dashboard.application.server_startup import _find_mmproj_near as find
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "Ternary-Bonsai-2-27B-PQ2_0.gguf"
+            projector = root / "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
+            decoy = root / "Qwen-1.5-14B-mmproj.gguf"
+            for p in (model, projector, decoy):
+                p.write_bytes(b"gguf")
+            self.assertEqual(find(model), projector)
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            projector = root / "model-mmproj.gguf"
+            model.write_bytes(b"gguf")
+            projector.write_bytes(b"gguf")
+            self.assertEqual(find(model), projector)
+
+    def test_find_none_without_projector_or_missing_model(self):
+        import tempfile
+        from dashboard.application.server_startup import _find_mmproj_near as find
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            self.assertIsNone(find(model))
+        self.assertIsNone(find(None))
+
+    def _command(self, options, model):
+        """Return the exact command list that ServerStartupService.start() assembles
+        and passes to spawn. The caller creates the model file (and any sibling
+        projector) on disk; we just feed that real path in. start() extends the
+        recorded command list in place, so it is exactly what would be spawned."""
+        import tempfile
+        from dashboard.application.server_startup import ServerStartupService
+
+        root = Path(tempfile.mkdtemp(prefix="llama_startup_"))
+        state = {"active_model_id": "model", "models": {"model": {}}}
+        recorded = {}
+
+        class Backend:
+            def build_command(self, executable, port, model_id, entry, opts, model_path=None):
+                command = [executable, "--model", str(model_path)]
+                recorded["command"] = command
+                return command
+
+        service = ServerStartupService(
+            load_state=lambda: state, save_state=lambda _: None,
+            executable=lambda: root / "llama-server.exe", stop=lambda **_: None,
+            active_path=lambda _model_id: model,
+            load_options=lambda: {"model": options},
+            runtime_kind=lambda _state: "prism_ml",
+            backend=lambda _kind: Backend(),
+            serving_model_name=lambda _model_id: "served", option_args=lambda _: [],
+            watch=lambda _: None, health=lambda _: True,
+            register_endpoint=lambda _port, _name: {}, log_tail=lambda _: {"lines": []},
+            log_path=root / "llama-server.log",
+            spawn=lambda *_: _FakeProcess(), now=lambda: 0.0, sleep=lambda _: None,
+        )
+        service.start()
+        return recorded["command"]
+
+    def test_emits_mmproj_when_auto_enabled_and_projector_present(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "Ternary-Bonsai-2-27B-PQ2_0.gguf"
+            projector = root / "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
+            for p in (model, projector):
+                p.write_bytes(b"gguf")
+            cmd = self._command({"mmproj-auto": "", "ctx-size": "8192"}, model)
+            self.assertIn("--mmproj", cmd)
+            self.assertIn(str(projector), cmd)
+            self.assertNotIn("--mmproj-auto", cmd)
+            self.assertEqual(cmd[cmd.index("--mmproj") + 1], str(projector))
+
+    def test_omits_mmproj_when_auto_disabled(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            projector = root / "model-mmproj.gguf"
+            for p in (model, projector):
+                p.write_bytes(b"gguf")
+            cmd = self._command({"ctx-size": "8192"}, model)
+            self.assertNotIn("--mmproj", cmd)
+            self.assertNotIn("--mmproj-auto", cmd)
+
+    def test_respects_no_mmproj_override(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            projector = root / "model-mmproj.gguf"
+            for p in (model, projector):
+                p.write_bytes(b"gguf")
+            cmd = self._command({"mmproj-auto": "", "no-mmproj": ""}, model)
+            self.assertNotIn("--mmproj", cmd)
+
+    def test_none_when_no_projector(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            cmd = self._command({"mmproj-auto": ""}, model)
+            self.assertNotIn("--mmproj", cmd)
+            self.assertNotIn("--mmproj-auto", cmd)
+
+
+class _FakeProcess:
+    pid = 99
+
+    def poll(self):
+        return None
 
 if __name__ == "__main__":
     unittest.main()

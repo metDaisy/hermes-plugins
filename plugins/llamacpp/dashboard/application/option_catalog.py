@@ -5,7 +5,12 @@ import re
 from typing import Any
 
 _OPTION_RE = re.compile(r"(?<![-\w])(?:--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z][A-Za-z0-9-]*)")
-_KNOWN_CHOICES = {"load-mode": ["auto", "mmap", "none"]}
+_CACHE_TYPES = ["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+_KNOWN_CHOICES = {
+    "load-mode": ["auto", "none", "mmap", "mlock", "mmap+mlock", "dio"],
+    "cache-type-k": _CACHE_TYPES,
+    "cache-type-v": _CACHE_TYPES,
+}
 
 
 class ServerOptionCatalog:
@@ -34,6 +39,9 @@ class ServerOptionCatalog:
                 continue
             choices_match = re.search(r"(?:\[([^\]]+)\]|\{([^}]+)\})", value_hint)
             choices_text = next((value for value in choices_match.groups() if value), "") if choices_match else ""
+            allowed_match = re.search(r"allowed values:\s*([^\n<(]+)", description, re.IGNORECASE)
+            if allowed_match:
+                choices_text = allowed_match.group(1).strip().rstrip(".")
             choices = [value.strip().strip("'\"") for value in re.split(r"[|,]", choices_text) if value.strip()] if choices_text else []
             toggle = any(name == f"--no-{key}" for name in names) and bool(value_hint)
             if key in _KNOWN_CHOICES:

@@ -64,8 +64,7 @@ class ModelLifecycleService:
         entry = models.get(model_id) if isinstance(models, dict) else None
         if not isinstance(entry, dict):
             raise RuntimeError("model is not registered")
-        if not entry.get("hf_repo"):
-            self._registry.active_path(model_id)
+        self._registry.active_path(model_id)
         running = self._server_running()
         if running and state.get("active_model_id") != model_id:
             raise RuntimeError("stop llama-server before selecting another model")

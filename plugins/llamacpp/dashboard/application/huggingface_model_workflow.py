@@ -21,6 +21,7 @@ class HuggingFaceModelWorkflow:
         accepts: Callable[[str, str, list[str], str | None], bool],
         cache_models: Callable[[], tuple[list[dict[str, str]], str | None, str | None]],
         cached_files: Callable[[str], tuple[list[dict[str, Any]], str | None]],
+        cached_paths: Callable[[str, list[str]], tuple[list[Path], str | None]],
         http_json: Callable[[str], Any],
         download: Callable[..., Path | None],
         register: Callable[..., None],
@@ -33,6 +34,7 @@ class HuggingFaceModelWorkflow:
         self._accepts = accepts
         self._cache_models = cache_models
         self._cached_files = cached_files
+        self._cached_paths = cached_paths
         self._http_json = http_json
         self._download = download
         self._register = register
@@ -125,7 +127,10 @@ class HuggingFaceModelWorkflow:
         if selected is None:
             raise RuntimeError(warning or "선택한 GGUF가 HF cache에 없습니다")
         size_bytes = int(selected.get("total_bytes") or 0)
-        self._register(model_id, [], False, hf_repo=repo_id, hf_file=paths[0], size_bytes=size_bytes)
+        local_paths, warning = self._cached_paths(repo_id, paths)
+        if warning or len(local_paths) != len(paths):
+            raise RuntimeError(warning or "선택한 GGUF의 로컬 cache 경로를 확인할 수 없습니다")
+        self._register(model_id, local_paths, False, hf_repo=repo_id, hf_file=paths[0], size_bytes=size_bytes)
         return {"ok": True, "model_id": model_id, "registered": True, "downloaded": False, "size_bytes": size_bytes}
 
     def _require_compatible(self, repo_id: str, paths: list[str]) -> None:

@@ -3,4 +3,7 @@ __pycache__/
 .pytest_cache/
 
 # Local Codebase Memory graph artifacts
-**/.codebase-memory/**
+.codebase-memory/**
+
+# Local Git hooks
+.githooks/

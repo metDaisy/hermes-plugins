@@ -73,6 +73,7 @@ class LlamaCppManagerTests(unittest.TestCase):
             }]
 
             with patch.object(api, "STATE_PATH", state_path), patch.object(api, "OPTIONS_PATH", options_path), \
+                    patch.object(api, "PRESET_DB_PATH", root / "presets.db"), \
                     patch.object(api, "RUNTIME_ROOT", runtime_root), patch.object(api, "_option_list", return_value=catalog):
                 api.save_model_settings("model-a", {"options": {"ctx-size": "8192"}})
                 created = api.create_preset({"name": "Coding", "model_id": "model-a"})
@@ -85,11 +86,14 @@ class LlamaCppManagerTests(unittest.TestCase):
                 renamed = api.rename_preset(preset_id, {"name": "Coding 32K"})
                 self.assertEqual(renamed["preset"]["name"], "Coding 32K")
                 self.assertEqual(api.presets()["presets"][0]["name"], "Coding 32K")
+                updated = api.rename_preset(preset_id, {"options": {"ctx-size": "8192", "no-mmproj": ""}})
+                self.assertEqual(updated["preset"]["options"], {"ctx-size": "8192", "no-mmproj": ""})
 
                 api.save_model_settings("model-b", {"options": {"ctx-size": "1024", "no-mmproj": ""}})
                 applied = api.apply_preset(preset_id, {"model_id": "model-b"})
                 self.assertEqual(applied["options"], {"ctx-size": "8192", "no-mmproj": ""})
                 self.assertEqual(api.model_settings("model-b")["options"], {"ctx-size": "8192", "no-mmproj": ""})
+                self.assertEqual(api._presets_store().model_preset_map(), {"model-b": preset_id})
 
                 deleted = api.delete_preset(preset_id)
                 self.assertEqual(deleted, {"ok": True, "preset_id": preset_id})
@@ -127,11 +131,13 @@ class LlamaCppManagerTests(unittest.TestCase):
     def test_legacy_model_bound_preset_is_migrated_to_shared_scope(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             state_path = Path(raw_root) / "state.json"
+            preset_db_path = Path(raw_root) / "presets.db"
             state_path.write_text('{"parameter_presets":{"legacy":{"name":"Legacy","model_id":"old-model","options":{}}}}', encoding="utf-8")
-            with patch.object(api, "STATE_PATH", state_path):
+            with patch.object(api, "STATE_PATH", state_path), patch.object(api, "PRESET_DB_PATH", preset_db_path):
                 listed = api.presets()
             self.assertIsNone(listed["presets"][0]["model_id"])
-            self.assertIsNone(api._read_json(state_path, {})["parameter_presets"]["legacy"]["model_id"])
+            self.assertTrue(preset_db_path.is_file())
+            self.assertNotIn("parameter_presets", api._read_json(state_path, {}))
 
     def test_failed_start_cleanup_preserves_server_log(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -157,17 +163,23 @@ class LlamaCppManagerTests(unittest.TestCase):
                 {"key": "spec-draft-n-max", "name": "--spec-draft-n-max", "aliases": ["--spec-draft-n-max"], "value_hint": "N", "description": "draft tokens", "requires_value": True, "default_value": None, "choices": [], "value_kind": "integer", "toggle": False},
             ]
             with patch.object(api, "STATE_PATH", state_path), patch.object(api, "OPTIONS_PATH", options_path), \
+                    patch.object(api, "PRESET_DB_PATH", root / "presets.db"), \
                     patch.object(api, "_option_list", return_value=catalog), patch.object(api, "_runtime_kind", return_value="prism_ml"):
                 created = api.create_preset({"name": "shared", "options": {"ctx-size": "8192", "spec-type": "draft-mtp", "spec-draft-n-max": "1"}})
                 applied = api.apply_preset(created["preset"]["id"], {"model_id": "bonsai"})
             self.assertEqual(applied["options"], {"ctx-size": "8192"})
             self.assertEqual(applied["omitted_options"], ["spec-draft-n-max", "spec-type"])
 
-    def test_model_card_exposes_shared_preset_selection_before_server_start(self) -> None:
+    def test_model_card_exposes_applied_preset_and_running_state_before_server_start(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
-        self.assertIn("모델 시작 preset", source)
-        self.assertIn("model-card-presets", source)
+        self.assertNotIn("모델 시작 preset", source)
+        self.assertIn("model_presets", source)
+        self.assertIn("children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택'", source)
         self.assertIn("/presets/${encodeURIComponent(selectedPresetId)}/apply", source)
+        self.assertIn("const loaded = Boolean(status?.server_running && isActive)", source)
+        self.assertIn("children: activeState", source)
+        self.assertNotIn("children: '소스'", source)
+        self.assertNotIn("server 사용 중", source)
 
     def test_prism_rejects_non_bonsai_registration(self) -> None:
         with self.assertRaisesRegex(Exception, "Prism-ML"):
@@ -231,22 +243,36 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("import pluginSdk from '@hermes/plugin-sdk'", desktop_source)
         self.assertNotIn("react/jsx-runtime", desktop_source)
         self.assertIn("const jsxs = jsx", desktop_source)
-        self.assertIn("const { createElement, useEffect, useMemo, useRef, useState } = React", desktop_source)
-        self.assertIn("logRef.current.scrollTop = logRef.current.scrollHeight", desktop_source)
+        self.assertIn("const { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } = React", desktop_source)
+        self.assertIn("el.scrollTop = el.scrollHeight", desktop_source)
         self.assertIn("jsx('pre', { ref: logRef", desktop_source)
         self.assertIn("const validateDraft = (next, extraMetadata = {})", desktop_source)
-        self.assertIn("persist(next, { [selectedKey]: selected })", desktop_source)
+        self.assertIn("persistPreset(next)", desktop_source)
         self.assertIn("if (option && !option.requires_value) return jsx('span'", desktop_source)
         self.assertIn("option?.value_kind === 'number' ? 'any'", desktop_source)
         self.assertIn("method: 'PATCH', body: { name: presetRename.trim() }", desktop_source)
         self.assertIn("children: '이름 변경'", desktop_source)
-        self.assertIn("children: '저장'", desktop_source)
+        self.assertNotIn("모델 설정 저장", desktop_source)
+        self.assertIn("setDraft(next)", desktop_source)
+        self.assertIn("appliedPresetId: data?.model_presets?.[activeModel.id] || ''", desktop_source)
+        self.assertNotIn("queryKey: [ID, 'model-card-presets']", desktop_source)
+        self.assertNotIn("queryKey: [ID, 'parameter-presets']", desktop_source)
+        self.assertIn("queryKey: [ID, 'presets']", desktop_source)
+        self.assertIn("refetchOnMount: 'always'", desktop_source)
+        self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'presets'] })", desktop_source)
+        self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'status'] })", desktop_source)
+        self.assertIn("children: preset.name", desktop_source)
         self.assertIn(
             "jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),\n"
             "        jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [",
             desktop_source,
         )
 
+
+    def test_backend_exit_does_not_stop_machine_server(self) -> None:
+        with patch.object(api, "_stop_server") as stop_server:
+            api._shutdown_server_on_backend_exit()
+        stop_server.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Windows Job Objects are Windows-only")
     def test_child_exits_when_owner_process_exits(self) -> None:
@@ -277,16 +303,21 @@ print(child.pid, flush=True)
         child_pid = int(owner.stdout.readline().strip())
         owner.terminate()
         owner.wait(timeout=10)
+        if owner.stdout is not None:
+            owner.stdout.close()
+        if owner.stderr is not None:
+            owner.stderr.close()
 
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
                 capture_output=True,
-                text=True,
+                text=False,
                 check=False,
             )
-            if result.stdout.strip().startswith("INFO:"):
+            output = (result.stdout or b"").decode(errors="replace")
+            if result.returncode == 0 and str(child_pid) not in output:
                 return
             time.sleep(0.1)
         subprocess.run(["taskkill", "/PID", str(child_pid), "/T", "/F"], capture_output=True, check=False)

@@ -41,21 +41,9 @@ class HuggingFaceCacheService:
         return models, executable, None
 
     def cached_files(self, repo_id: str) -> tuple[list[dict[str, Any]], str | None]:
-        executable = self._find_cli()
-        if not executable:
-            return [], "hf CLI was not found on PATH"
-        code, output = self._run([executable, "cache", "ls", "--revisions", "--format", "json"])
-        if code != 0:
-            return [], "HF cache revision listing failed"
-        payload = self._json_list(output, "HF cache revision listing")
-        if isinstance(payload, str):
-            return [], payload
-        revision = next((item for item in payload if isinstance(item, dict) and item.get("repo_id") == repo_id and item.get("snapshot_path")), None)
-        if not revision:
-            return [], "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
-        snapshot = Path(str(revision["snapshot_path"]))
-        if not snapshot.is_dir():
-            return [], "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
+        snapshot, warning = self._snapshot(repo_id)
+        if snapshot is None:
+            return [], warning
         grouped: dict[str, dict[str, Any]] = {}
         for path in snapshot.rglob("*.gguf"):
             if not path.is_file() or "mmproj" in path.name.lower() or "draft" in path.name.lower():
@@ -68,6 +56,40 @@ class HuggingFaceCacheService:
         for group in grouped.values():
             group["paths"].sort()
         return sorted(grouped.values(), key=lambda item: item["total_bytes"], reverse=True), None
+
+    def cached_paths(self, repo_id: str, selected_paths: list[str]) -> tuple[list[Path], str | None]:
+        """Resolve a selected cache group to existing local GGUF files only."""
+        snapshot, warning = self._snapshot(repo_id)
+        if snapshot is None:
+            return [], warning
+        paths: list[Path] = []
+        for raw_path in selected_paths:
+            relative = Path(raw_path)
+            if relative.is_absolute():
+                return [], "선택한 GGUF 경로가 올바르지 않습니다."
+            path = (snapshot / relative).resolve()
+            if snapshot not in path.parents or not path.is_file() or path.suffix.lower() != ".gguf":
+                return [], "선택한 GGUF가 다운로드 완료 cache에 없습니다."
+            paths.append(path)
+        return paths, None
+
+    def _snapshot(self, repo_id: str) -> tuple[Path | None, str | None]:
+        executable = self._find_cli()
+        if not executable:
+            return None, "hf CLI was not found on PATH"
+        code, output = self._run([executable, "cache", "ls", "--revisions", "--format", "json"])
+        if code != 0:
+            return None, "HF cache revision listing failed"
+        payload = self._json_list(output, "HF cache revision listing")
+        if isinstance(payload, str):
+            return None, payload
+        revision = next((item for item in payload if isinstance(item, dict) and item.get("repo_id") == repo_id and item.get("snapshot_path")), None)
+        if not revision:
+            return None, "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
+        snapshot = Path(str(revision["snapshot_path"])).resolve()
+        if not snapshot.is_dir():
+            return None, "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
+        return snapshot, None
 
     @staticmethod
     def _json_list(output: str, operation: str) -> list[Any] | str:

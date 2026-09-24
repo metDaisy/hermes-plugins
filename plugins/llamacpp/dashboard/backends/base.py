@@ -34,9 +34,10 @@ def resolve_server_executable(raw_path: Path | str, candidates: list[Path] | Non
 
 def build_server_command(executable: Path, port: int, entry: dict[str, Any], model_path: Path | None, extra_args: list[str] | None = None) -> list[str]:
     command = [str(executable), "--host", "127.0.0.1", "--port", str(port)]
-    if entry.get("hf_repo"):
+    if model_path is not None:
+        command.extend(["--model", str(model_path)])
+    elif entry.get("hf_repo"):
         command.extend(["--hf-repo", str(entry["hf_repo"])])
         if entry.get("hf_file"): command.extend(["--hf-file", str(entry["hf_file"])])
-    elif model_path is not None: command.extend(["--model", str(model_path)])
     if extra_args: command.extend(extra_args)
     return command

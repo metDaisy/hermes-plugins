@@ -17,10 +17,12 @@ class RegisteredModelService:
         load_state: Callable[[], dict[str, Any]],
         save_state: Callable[[dict[str, Any]], None],
         cached_files: Callable[[str], tuple[list[dict[str, Any]], str | None]],
+        cached_paths: Callable[[str, list[str]], tuple[list[Path], str | None]] | None = None,
     ) -> None:
         self._load_state = load_state
         self._save_state = save_state
         self._cached_files = cached_files
+        self._cached_paths = cached_paths
 
     def rows(self) -> list[dict[str, Any]]:
         state = self._load_state()
@@ -72,6 +74,20 @@ class RegisteredModelService:
         self._save_state(state)
 
     def active_path(self, model_id: str) -> Path:
+        state = self._load_state()
+        models = state.get("models")
+        entry = models.get(model_id) if isinstance(models, dict) else None
+        if isinstance(entry, dict):
+            paths, _ = self._valid_paths(entry)
+            if not paths and entry.get("hf_repo") and entry.get("hf_file") and self._cached_paths:
+                groups, _ = self._cached_files(str(entry["hf_repo"]))
+                selected = next((group for group in groups if str(entry["hf_file"]) in group.get("paths", [])), None)
+                selected_paths = list(selected.get("paths") or []) if selected else [str(entry["hf_file"])]
+                cached_paths, warning = self._cached_paths(str(entry["hf_repo"]), selected_paths)
+                if not warning and cached_paths:
+                    entry["paths"] = [str(path.resolve()) for path in cached_paths]
+                    self._save_state(state)
+                    return cached_paths[0].resolve()
         for row in self.rows():
             if row["id"] == model_id:
                 if row["paths"]:
