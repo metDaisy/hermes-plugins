@@ -71,6 +71,13 @@ class OfficialRuntimeService:
                 return tag, backend
         return None
 
+    def latest_target(self, requested_backend: Any = None) -> tuple[str, str]:
+        requested = str(requested_backend or "auto").lower()
+        backend = requested if requested in {"auto", "cuda", "cpu", "vulkan"} else "auto"
+        if backend == "auto":
+            backend = self._backend_detector()
+        return self._latest_build(backend, False), backend
+
     def executable_in(self, root: Path) -> Path | None:
         if not root.is_dir():
             return None
@@ -135,7 +142,11 @@ class OfficialRuntimeService:
             raise RuntimeError("standalone runtime installer currently supports Windows only")
         arch = "arm64" if self._architecture().lower() in {"arm64", "aarch64"} else "x64"
         if backend == "cuda":
-            version = "13.4" if arch == "arm64" else "13.3"
+            # Current Windows releases publish CUDA 12.4 x64 and CUDA 13.4
+            # variants.  Use the broadly compatible 12.4 package consistently;
+            # it includes the matching cudart companion and is available in the
+            # complete release set used for update discovery.
+            version = "12.4" if arch == "x64" else "13.4"
             return [f"llama-{tag}-bin-win-cuda-{version}-{arch}.zip", f"cudart-llama-bin-win-cuda-{version}-{arch}.zip"]
         if backend == "cpu":
             return [f"llama-{tag}-bin-win-cpu-{arch}.zip"]

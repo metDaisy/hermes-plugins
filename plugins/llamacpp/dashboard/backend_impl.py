@@ -137,6 +137,8 @@ _preset_store: PresetStore | None = None
 _preset_store_path: Path | None = None
 _official_runtime_service: OfficialRuntimeService | None = None
 _official_runtime_root: Path | None = None
+_prism_release_cache: tuple[float, dict[str, Any]] | None = None
+_prism_release_cache_lock = threading.RLock()
 _endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BEGIN, CUSTOM_ENDPOINT_END)
 
 
@@ -209,6 +211,12 @@ def _http_json(url: str) -> Any:
         lambda request: urllib.request.urlopen(request, timeout=60),
         time.sleep,
     ).get(url)
+
+
+def _http_text(url: str) -> str:
+    request = urllib.request.Request(url, headers={"Accept": "text/plain", "User-Agent": "llamacpp"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read().decode("utf-8", errors="replace")
 
 
 def _hf_cache() -> HuggingFaceCacheService:
@@ -338,6 +346,47 @@ def _detected_devices() -> list[dict[str, Any]]:
 
 def _runtime_target(force_latest: bool = False, requested_backend: Any = None) -> tuple[str, str]:
     return _official_runtime().resolve_target(force_latest, requested_backend)
+
+
+def _latest_official_release() -> dict[str, Any]:
+    try:
+        tag, backend = _official_runtime().latest_target(_backend())
+        return {"tag": tag, "backend": backend}
+    except Exception as exc:  # noqa: BLE001
+        return {"tag": None, "error": str(exc)}
+
+
+def _latest_prism_release() -> dict[str, Any]:
+    global _prism_release_cache
+    now = time.monotonic()
+    with _prism_release_cache_lock:
+        if _prism_release_cache and now - _prism_release_cache[0] < 300:
+            return dict(_prism_release_cache[1])
+        try:
+            from .application.prism_runtime import PrismRuntimeInstaller
+        except ImportError:
+            from application.prism_runtime import PrismRuntimeInstaller
+        try:
+            tag, cuda_tag = PrismRuntimeInstaller.release_metadata_from_text(
+                _http_text("https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/setup.ps1")
+            )
+            backend = "cuda" if _backend() == "cuda" else "cpu"
+            asset = (
+                f"llama-{tag}-bin-win-cuda-{cuda_tag}-x64.zip"
+                if backend == "cuda" else f"llama-{tag}-bin-win-cpu-x64.zip"
+            )
+            release = _http_json(f"https://api.github.com/repos/PrismML-Eng/llama.cpp/releases/tags/{tag}")
+            assets = {
+                str(item.get("name") or "") for item in release.get("assets", [])
+                if isinstance(item, dict)
+            } if isinstance(release, dict) else set()
+            if asset not in assets:
+                raise RuntimeError(f"GitHub release {tag} has no compatible {backend} asset")
+            result = {"tag": tag, "backend": backend, "cuda_tag": cuda_tag, "asset": asset}
+        except Exception as exc:  # noqa: BLE001
+            result = {"tag": None, "error": str(exc)}
+        _prism_release_cache = (now, result)
+        return dict(result)
 
 
 def _installed_target() -> tuple[str, str] | None:
@@ -582,6 +631,7 @@ def _runtime_inspector() -> RuntimeInspector:
         prism_root=PRISM_RUNTIME_ROOT, pid_alive=_pid_alive, health=_health,
         unregister_endpoint=_unregister_custom_endpoint, devices=_detected_devices,
         server_rows=_server_rows, models_root=MODELS_ROOT, model_presets=_presets_store().model_preset_map,
+        latest_official=_latest_official_release, latest_prism=_latest_prism_release,
     )
 
 

@@ -19,6 +19,8 @@ class RuntimeInspector:
         health: Callable[[int], bool], unregister_endpoint: Callable[[], None],
         devices: Callable[[], list[dict[str, Any]]], server_rows: Callable[[], list[dict[str, Any]]],
         models_root: Path, model_presets: Callable[[], dict[str, str]],
+        latest_official: Callable[[], Any] | None = None,
+        latest_prism: Callable[[], Any] | None = None,
     ) -> None:
         self._load_state, self._save_state = load_state, save_state
         self._runtime_kind, self._executable = runtime_kind, executable
@@ -28,6 +30,8 @@ class RuntimeInspector:
         self._pid_alive, self._health, self._unregister_endpoint = pid_alive, health, unregister_endpoint
         self._devices, self._server_rows, self._models_root = devices, server_rows, models_root
         self._model_presets = model_presets
+        self._latest_official = latest_official or (lambda: None)
+        self._latest_prism = latest_prism or (lambda: None)
 
     def info(self) -> dict[str, Any]:
         state = self._load_state()
@@ -47,6 +51,26 @@ class RuntimeInspector:
         }
 
 
+    @staticmethod
+    def _release_info(value: Any) -> tuple[str | None, str | None]:
+        error = None
+        if isinstance(value, dict):
+            error = str(value.get("error") or "") or None
+            value = value.get("tag") or value.get("version")
+        tag = str(value or "") or None
+        return tag, error
+
+    @staticmethod
+    def _release_number(tag: str | None) -> int | None:
+        import re
+        match = re.search(r"(?:^|-)b(\d+)(?:-|$)", str(tag or ""))
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def _update_available(cls, current: str | None, latest: str | None) -> bool:
+        current_number, latest_number = cls._release_number(current), cls._release_number(latest)
+        return latest_number is not None and current_number is not None and latest_number > current_number
+
     def status(self) -> dict[str, Any]:
         state = self._load_state()
         runtime = self.info()
@@ -65,10 +89,22 @@ class RuntimeInspector:
             state["custom_endpoint"] = None
             self._save_state(state)
             self._unregister_endpoint()
+
+        official_latest, official_error = self._release_info(self._latest_official())
+        prism_latest, prism_error = self._release_info(self._latest_prism())
+        official_current = str(state.get("installed_tag") or "") or None
+        prism_current = str(state.get("prism_release_tag") or "") or None
+        official_update = self._update_available(official_current, official_latest)
+        prism_update = self._update_available(prism_current, prism_latest)
+        current_latest = prism_latest if runtime["kind"] == "prism_ml" else official_latest
+        current_update = prism_update if runtime["kind"] == "prism_ml" else official_update
+        prism_installed = self._executable_in(self._prism_root) is not None
+        if runtime["kind"] == "prism_ml":
+            prism_installed = prism_installed or self._executable() is not None
         return {
             "enabled": True, "tag": tag, "runtime_version": runtime_version,
-            "configured_tag": str(state.get("tag") or "latest"), "latest_tag": None,
-            "update_available": False, "runtime_installed": bool(self._executable()),
+            "configured_tag": str(state.get("tag") or "latest"), "latest_tag": current_latest,
+            "update_available": current_update, "runtime_installed": bool(self._executable()),
             "runtime_backend": backend or (self._backend_detector() if tag else None),
             "backend": backend or (self._backend_detector() if tag else None),
             "runtime_mode": runtime["mode"], "runtime_path": runtime["path"],
@@ -76,8 +112,16 @@ class RuntimeInspector:
             "runtime_label": runtime["label"], "runtime_repository": runtime["repository"],
             "runtime_managed_root": runtime["managed_root"], "runtime_install_action": runtime["install_action"],
             "runtime_options": {
-                "official": {"version": str(state.get("installed_tag") or "") or None, "installed": self._executable_in(self._runtime_root) is not None},
-                "prism_ml": {"version": str(state.get("prism_release_tag") or "") or None, "installed": self._executable_in(self._prism_root) is not None},
+                "official": {
+                    "version": official_current, "latest_version": official_latest,
+                    "update_available": official_update, "release_check_error": official_error,
+                    "installed": self._executable_in(self._runtime_root) is not None,
+                },
+                "prism_ml": {
+                    "version": prism_current, "latest_version": prism_latest,
+                    "update_available": prism_update, "release_check_error": prism_error,
+                    "installed": prism_installed,
+                },
             },
             "devices": self._devices(), "server_running": running,
             "model_presets": self._model_presets(),

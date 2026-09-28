@@ -305,6 +305,60 @@ class PrismRuntimeInstallerTests(unittest.TestCase):
             self.assertEqual(state["prism_release_tag"], "b123")
             self.assertTrue((root / "bin" / "cpu" / "llama-server.exe").is_file())
 
+    def test_preserves_locked_previous_runtime_and_installs_to_fallback_path(self) -> None:
+        from dashboard.application.prism_runtime import PrismRuntimeInstaller
+
+        import shutil
+        import tempfile
+        from unittest.mock import patch
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root) / "prism"
+            (root / ".git" / "objects" / "pack").mkdir(parents=True)
+            (root / ".git" / "objects" / "pack" / "locked.idx").write_bytes(b"old")
+            source = Path(raw_root) / "server.zip"
+            with zipfile.ZipFile(source, "w") as package:
+                package.writestr("llama-server.exe", b"server")
+            state: dict[str, object] = {}
+
+            def clone(_git, _url, destination):
+                (destination / "setup.ps1").parent.mkdir(parents=True)
+                (destination / "setup.ps1").write_text('$ReleaseTag = "prism-b124"\n$CudaTag = "13.3"\n', encoding="utf-8")
+                return 0
+
+            installer = PrismRuntimeInstaller(
+                root=root, load_state=lambda: state, save_state=lambda value: state.update(value),
+                find_git=lambda: "git", clone=clone, backend_detector=lambda: "cpu",
+                download=lambda _url, destination, *_: destination.write_bytes(source.read_bytes()),
+                extract=lambda archive, destination: zipfile.ZipFile(archive).extractall(destination),
+                resolve_executable=lambda path: path / "bin" / "cpu" / "llama-server.exe",
+            )
+            original_rmtree = shutil.rmtree
+
+            def locked_rmtree(path, *args, **kwargs):
+                if Path(path) == root:
+                    raise PermissionError(5, "Access is denied", str(path))
+                return original_rmtree(path, *args, **kwargs)
+
+            with patch.object(shutil, "rmtree", side_effect=locked_rmtree):
+                installer.install({"job_id": "job"})
+
+            installed = Path(str(state["runtime_path"]))
+            self.assertNotEqual(installed, root.resolve())
+            self.assertTrue((installed / "bin" / "cpu" / "llama-server.exe").is_file())
+            self.assertTrue((root / ".git" / "objects" / "pack" / "locked.idx").is_file())
+
+    def test_parses_remote_setup_metadata_without_cloning(self) -> None:
+        from dashboard.application.prism_runtime import PrismRuntimeInstaller
+
+        self.assertEqual(
+            PrismRuntimeInstaller.release_metadata_from_text(
+                '$ReleaseTag = "prism-b10743-adfffbe"\n$CudaTag = "13.3"\n'
+            ),
+            ("prism-b10743-adfffbe", "13.3"),
+        )
+
 
 class RuntimeInspectorTests(unittest.TestCase):
     def test_reconciles_dead_server_state_and_builds_runtime_status_projection(self) -> None:
@@ -368,6 +422,39 @@ class RuntimeInspectorTests(unittest.TestCase):
 
         self.assertEqual(status["model_presets"], {})
         self.assertTrue(status["server_running"])
+
+
+    def test_exposes_github_update_for_official_and_prism_runtimes(self) -> None:
+        from dashboard.application.runtime_inspector import RuntimeInspector
+
+        state: dict[str, object] = {
+            "runtime_kind": "prism_ml", "installed_tag": "b10976", "installed_backend": "cuda",
+            "prism_release_tag": "prism-b10709-9a9394a", "pid": None, "models": {},
+        }
+        inspector = RuntimeInspector(
+            load_state=lambda: state, save_state=lambda value: state.update(value),
+            runtime_kind=lambda current: str(current["runtime_kind"]),
+            executable=lambda: Path("server.exe"), installed_target=lambda: ("b10976", "cuda"),
+            executable_in=lambda _root: Path("server.exe"), backend_detector=lambda: "cuda",
+            backend=lambda _kind: type("Backend", (), {"description": "desc", "repository": "repo"})(),
+            backend_view=lambda kind, current, _root: type("View", (), {
+                "label": kind, "managed_root": "root",
+                "version": current.get("prism_release_tag") if kind == "prism_ml" else current.get("installed_tag"),
+                "install_action": "update",
+            })(),
+            machine_root=Path("machine"), runtime_root=Path("runtime"), prism_root=Path("prism"),
+            pid_alive=lambda _pid: False, health=lambda _port: False,
+            unregister_endpoint=lambda: None, devices=lambda: [], server_rows=lambda: [],
+            models_root=Path("models"), model_presets=lambda: {},
+            latest_official=lambda: "b10982", latest_prism=lambda: "prism-b10743-adfffbe",
+        )
+
+        status = inspector.status()
+
+        self.assertTrue(status["update_available"])
+        self.assertEqual(status["latest_tag"], "prism-b10743-adfffbe")
+        self.assertTrue(status["runtime_options"]["prism_ml"]["update_available"])
+        self.assertTrue(status["runtime_options"]["official"]["update_available"])
 
 
 class DeviceDiscoveryServiceTests(unittest.TestCase):

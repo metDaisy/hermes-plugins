@@ -61,12 +61,24 @@ class PrismRuntimeInstaller:
                 except Exception:  # CUDA runtime is optional for a usable staged install.
                     pass
             self._resolve_executable(staging)
+            # The cloned repository is metadata-only; keeping .git in the active
+            # runtime makes later Windows replacement vulnerable to locked pack
+            # files (WinError 5).  Remove it before materializing the runtime.
+            shutil.rmtree(staging / ".git", ignore_errors=True)
+            install_root = self._root
             if self._root.exists():
-                shutil.rmtree(self._root)
-            self._root.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(staging), str(self._root))
+                try:
+                    shutil.rmtree(self._root)
+                except PermissionError:
+                    # Preserve a locked working runtime and activate the verified
+                    # new build beside it instead of failing the whole update.
+                    install_root = self._root.with_name(f"{self._root.name}-{tag}-{job_id}")
+                    if install_root.exists():
+                        shutil.rmtree(install_root)
+            install_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staging), str(install_root))
             state = self._load_state()
-            path = str(self._root.resolve())
+            path = str(install_root.resolve())
             state.update({
                 "runtime_kind": "prism_ml", "runtime_path": path, "runtime_mode": "custom",
                 "custom_runtime_path": path, "prism_release_tag": tag, "prism_backend": backend,
@@ -80,10 +92,13 @@ class PrismRuntimeInstaller:
             shutil.rmtree(staging, ignore_errors=True)
 
     @staticmethod
-    def _release_metadata(setup_path: Path) -> tuple[str, str]:
-        setup = setup_path.read_text(encoding="utf-8", errors="replace")
+    def release_metadata_from_text(setup: str) -> tuple[str, str]:
         tag = re.search(r'\$ReleaseTag\s*=\s*"([^"]+)"', setup)
         cuda_tag = re.search(r'\$CudaTag\s*=\s*"([^"]+)"', setup)
         if not tag or not cuda_tag:
             raise RuntimeError("Prism-ML setup metadata did not expose release/CUDA tags")
         return tag.group(1), cuda_tag.group(1)
+
+    @classmethod
+    def _release_metadata(cls, setup_path: Path) -> tuple[str, str]:
+        return cls.release_metadata_from_text(setup_path.read_text(encoding="utf-8", errors="replace"))
