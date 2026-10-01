@@ -79,13 +79,17 @@ class RuntimeInspector:
         runtime_version = runtime["version"] or (tag if runtime["kind"] == "official" else None)
         process_alive = self._pid_alive(state.get("pid"))
         running = process_alive and self._health(int(state.get("port") or 18434))
-        if not process_alive:
-            if state.get("pid"):
-                state["pid"] = None
-                state["custom_endpoint"] = None
-                self._save_state(state)
-            self._unregister_endpoint()
-        elif not running:
+        # status() is a read-only polling point. A probe that fails while the
+        # process is alive is a transient false negative (busy with inference,
+        # slow health endpoint), not proof the server died. It must not tear
+        # down the provider endpoint — that is what was making llama.cpp
+        # appear "disconnected" while the background process kept running.
+        #
+        # Endpoint removal is only appropriate when the process is genuinely
+        # gone (a stale state), or by ServerLifecycleService on explicit
+        # stop/watch. Here we only reconcile that stale state.
+        if not process_alive and state.get("pid"):
+            state["pid"] = None
             state["custom_endpoint"] = None
             self._save_state(state)
             self._unregister_endpoint()

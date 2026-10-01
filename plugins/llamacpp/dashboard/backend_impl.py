@@ -457,8 +457,12 @@ def _server_lifecycle() -> ServerLifecycleService:
 
 
 def _health(port: int) -> bool:
+    # A single health probe with a generous timeout. The startup polling
+    # loop re-invokes this on every iteration, so there is no need for an
+    # aggressive 1-second deadline that would false-negative while llama.cpp
+    # is busy with inference or loading.
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3) as response:
             return response.status in (200, 201, 204)
     except Exception:  # noqa: BLE001
         return False
