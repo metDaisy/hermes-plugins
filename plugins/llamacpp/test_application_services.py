@@ -392,6 +392,36 @@ class RuntimeInspectorTests(unittest.TestCase):
         self.assertIsNone(state["pid"])
         self.assertEqual(unregistered, [True])
 
+    def test_keeps_endpoint_when_live_process_has_transient_health_failure(self) -> None:
+        from dashboard.application.runtime_inspector import RuntimeInspector
+
+        from pathlib import Path
+        from types import SimpleNamespace
+        state: dict[str, object] = {
+            "runtime_kind": "official", "installed_tag": "b1", "installed_backend": "cuda",
+            "pid": 42, "port": 18434, "custom_endpoint": {"key": "managed"}, "models": {},
+        }
+        unregistered: list[bool] = []
+        inspector = RuntimeInspector(
+            load_state=lambda: state, save_state=lambda value: state.update(value),
+            runtime_kind=lambda current: str(current["runtime_kind"]),
+            executable=lambda: Path("server.exe"), installed_target=lambda: ("b1", "cuda"),
+            executable_in=lambda _root: Path("server.exe"), backend_detector=lambda: "cuda",
+            backend=lambda _kind: SimpleNamespace(description="desc", repository="repo"),
+            backend_view=lambda _kind, _state, _root: SimpleNamespace(label="official", managed_root="root", version="b1", install_action="install"),
+            machine_root=Path("machine"), runtime_root=Path("runtime"), prism_root=Path("prism"),
+            pid_alive=lambda _pid: True, health=lambda _port: False,
+            unregister_endpoint=lambda: unregistered.append(True), devices=lambda: [{"id": "0"}],
+            server_rows=lambda: [{"id": "model"}], models_root=Path("models"), model_presets=lambda: {},
+        )
+
+        status = inspector.status()
+
+        self.assertFalse(status["server_running"])
+        self.assertEqual(state["pid"], 42)
+        self.assertEqual(state["custom_endpoint"], {"key": "managed"})
+        self.assertEqual(unregistered, [])
+
     def test_does_not_infer_model_preset_from_equal_parameter_values(self) -> None:
         from dashboard.application.runtime_inspector import RuntimeInspector
 
