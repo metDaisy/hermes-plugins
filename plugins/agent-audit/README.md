@@ -18,7 +18,7 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.7.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.10.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`
@@ -36,20 +36,27 @@ metadata에도 같은 SemVer 값을 유지합니다.
 상세 화면은 다음 순서로 정보를 제공합니다.
 
 1. Agent가 수행한 행동과 결과
-2. 사용 모델 이름, provider, `클라우드 모델`/`로컬 모델` 구분
+2. Terminal 실행 명령의 접힌 더보기 영역과 실패 원인
 3. 대상 경로와 검증 Rule
 4. 실패 또는 절차 이탈 시 다음 행동
-5. Session, Task, Turn 같은 기술 정보(접힌 영역)
+5. 클릭해서 Hermes에서 열 수 있는 세션 이름과 도구·Skill 중심의 한 줄 기술 정보
 
 API는 기존 SQLite row를 변경하지 않고 Desktop용 `schema_version: 2` projection을 생성합니다.
 주요 body는 `actor`, `model`, `activity`, `outcome`, `scope`, `explanation`, `correlation`,
 `evidence`, `privacy`로 구성됩니다. 이전 Desktop copy와의 한 버전 호환을 위해 기존 flat field도
 함께 반환합니다.
 
-목록 필터는 Hermes Desktop의 native `Select`를 사용하며 `Project → Profile → 활동 유형 → 결과`
-순서로 범위를 좁힙니다. Project에는 절대 경로 대신 Agent 작업 디렉터리의 마지막 이름만 저장합니다.
-목록의 각 이벤트에는 Project, Profile, 사용 모델을 함께 표시하고, 모델 context가 없는 과거 기록은
+화면 최상단에서 Project 하나를 먼저 선택합니다. 선택 전에는 여러 Project의 기록을 섞어 표시하지
+않습니다. 선택 후에는 `기록`, `세션`, `성공률`, `실패` 네 지표와 해당 Project의 타임라인을
+표시합니다. 보조 필터는 `Session → Profile → 활동 유형 → 결과` 순서입니다. Project는 세션의
+Git 저장소 또는 작업 디렉터리 basename으로 보정하며 절대 경로는 노출하지 않습니다.
+목록의 각 이벤트에는 색상으로 구분한 Profile 이름, 사용 모델과 `reasoning-effort`를 표시합니다.
+Session 필터에는 세션 이름, Project, 기록 수를 표시하며 모델 context가 없는 과거 기록은
 `모델 미확인`으로 명시합니다.
+
+Skill 지침 확인 기록은 `skill_view` 입력에서 allowlist된 Skill 이름을 함께 표시합니다. Terminal
+기록은 credential과 절대 경로를 redaction한 전체 실행 명령을 저장하고 상세 화면의 더보기 안에
+표시합니다. 실패한 Terminal 호출은 exit code, 분류, 최대 600자의 sanitized 원인도 표시합니다.
 
 ## Rule mapping 설정
 
@@ -104,7 +111,11 @@ plugins:
 
 SQLite store에는 event type, Profile 이름, tool 또는 Skill 이름, status, duration, opaque correlation ID, project-relative path, Rule ID, generation 및 길이가 제한된 sanitized failure summary가 저장될 수 있습니다.
 
-Prompt, reasoning, conversation history, raw command, raw tool argument/result, credential 또는 absolute path는 저장하지 않습니다. Credential처럼 보이는 텍스트는 failure summary에 저장되기 전에 redaction됩니다. Desktop UI는 allowlisted SQLite data만 조회하며 raw Hermes log를 읽거나 표시하지 않습니다.
+Prompt, reasoning 원문, conversation history, raw tool argument/result, credential 또는 absolute path는 저장하지 않습니다. Terminal command만 credential과 absolute path를 redaction한 전체 문자열로 저장합니다. `reasoning-effort`는 원문이 아닌 실행 설정값만 저장합니다. Credential처럼 보이는 텍스트는 failure summary와 command에 저장되기 전에 redaction됩니다. Desktop UI는 allowlisted SQLite data만 조회하며 raw Hermes log를 읽거나 표시하지 않습니다.
+
+상세 이벤트와 모델 연결 정보는 30일 동안 보존합니다. 만료된 상세 기록은 삭제 전에
+Project·Profile별 일간 event, 성공, 실패, 세션 수로 집계하여 `audit_daily_rollups`에 영구
+보존합니다. 이 집계에는 command, 실패 원문, Session ID가 포함되지 않습니다.
 
 Logging은 fail-open으로 동작합니다. Filesystem 또는 serialization 오류가 발생해도 coding을 중단하지 않습니다. Verification failure의 책임은 underlying validator와 project workflow에 있습니다.
 
