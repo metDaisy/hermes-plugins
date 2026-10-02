@@ -91,17 +91,29 @@ class LlamaCppManagerTests(unittest.TestCase):
 
             self.assertEqual(len(spawned), 1)
 
-    def test_coordinator_health_requires_expected_identity_and_build(self) -> None:
-        expected = {
+    def test_coordinator_health_accepts_compatible_protocol_across_build_updates(self) -> None:
+        compatible = {
             "ok": True,
             "service": profile_proxy.COORDINATOR_SERVICE,
             "protocol": profile_proxy.COORDINATOR_PROTOCOL,
+            "build": "newer-compatible-build",
+            "pid": 42,
+        }
+        with patch.object(profile_proxy, "_health_payload", return_value=compatible), \
+                patch.object(profile_proxy, "_coordinator_process_ok", return_value=True):
+            self.assertTrue(profile_proxy._healthy())
+
+    def test_coordinator_health_rejects_incompatible_protocol_or_identity(self) -> None:
+        incompatible = {
+            "ok": True,
+            "service": profile_proxy.COORDINATOR_SERVICE,
+            "protocol": profile_proxy.COORDINATOR_PROTOCOL + 1,
             "build": profile_proxy.COORDINATOR_BUILD,
             "pid": 42,
         }
-        with patch.object(profile_proxy, "_health_payload", return_value=expected), \
+        with patch.object(profile_proxy, "_health_payload", return_value=incompatible), \
                 patch.object(profile_proxy, "_coordinator_process_ok", return_value=True):
-            self.assertTrue(profile_proxy._healthy())
+            self.assertFalse(profile_proxy._healthy())
         with patch.object(profile_proxy, "_health_payload", return_value={"ok": True, "pid": 123}):
             self.assertFalse(profile_proxy._healthy())
 

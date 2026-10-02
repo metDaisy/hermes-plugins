@@ -29,7 +29,7 @@ _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.44"
+COORDINATOR_BUILD = "0.2.45"
 
 
 def _health_payload() -> dict[str, object] | None:
@@ -99,7 +99,6 @@ def _healthy() -> bool:
         and payload.get("ok") is True
         and payload.get("service") == COORDINATOR_SERVICE
         and payload.get("protocol") == COORDINATOR_PROTOCOL
-        and payload.get("build") == COORDINATOR_BUILD
         and _coordinator_process_ok(payload)
     )
 
