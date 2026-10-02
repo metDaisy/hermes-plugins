@@ -1,8 +1,9 @@
 """Project-local, privacy-conscious Hermes audit hooks.
 
 The plugin records compact lifecycle metadata in ``.hermes/audit.db``.
-It observes discovery and validation without persisting prompts, commands,
-tool arguments, or results.
+It observes discovery and validation without persisting prompts, raw tool
+arguments, or results. Terminal commands are stored only after credential and
+absolute-path redaction so the audit timeline remains useful.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 try:
+    from .audit_storage import apply_retention as _apply_retention
     from .audit_storage import database_path, storage_root
 except ImportError:
     import sys
@@ -24,6 +26,7 @@ except ImportError:
     plugin_root = str(Path(__file__).resolve().parent)
     if plugin_root not in sys.path:
         sys.path.insert(0, plugin_root)
+    from audit_storage import apply_retention as _apply_retention
     from audit_storage import database_path, storage_root
 
 
@@ -38,6 +41,7 @@ _DISCOVERY_OPERATIONS = {
     "codebase-memory": {"search_graph", "trace_path"},
 }
 _MAX_FAILURE_SUMMARY = 600
+
 
 
 def _find_project_root() -> Path:
@@ -57,6 +61,10 @@ _SAFE_EVENT_FIELDS = {
     "turn_id",
     "action",
     "skill",
+    "command",
+    "exit_code",
+    "failure_type",
+    "failure_summary",
     "provenance",
     "use_count",
     "reused",
@@ -90,6 +98,7 @@ _SAFE_EVENT_FIELDS = {
     "model",
     "model_provider",
     "model_kind",
+    "reasoning_effort",
 }
 
 _LOCAL_MODEL_PROVIDERS = {
@@ -276,19 +285,39 @@ def _initialize_database(connection: sqlite3.Connection) -> None:
             turn_id TEXT,
             model TEXT NOT NULL,
             provider TEXT,
-            model_kind TEXT NOT NULL
+            model_kind TEXT NOT NULL,
+            reasoning_effort TEXT
+        );
+        CREATE TABLE IF NOT EXISTS audit_daily_rollups (
+            date TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            profile_name TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            succeeded_count INTEGER NOT NULL,
+            failed_count INTEGER NOT NULL,
+            session_count INTEGER NOT NULL,
+            PRIMARY KEY (date, project_name, profile_name)
+        );
+        CREATE TABLE IF NOT EXISTS audit_retention_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
         """
     )
     event_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_events)")}
     if "project_name" not in event_columns:
         connection.execute("ALTER TABLE audit_events ADD COLUMN project_name TEXT")
+    model_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_model_contexts)")}
+    if "reasoning_effort" not in model_columns:
+        connection.execute("ALTER TABLE audit_model_contexts ADD COLUMN reasoning_effort TEXT")
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS audit_events_project_timestamp_idx
             ON audit_events(project_name, timestamp DESC);
         CREATE INDEX IF NOT EXISTS audit_model_contexts_session_turn_timestamp_idx
             ON audit_model_contexts(session_id, turn_id, timestamp DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS audit_daily_rollups_project_date_idx
+            ON audit_daily_rollups(project_name, date DESC);
         """
     )
 
@@ -306,6 +335,24 @@ def _model_kind(provider: Any, base_url: Any) -> str:
     return "cloud" if normalized_provider or hostname else "unknown"
 
 
+def _reasoning_effort(kwargs: dict[str, Any]) -> str | None:
+    effort = kwargs.get("reasoning_effort")
+    request = kwargs.get("request")
+    body = request.get("body") if isinstance(request, dict) else None
+    if not effort and isinstance(body, dict):
+        effort = body.get("reasoning_effort")
+        reasoning = body.get("reasoning")
+        if not effort and isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+        extra = body.get("extra_body")
+        if not effort and isinstance(extra, dict):
+            effort = extra.get("reasoning_effort")
+            reasoning = extra.get("reasoning")
+            if not effort and isinstance(reasoning, dict):
+                effort = reasoning.get("effort")
+    return _opaque(effort)
+
+
 def _record_model_context(**kwargs: Any) -> None:
     model = _opaque(kwargs.get("model"))
     session_id = _opaque(kwargs.get("session_id"))
@@ -319,12 +366,13 @@ def _record_model_context(**kwargs: Any) -> None:
             connection = sqlite3.connect(path, timeout=1)
             connection.execute("PRAGMA busy_timeout = 1000")
             _initialize_database(connection)
+            _apply_retention(connection, datetime.now(timezone.utc))
             connection.execute(
                 """
                 INSERT INTO audit_model_contexts (
                     timestamp, profile_name, session_id, task_id, turn_id,
-                    model, provider, model_kind
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    model, provider, model_kind, reasoning_effort
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
@@ -335,6 +383,7 @@ def _record_model_context(**kwargs: Any) -> None:
                     model,
                     _opaque(kwargs.get("provider")),
                     _model_kind(kwargs.get("provider"), kwargs.get("base_url")),
+                    _reasoning_effort(kwargs),
                 ),
             )
             connection.commit()
@@ -355,7 +404,7 @@ def _latest_model_context(
     if turn:
         row = connection.execute(
             """
-            SELECT model, provider, model_kind
+            SELECT model, provider, model_kind, reasoning_effort
             FROM audit_model_contexts
             WHERE session_id = ? AND turn_id = ?
             ORDER BY timestamp DESC, id DESC
@@ -364,10 +413,11 @@ def _latest_model_context(
             (session, turn),
         ).fetchone()
         if row:
-            return {"model": row[0], "model_provider": row[1], "model_kind": row[2]}
+            return {"model": row[0], "model_provider": row[1], "model_kind": row[2],
+                    "reasoning_effort": row[3]}
     row = connection.execute(
         """
-        SELECT model, provider, model_kind
+        SELECT model, provider, model_kind, reasoning_effort
         FROM audit_model_contexts
         WHERE session_id = ?
         ORDER BY timestamp DESC, id DESC
@@ -377,7 +427,8 @@ def _latest_model_context(
     ).fetchone()
     if not row:
         return {}
-    return {"model": row[0], "model_provider": row[1], "model_kind": row[2]}
+    return {"model": row[0], "model_provider": row[1], "model_kind": row[2],
+            "reasoning_effort": row[3]}
 
 
 def _write(event: str, **fields: Any) -> None:
@@ -390,6 +441,8 @@ def _write(event: str, **fields: Any) -> None:
             connection = sqlite3.connect(path, timeout=1)
             connection.execute("PRAGMA busy_timeout = 1000")
             _initialize_database(connection)
+            now = datetime.now(timezone.utc)
+            _apply_retention(connection, now)
             safe_fields = {
                 key: value for key, value in fields.items()
                 if value is not None and key in _SAFE_EVENT_FIELDS
@@ -401,7 +454,7 @@ def _write(event: str, **fields: Any) -> None:
                 safe_fields.setdefault(key, value)
             payload = {
                 "schema_version": 1,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": now.isoformat(),
                 "event": event,
                 **safe_fields,
             }
@@ -449,6 +502,16 @@ def _redact_sensitive_text(text: str) -> str:
         r"(?:api[_-]?key|authorization|bearer|credential|password|passwd|secret|token)"
     )
     text = re.sub(
+        r"(?i)(Authorization\s*:\s*)(?:Bearer\s+)?[^\s'\";|]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(--(?:api[-_]?key|authorization|credential|password|passwd|secret|token)\s+)(?:\"[^\"]*\"|'[^']*'|\S+)",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
         rf"(?i)([\"']?{key_pattern}[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^,\s}}\]]+)",
         r"\1[REDACTED]",
         text,
@@ -462,12 +525,105 @@ def _redact_sensitive_text(text: str) -> str:
     return text
 
 
+def _redact_absolute_paths(text: str) -> str:
+    """Redact complete quoted or unquoted absolute paths without altering URLs."""
+    quoted_patterns = (
+        r"([\"'])(?:[A-Za-z]:[\\/])[^\"']*\1",
+        r"([\"'])(?:\\\\|//)[^\"']*\1",
+        r"([\"'])/(?!/)[^\"']*\1",
+    )
+    for pattern in quoted_patterns:
+        text = re.sub(
+            pattern,
+            lambda match: f"{match.group(1)}<absolute-path>{match.group(1)}",
+            text,
+        )
+    unquoted_patterns = (
+        r"(?<![A-Za-z0-9+._:/-])(?:[A-Za-z]:[\\/])[^\s;|&]+",
+        r"(?<!\S)(?:\\\\|//)[^\s;|&]+",
+        r"(?<![A-Za-z0-9+._:/>-])/(?!/)[^\s;|&]+",
+    )
+    for pattern in unquoted_patterns:
+        text = re.sub(pattern, "<absolute-path>", text)
+    return text
+
+
+def _safe_terminal_command(tool_name: str, args: Any) -> str | None:
+    """Return the complete command with credentials and absolute paths removed."""
+    if tool_name != "terminal" or not isinstance(args, dict):
+        return None
+    command = args.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    text = _redact_sensitive_text(command.strip())
+    text = text.replace(str(_project_dir()), "<project>")
+    text = text.replace(str(_project_dir()).replace("\\", "/"), "<project>")
+    return _redact_absolute_paths(text)
+
+
+def _skill_from_tool_args(tool_name: str, args: Any) -> str | None:
+    if tool_name != "skill_view" or not isinstance(args, dict):
+        return None
+    return _opaque(args.get("name"))
+
+
 def _failure_summary(result: Any) -> str:
     """Extract a short, path-sanitized diagnostic without persisting raw output."""
-    text = _text(result).replace(str(_project_dir()), "<project>")
+    candidate = result
+    explicit_diagnostic = False
+    if isinstance(result, str):
+        try:
+            decoded = json.loads(result)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = None
+        if isinstance(decoded, dict):
+            result = decoded
+    if isinstance(result, dict):
+        candidate = result.get("error") or result.get("message")
+        explicit_diagnostic = bool(candidate)
+        if not candidate:
+            candidate = result.get("output") or ""
+    text = _text(candidate)[-16_000:].replace(str(_project_dir()), "<project>")
     text = _redact_sensitive_text(text)
+    text = _redact_absolute_paths(text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return " ".join(lines)[-_MAX_FAILURE_SUMMARY:]
+    diagnostic_pattern = re.compile(
+        r"(?i)(?:\berror\b|\bfailed?\b|\bfailure\b|\bexception\b|tests? failed|"
+        r"command not found|not recognized as|permission denied|access is denied|"
+        r"timed? out|timeout|npm err!|build failed)"
+    )
+    selected = lines if explicit_diagnostic else [line for line in lines if diagnostic_pattern.search(line)]
+    return " ".join(selected[-3:])[-_MAX_FAILURE_SUMMARY:]
+
+
+def _terminal_failure_details(tool_name: str, status: Any, result: Any) -> dict[str, Any]:
+    exit_code = result.get("exit_code") if isinstance(result, dict) else None
+    nonzero_exit = isinstance(exit_code, int) and exit_code != 0
+    if tool_name != "terminal" or not (nonzero_exit or _looks_failed(status, result)):
+        return {}
+    summary = _failure_summary(result)
+    normalized = f"{status or ''} {summary}".lower()
+    if "timed out" in normalized or "timeout" in normalized:
+        failure_type = "timeout"
+    elif "permission denied" in normalized or "access is denied" in normalized:
+        failure_type = "permission_denied"
+    elif "command not found" in normalized or "not recognized as" in normalized:
+        failure_type = "command_not_found"
+    elif "network" in normalized or "connection" in normalized:
+        failure_type = "network_error"
+    elif str(status or "").lower() in {"cancelled", "canceled", "interrupted"}:
+        failure_type = "cancelled"
+    elif isinstance(exit_code, int) and exit_code != 0:
+        failure_type = "nonzero_exit"
+    else:
+        failure_type = "unknown"
+    return {
+        "exit_code": exit_code,
+        "failure_type": failure_type,
+        "failure_summary": summary or (
+            f"Command failed with exit code {exit_code}" if nonzero_exit else None
+        ),
+    }
 
 
 def _validation_kind(tool_name: str, args: Any) -> str:
@@ -616,6 +772,15 @@ def _on_post_tool_call(**kwargs: Any) -> None:
     profile_name = _profile_name(kwargs)
     project_name = _project_name(kwargs)
 
+    tool_details = {}
+    skill = _skill_from_tool_args(tool_name, args)
+    command = _safe_terminal_command(tool_name, args)
+    if skill:
+        tool_details["skill"] = skill
+    if command:
+        tool_details["command"] = command
+    tool_details.update(_terminal_failure_details(tool_name, status, kwargs.get("result")))
+
     _write(
         "tool_call",
         tool=_opaque(tool_name),
@@ -627,6 +792,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         paths=paths,
         profile_name=profile_name,
         project_name=project_name,
+        **tool_details,
     )
 
     discovery = _discovery_call(tool_name, args)

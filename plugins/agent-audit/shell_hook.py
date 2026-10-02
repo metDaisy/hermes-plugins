@@ -63,6 +63,8 @@ def _dispatch(payload: dict[str, Any]) -> dict[str, Any] | None:
             model=extra.get("model"),
             provider=extra.get("provider"),
             base_url=extra.get("base_url"),
+            reasoning_effort=extra.get("reasoning_effort"),
+            request=extra.get("request"),
             **common,
         )
     elif event == "post_tool_call":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -168,7 +169,7 @@ def test_failure_summary_redacts_structured_and_prefixed_credentials() -> None:
     assert "sk-test-1234567890" not in summary
     assert "abc.def.ghi" not in summary
     assert "plain-password" not in summary
-    assert summary.count("[REDACTED]") >= 3
+    assert summary == "BUILD FAILED"
 
 
 def test_java_gate_applies_without_coding_posture() -> None:
@@ -245,6 +246,146 @@ def test_tool_call_records_profile_name_without_other_runtime_context() -> None:
     tool_call = next(event for event in events if event["event"] == "tool_call")
     assert tool_call["profile_name"] == "project-manager"
     assert "args" not in tool_call
+
+
+def test_terminal_tool_call_records_the_full_redacted_command() -> None:
+    events = _reset()
+    long_suffix = "x" * 1600
+
+    _AUDIT._on_post_tool_call(
+        tool_name="terminal",
+        args={
+            "command": (
+                "curl -H 'Authorization: Bearer top-secret-token' "
+                "C:/Users/leee/IdeaProjects/hermes-plugins/api && npm test && "
+                + long_suffix
+            )
+        },
+        status="success",
+        session_id="session-terminal-command",
+    )
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    command = tool_call["command"]
+    assert command.startswith("curl -H 'Authorization:")
+    assert "<project>/api && npm test && " in command
+    assert "top-secret-token" not in command
+    assert "C:/Users" not in command
+    assert command.endswith(long_suffix)
+    assert len(command) > 1200
+
+
+def test_terminal_command_redaction_preserves_urls_and_hides_complete_absolute_paths() -> None:
+    command = (
+        'git clone https://example.com/org/repo.git && '
+        'cat "/tmp/My Secrets/private.txt" && '
+        'type "C:/Users/leee/My Projects/private.txt" && '
+        'type "\\\\server\\share\\Private Folder\\secret.txt"'
+    )
+
+    sanitized = _AUDIT._safe_terminal_command("terminal", {"command": command})
+
+    assert "https://example.com/org/repo.git" in sanitized
+    assert sanitized.count("<absolute-path>") == 3
+    for secret_part in ("My Secrets", "My Projects", "server", "Private Folder"):
+        assert secret_part not in sanitized
+
+
+def test_failed_terminal_call_records_only_compact_redacted_failure_evidence() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "npm test"},
+        result={
+            "output": (
+                "customer record: Alice Example\n"
+                "token=top-secret-token\n"
+                "3 tests failed: ProjectServiceTest\n"
+                "unrelated source line after the diagnostic"
+            ),
+            "exit_code": 1,
+            "error": None,
+        },
+        status="error",
+        session_id="session-terminal-failure",
+    )
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    assert tool_call["command"] == "npm test"
+    assert tool_call["exit_code"] == 1
+    assert tool_call["failure_type"] == "nonzero_exit"
+    assert tool_call["failure_summary"].endswith("3 tests failed: ProjectServiceTest")
+    assert "top-secret-token" not in tool_call["failure_summary"]
+    assert "Alice Example" not in tool_call["failure_summary"]
+    assert "unrelated source" not in tool_call["failure_summary"]
+    assert "result" not in tool_call
+
+
+def test_nonzero_terminal_exit_code_is_failure_even_when_status_says_success() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "npm test"},
+        result={"output": "", "exit_code": 2, "error": None},
+        status="success",
+        session_id="session-terminal-nonzero",
+    )
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    assert tool_call["exit_code"] == 2
+    assert tool_call["failure_type"] == "nonzero_exit"
+    assert tool_call["failure_summary"] == "Command failed with exit code 2"
+
+
+def test_retention_rolls_up_and_deletes_only_details_older_than_30_days() -> None:
+    with TemporaryDirectory() as directory:
+        database_path = Path(directory) / "audit.db"
+        connection = sqlite3.connect(database_path)
+        try:
+            _AUDIT._initialize_database(connection)
+            rows = [
+                ("2026-08-31T23:59:59+00:00", "shop", "main", "old-session", "tool_call", "success"),
+                ("2026-09-15T00:00:00+00:00", "shop", "main", "recent-session", "tool_call", "error"),
+            ]
+            connection.executemany(
+                "INSERT INTO audit_events (timestamp, project_name, profile_name, session_id, "
+                "event_type, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, '{}')",
+                rows,
+            )
+
+            _AUDIT._apply_retention(
+                connection,
+                datetime(2026, 10, 2, 0, 0, tzinfo=timezone.utc),
+            )
+
+            remaining = connection.execute(
+                "SELECT timestamp FROM audit_events ORDER BY timestamp"
+            ).fetchall()
+            rollup = connection.execute(
+                "SELECT date, project_name, profile_name, event_count, succeeded_count, "
+                "failed_count, session_count FROM audit_daily_rollups"
+            ).fetchone()
+        finally:
+            connection.close()
+
+    assert remaining == [("2026-09-15T00:00:00+00:00",)]
+    assert rollup == ("2026-08-31", "shop", "main", 1, 1, 0, 1)
+
+
+def test_skill_view_tool_call_records_the_requested_skill_name() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="skill_view",
+        args={"name": "frontend-design"},
+        status="success",
+        session_id="session-skill-view",
+    )
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    assert tool_call["skill"] == "frontend-design"
 
 
 def test_writer_records_privacy_safe_project_name_from_current_directory() -> None:
@@ -333,6 +474,7 @@ def test_tool_event_inherits_latest_privacy_safe_model_context() -> None:
             model="Qwen3-Coder-30B-A3B-Instruct",
             provider="llamacpp",
             base_url="http://127.0.0.1:8080/v1",
+            request={"body": {"reasoning": {"effort": "high"}}},
             session_id="session-local-model",
             turn_id="turn-local-model",
             profile_name="main",
@@ -357,6 +499,7 @@ def test_tool_event_inherits_latest_privacy_safe_model_context() -> None:
     assert '"model":"Qwen3-Coder-30B-A3B-Instruct"' in payload
     assert '"model_provider":"llamacpp"' in payload
     assert '"model_kind":"local"' in payload
+    assert '"reasoning_effort":"high"' in payload
 
 
 def test_patch_add_and_delete_headers_preserve_paths() -> None:

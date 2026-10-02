@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -16,6 +17,10 @@ _SPEC = importlib.util.spec_from_file_location("agent_audit_plugin_api", _API)
 assert _SPEC and _SPEC.loader
 _API_MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_API_MODULE)
+_NOW = datetime.now(timezone.utc).replace(microsecond=0)
+_OLDER_EVENT = (_NOW - timedelta(minutes=3)).isoformat()
+_NEWER_EVENT = (_NOW - timedelta(minutes=2)).isoformat()
+_FAILED_EVENT = (_NOW - timedelta(minutes=1)).isoformat()
 
 
 def _database_with_events(path: Path) -> Path:
@@ -31,7 +36,7 @@ def _database_with_events(path: Path) -> Path:
             """,
             [
                 (
-                    "2026-09-21T11:16:34+00:00",
+                    _OLDER_EVENT,
                     "hermes-plugins",
                     "main",
                     "session-main",
@@ -41,10 +46,10 @@ def _database_with_events(path: Path) -> Path:
                     "success",
                     None,
                     None,
-                    '{"schema_version":1,"tool":"read_file","paths":["docs/index.md"],"duration_ms":42,"model":"gpt-5.6-sol","model_provider":"openai-codex","model_kind":"cloud"}',
+                    '{"schema_version":1,"tool":"read_file","paths":["docs/index.md"],"duration_ms":42,"model":"gpt-5.6-sol","model_provider":"openai-codex","model_kind":"cloud","reasoning_effort":"medium"}',
                 ),
                 (
-                    "2026-09-21T11:18:54+00:00",
+                    _NEWER_EVENT,
                     "e-commerce-clone-coding",
                     "project-manager",
                     "session-pm",
@@ -71,7 +76,7 @@ def test_events_filter_by_profile_and_preserve_timestamp_order(tmp_path: Path) -
 
     assert payload["total"] == 1
     event = payload["events"][0]
-    assert event["timestamp"] == "2026-09-21T11:18:54+00:00"
+    assert event["timestamp"] == _NEWER_EVENT
     assert event["event"] == "validation_result"
     assert event["profile_name"] == "project-manager"
     assert event["session_id"] == "session-pm"
@@ -89,6 +94,59 @@ def test_events_filter_by_project(tmp_path: Path) -> None:
 
     assert payload["total"] == 1
     assert payload["events"][0]["scope"]["project"] == "hermes-plugins"
+
+
+def test_failed_terminal_projection_exposes_only_compact_failure_evidence(tmp_path: Path) -> None:
+    database = _database_with_events(tmp_path / "audit.db")
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                timestamp, project_name, profile_name, session_id,
+                event_type, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _FAILED_EVENT,
+                "hermes-plugins",
+                "main",
+                "session-main",
+                "tool_call",
+                "error",
+                '{"tool":"terminal","command":"npm test","exit_code":1,'
+                '"failure_type":"nonzero_exit","failure_summary":"3 tests failed"}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    event = _API_MODULE.read_events(database, event_type="tool_call", status="error")["events"][0]
+
+    assert event["activity"]["command"] == "npm test"
+    assert event["outcome"] == {
+        "state": "failed",
+        "exit_code": 1,
+        "failure_type": "nonzero_exit",
+        "failure_summary": "3 tests failed",
+    }
+    assert "result" not in event
+
+
+def test_events_accept_multiple_values_for_every_filter(tmp_path: Path) -> None:
+    database = _database_with_events(tmp_path / "audit.db")
+
+    payload = _API_MODULE.read_events(
+        database,
+        project_name="hermes-plugins,e-commerce-clone-coding",
+        profile_name="main,project-manager",
+        session_id="session-main,session-pm",
+        event_type="tool_call,validation_result",
+        status="success,passed",
+    )
+
+    assert payload["total"] == 2
 
 
 def test_events_support_offset_and_limit_pagination(tmp_path: Path) -> None:
@@ -120,6 +178,7 @@ def test_events_project_user_facing_activity_and_model_schema(tmp_path: Path) ->
         "name": "gpt-5.6-sol",
         "provider": "openai-codex",
         "kind": "cloud",
+        "reasoning_effort": "medium",
     }
     assert event["activity"] == {
         "code": "filesystem.read",
@@ -145,6 +204,60 @@ def test_events_project_user_facing_activity_and_model_schema(tmp_path: Path) ->
     assert event["paths"] == ["docs/index.md"]
 
 
+def test_event_projection_resolves_session_title_from_profile_state(tmp_path: Path) -> None:
+    database = _database_with_events(tmp_path / "audit.db")
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE audit_events SET project_name = 'IdeaProjects' WHERE session_id = 'session-main'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    profile_dir = tmp_path / "main"
+    profile_dir.mkdir()
+    state = sqlite3.connect(profile_dir / "state.db")
+    try:
+        state.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, model_config TEXT, "
+            "cwd TEXT, git_repo_root TEXT)"
+        )
+        state.execute(
+            "INSERT INTO sessions (id, title, model_config, cwd, git_repo_root) VALUES (?, ?, ?, ?, ?)",
+            (
+                "session-main",
+                "Agent Audit UI 개선",
+                '{"reasoning_config":{"effort":"high"}}',
+                "C:/Users/lee/IdeaProjects/hermes-plugins",
+                "C:/Users/lee/IdeaProjects/hermes-plugins",
+            ),
+        )
+        state.commit()
+    finally:
+        state.close()
+
+    event = _API_MODULE.read_events(database, profile_name="main", session_id="session-main")["events"][0]
+
+    assert event["session"] == {"id": "session-main", "title": "Agent Audit UI 개선"}
+    assert event["model"]["reasoning_effort"] == "medium"
+    assert event["project_name"] == "hermes-plugins"
+    assert event["scope"]["project"] == "hermes-plugins"
+
+    sessions = _API_MODULE.audit_sessions(database, project_name="hermes-plugins")
+    assert sessions == {
+        "sessions": [
+            {
+                "id": "session-main",
+                "title": "Agent Audit UI 개선",
+                "project": "hermes-plugins",
+                "profile": "main",
+                "count": 1,
+                "last_activity": _OLDER_EVENT,
+            }
+        ]
+    }
+
+
 def test_common_agent_tools_are_grouped_into_user_facing_activities(tmp_path: Path) -> None:
     cases = {
         "terminal": "system.command",
@@ -160,6 +273,41 @@ def test_common_agent_tools_are_grouped_into_user_facing_activities(tmp_path: Pa
     for tool, code in cases.items():
         assert _API_MODULE._activity({"event": "tool_call", "tool": tool})["code"] == code
 
+    assert _API_MODULE._activity(
+        {"event": "tool_call", "tool": "skill_view", "skill": "frontend-design"}
+    )["skill"] == "frontend-design"
+
+
+def test_terminal_command_is_exposed_only_from_the_sanitized_allowlist(tmp_path: Path) -> None:
+    database = tmp_path / "audit.db"
+    _API_MODULE.initialize_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                timestamp, project_name, profile_name, session_id, event_type, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-10-02T08:49:37+00:00",
+                "e-commerce-clone-coding",
+                "main",
+                "session-terminal",
+                "tool_call",
+                "success",
+                '{"tool":"terminal","command":"npm test && git status --short"}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    event = _API_MODULE.read_events(database)["events"][0]
+
+    assert event["activity"]["command"] == "npm test && git status --short"
+    assert event["command"] == "npm test && git status --short"
+
 
 def test_summary_groups_sqlite_events_by_profile(tmp_path: Path) -> None:
     database_path = _database_with_events(tmp_path / "audit.db")
@@ -171,6 +319,44 @@ def test_summary_groups_sqlite_events_by_profile(tmp_path: Path) -> None:
         "event_types": {"tool_call": 1, "validation_result": 1},
         "statuses": {"passed": 1, "success": 1},
     }
+
+
+def test_project_insights_explain_activity_outcomes_and_tools(tmp_path: Path) -> None:
+    database = _database_with_events(tmp_path / "audit.db")
+
+    insights = _API_MODULE.audit_insights(database, project_name="hermes-plugins")
+
+    assert insights["scope"] == {"projects": ["hermes-plugins"], "sessions": ["session-main"]}
+    assert insights["totals"] == {
+        "events": 1,
+        "sessions": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "interrupted": 0,
+        "success_rate": 100,
+    }
+    assert insights["activities"] == [{"code": "filesystem.read", "count": 1}]
+    assert insights["tools"] == [{"name": "read_file", "count": 1}]
+    assert insights["skills"] == []
+    assert insights["validators"] == []
+    assert insights["files"] == {"searched": 0, "read": 1, "modified": 0, "unique": 1}
+    assert insights["recent_activity"] == _OLDER_EVENT
+
+
+def test_project_insights_accept_session_and_profile_filters(tmp_path: Path) -> None:
+    database = _database_with_events(tmp_path / "audit.db")
+
+    insights = _API_MODULE.audit_insights(
+        database,
+        project_name="e-commerce-clone-coding",
+        session_id="session-pm",
+        profile_name="project-manager",
+    )
+
+    assert insights["totals"]["events"] == 1
+    assert insights["totals"]["sessions"] == 1
+    assert insights["activities"] == [{"code": "validation.result", "count": 1}]
+    assert insights["validators"] == []
 
 
 def test_default_database_path_is_resolved_at_request_time(tmp_path: Path) -> None:
