@@ -173,6 +173,13 @@ class CoreApiAdapterTests(unittest.TestCase):
         self.assertIn("Hermes Core", readme)
         self.assertNotIn("Standalone llama.cpp", readme)
 
+    def test_pack_pins_the_core_native_release(self) -> None:
+        pack = (Path(__file__).parent / "pack.yml").read_text(encoding="utf-8")
+
+        self.assertIn("version: 0.3.0", pack)
+        self.assertIn("Core-native", pack)
+        self.assertIn("ref: f9053fadd90049028fc6c75f333e0c6a1436e096", pack)
+
 
 if __name__ == "__main__":
     unittest.main()
