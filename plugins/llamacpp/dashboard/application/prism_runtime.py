@@ -100,12 +100,7 @@ class PrismRuntimeInstaller:
                 raise RuntimeError("Prism-ML runtime archive did not contain llama-server.exe")
             install_root.parent.mkdir(parents=True, exist_ok=True)
             if install_root.exists():
-                try:
-                    shutil.rmtree(install_root)
-                except PermissionError:
-                    install_root = self._root / tag / f"{backend}-{job_id}"
-                    if install_root.exists():
-                        shutil.rmtree(install_root)
+                shutil.rmtree(install_root)
             shutil.move(str(extract_root), str(install_root))
             self._write_manifest(install_root, {
                 "tag": tag,
@@ -128,6 +123,66 @@ class PrismRuntimeInstaller:
             return tag, backend
         finally:
             shutil.rmtree(extract_root, ignore_errors=True)
+
+    def migrate_legacy_layout(self) -> Path | None:
+        """Move the old cloned demo checkout into ``<tag>/<backend>``.
+
+        Prism runtimes now use the same version/backend hierarchy as the
+        official runtime.  Migration is skipped while a managed server is
+        recorded as running so an in-use executable is never moved.
+        """
+        state = self._load_state()
+        if state.get("runtime_kind") != "prism_ml" or state.get("pid"):
+            return None
+        tag = str(state.get("prism_release_tag") or "")
+        backend = str(state.get("prism_backend") or "")
+        if not self._is_release_tag(tag) or backend not in {"cuda", "cpu", "vulkan"}:
+            return None
+        target = self._root / tag / backend
+        if self.executable_in(target):
+            self._persist_runtime_path(state, target, tag, backend)
+            return target
+        legacy = self._root / "bin" / backend
+        if self.executable_in(legacy) is None:
+            return None
+
+        staging = self._root.parent / f".{self._root.name}-legacy-{os.getpid()}-{time.time_ns()}"
+        os.replace(self._root, staging)
+        try:
+            target = self._root / tag / backend
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staging / "bin" / backend), str(target))
+            downloads = staging / "downloads"
+            if downloads.is_dir():
+                shutil.move(str(downloads), str(self._root / "downloads"))
+            if self.executable_in(target) is None:
+                raise RuntimeError("legacy Prism-ML runtime did not contain llama-server.exe")
+            self._write_manifest(target, {
+                "tag": tag,
+                "backend": backend,
+                "verified_version": tag,
+                "repository": "PrismML-Eng/llama.cpp",
+                "migrated_from": "legacy-demo-checkout",
+            })
+            self._persist_runtime_path(state, target, tag, backend)
+        except Exception:
+            shutil.rmtree(self._root, ignore_errors=True)
+            os.replace(staging, self._root)
+            raise
+        shutil.rmtree(staging, ignore_errors=True)
+        return target
+
+    def _persist_runtime_path(self, state: dict[str, Any], root: Path, tag: str, backend: str) -> None:
+        path = str(root.resolve())
+        state.update({
+            "runtime_kind": "prism_ml",
+            "runtime_path": path,
+            "runtime_mode": "custom",
+            "custom_runtime_path": path,
+            "prism_release_tag": tag,
+            "prism_backend": backend,
+        })
+        self._save_state(state)
 
     def asset_names(self, tag: str, backend: str) -> list[str]:
         if self._platform_name().lower() != "windows":

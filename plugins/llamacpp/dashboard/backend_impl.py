@@ -1145,6 +1145,7 @@ def _prism_installer() -> PrismRuntimeInstaller:
             architecture=platform.machine,
         )
         _prism_runtime_root = PRISM_RUNTIME_ROOT
+        _prism_runtime_service.migrate_legacy_layout()
     return _prism_runtime_service
 
 

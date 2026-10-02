@@ -493,45 +493,46 @@ class PrismRuntimeInstallerTests(unittest.TestCase):
             self.assertTrue((root / "prism-b123-aaaaaaa" / "cpu" / "llama-server.exe").is_file())
             self.assertTrue((root / "prism-b123-aaaaaaa" / "cpu" / "manifest.json").is_file())
 
-    def test_preserves_locked_previous_runtime_and_installs_to_fallback_path(self) -> None:
+    def test_migrates_legacy_demo_checkout_to_official_versioned_layout(self) -> None:
         from dashboard.application.prism_runtime import PrismRuntimeInstaller
 
-        import shutil
         import tempfile
-        from unittest.mock import patch
-        import zipfile
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root) / "prism"
-            (root / ".git" / "objects" / "pack").mkdir(parents=True)
-            (root / ".git" / "objects" / "pack" / "locked.idx").write_bytes(b"old")
-            source = Path(raw_root) / "server.zip"
-            with zipfile.ZipFile(source, "w") as package:
-                package.writestr("llama-server.exe", b"server")
-            state: dict[str, object] = {}
+            legacy = root / "bin" / "cuda"
+            legacy.mkdir(parents=True)
+            (legacy / "llama-server.exe").write_bytes(b"server")
+            (legacy / "ggml-cuda.dll").write_bytes(b"cuda")
+            (root / ".git" / "objects").mkdir(parents=True)
+            (root / ".git" / "objects" / "legacy").write_bytes(b"old")
+            (root / "README.md").write_text("legacy checkout", encoding="utf-8")
+            state: dict[str, object] = {
+                "runtime_kind": "prism_ml",
+                "runtime_path": str(root),
+                "custom_runtime_path": str(root),
+                "prism_release_tag": "prism-b124-bbbbbbb",
+                "prism_backend": "cuda",
+                "pid": None,
+            }
 
             installer = PrismRuntimeInstaller(
                 root=root, load_state=lambda: state, save_state=lambda value: state.update(value),
                 release_loader=lambda: [], backend_detector=lambda: "cpu",
                 platform_name=lambda: "windows", architecture=lambda: "x64",
             )
-            original_rmtree = shutil.rmtree
 
-            def locked_rmtree(path, *args, **kwargs):
-                if Path(path) == root:
-                    raise PermissionError(5, "Access is denied", str(path))
-                return original_rmtree(path, *args, **kwargs)
+            installed = installer.migrate_legacy_layout()
 
-            with patch.object(shutil, "rmtree", side_effect=locked_rmtree):
-                installer.install(
-                    "prism-b124-bbbbbbb", "cpu", {"job_id": "job"},
-                    download=lambda _url, destination, *_: destination.write_bytes(source.read_bytes()),
-                )
-
-            installed = Path(str(state["runtime_path"]))
-            self.assertNotEqual(installed, root.resolve())
-            self.assertTrue((installed / "llama-server.exe").is_file())
-            self.assertTrue((root / ".git" / "objects" / "pack" / "locked.idx").is_file())
+            expected = root / "prism-b124-bbbbbbb" / "cuda"
+            self.assertEqual(installed, expected)
+            self.assertEqual(Path(str(state["runtime_path"])), expected.resolve())
+            self.assertTrue((expected / "llama-server.exe").is_file())
+            self.assertTrue((expected / "ggml-cuda.dll").is_file())
+            self.assertTrue((expected / "manifest.json").is_file())
+            self.assertFalse((root / "bin").exists())
+            self.assertFalse((root / ".git").exists())
+            self.assertFalse((root / "README.md").exists())
 
     def test_selects_cuda_assets_directly_from_prism_llamacpp_release(self) -> None:
         from dashboard.application.prism_runtime import PrismRuntimeInstaller

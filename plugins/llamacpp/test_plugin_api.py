@@ -1240,7 +1240,9 @@ class LlamaCppManagerTests(unittest.TestCase):
         runtime_card = source[source.index("function RuntimeCard"):source.index("function ParameterSummary")]
         self.assertNotIn("openFolder", runtime_card)
         self.assertNotIn("children: '열기'", runtime_card)
-        self.assertIn("w-44 shrink-0", runtime_card)
+        self.assertIn("width: '11rem', maxWidth: '11rem', flex: '0 0 11rem'", runtime_card)
+        self.assertNotIn("overflow-x-auto", runtime_card)
+        self.assertIn("'Prism-ML 업데이트'", runtime_card)
         self.assertLess(runtime_card.index("jsx(ServerLogPanel"), runtime_card.index("jsx(CoordinatorStatusPanel"))
 
     def test_custom_runtime_resolves_directory_and_explicit_executable(self) -> None:
