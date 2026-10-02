@@ -18,7 +18,7 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.10.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.10.1`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`
@@ -30,16 +30,18 @@ metadata에도 같은 SemVer 값을 유지합니다.
 
 이벤트 목록은 내부 hook 이름보다 사용자가 이해할 수 있는 행동을 우선 표시합니다. 예를 들어
 `search_files · tool_call` 대신 “프로젝트 파일을 검색했습니다”와 대상 경로 요약을 표시합니다.
-항목을 선택하면 상세 내용이 페이지 위로 이동하지 않고 **선택한 항목 바로 아래**에 펼쳐지며,
-한 번에 하나의 상세만 열립니다.
+추가 정보가 있는 항목을 선택하면 상세 내용이 페이지 위로 이동하지 않고 **선택한 항목 바로
+아래**에 펼쳐지며, 한 번에 하나의 상세만 열립니다. Skill 확인처럼 목록에 필요한 정보가 모두
+표시된 항목은 빈 상세 화면을 열지 않습니다.
 
 상세 화면은 다음 순서로 정보를 제공합니다.
 
-1. Agent가 수행한 행동과 결과
-2. Terminal 실행 명령의 접힌 더보기 영역과 실패 원인
-3. 대상 경로와 검증 Rule
-4. 실패 또는 절차 이탈 시 다음 행동
-5. 클릭해서 Hermes에서 열 수 있는 세션 이름과 도구·Skill 중심의 한 줄 기술 정보
+1. Terminal 실행 명령의 접힌 더보기 영역과 실패 원인
+2. 대상 경로와 검증 Rule
+3. 실패 또는 절차 이탈 시 다음 행동
+
+목록에 이미 표시된 행동명, 요약, 결과, Profile, 모델은 상세에서 반복하지 않으며, 내부 도구명과
+Skill 이름을 다시 나열하던 `기술 정보` 영역도 표시하지 않습니다.
 
 API는 기존 SQLite row를 변경하지 않고 Desktop용 `schema_version: 2` projection을 생성합니다.
 주요 body는 `actor`, `model`, `activity`, `outcome`, `scope`, `explanation`, `correlation`,

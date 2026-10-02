@@ -79,32 +79,38 @@ def test_terminal_command_is_collapsed_behind_an_accessible_more_control() -> No
     assert "jsx('pre'" not in details
 
 
-def test_session_title_is_clickable_and_internal_ids_are_hidden() -> None:
+def test_events_without_actionable_details_do_not_open_empty_panels() -> None:
     source = _PLUGIN.read_text(encoding="utf-8")
+    row = source[source.index("function EventRow"):source.index("function DetailValue")]
     details = source[source.index("function Details"):source.index("function Timeline")]
+    timeline = source[source.index("function Timeline"):source.index("function Pagination")]
 
-    assert "host.openSession" in source
-    assert "session?.title" in source
-    assert "function TechnicalLine" in source
-    assert "jsx(TechnicalLine" in details
+    assert "const hasEventDetails" in source
+    assert "const hasFailureDetails" in source
+    assert "outcome.exit_code !== 0" in source
+    assert "event.scope?.validator" in source
+    assert "event.scope?.provider" in source
+    assert "code !== 'skill.inspect' && outcome.duration_ms != null" in source
+    assert "if (!expandable)" in row
+    assert "selected && expandable" in timeline
+    assert "function TechnicalLine" not in source
+    assert "function SessionLink" not in source
     assert "['Task'" not in details
     assert "['Turn'" not in details
     assert "['Metadata'" not in details
 
 
-def test_technical_information_is_one_useful_line() -> None:
+def test_detail_omits_repeated_row_and_technical_information() -> None:
     source = _PLUGIN.read_text(encoding="utf-8")
-    technical = source[source.index("function TechnicalLine"):source.index("function SessionLink")]
     details = source[source.index("function Details"):source.index("function Timeline")]
 
-    assert "기술 정보 보기" not in details
-    assert "jsx('details'" not in details
-    assert "도구" in technical
-    assert "event.activity?.tool || event.tool" in technical
-    assert "Skill" in technical
-    assert "event.activity?.skill || event.skill" in technical
-    assert "검증 도구" in technical
-    assert "코드 조사 도구" in technical
+    assert "function TechnicalLine" not in source
+    assert "activityTitle(event)" not in details
+    assert "eventSummary(event)" not in details
+    assert "statusLabel(state)" not in details
+    assert "Prompt, reasoning과 tool 결과는 저장하지 않습니다" not in details
+    assert source.count("Prompt, reasoning과 tool 결과는 저장하지 않습니다") == 1
+    assert "추가 정보" in details
     assert "['시간'" not in details
     assert "['Profile'" not in details
     assert "['Event type'" not in details
@@ -125,16 +131,16 @@ def test_common_agent_actions_use_plain_language() -> None:
     assert "읽음" in source
     assert "파일 내용을 확인했습니다" not in source
     assert "Profile이" not in source
-    assert "Skill 지침 확인 ·" in source
+    assert "return 'Skill 지침 확인'" in source
+    assert "return event.activity?.skill || event.skill || 'Skill 이름 미확인'" in source
     assert "실행 명령" in source
 
 
-def test_detail_uses_plain_result_and_explains_targets_and_rules() -> None:
+def test_detail_explains_targets_and_rules_without_repeating_result() -> None:
     source = _PLUGIN.read_text(encoding="utf-8")
     details = source[source.index("function Details"):source.index("function Timeline")]
 
-    assert "`결과 · ${statusLabel(state)}`" not in details
-    assert "children: statusLabel(state)" in details
+    assert "statusLabel(state)" not in details
     assert "function TargetDetails" in source
     assert "다국어(i18n)" in source
     assert "검색 위치" in source
@@ -179,10 +185,10 @@ if __name__ == "__main__":
     test_row_omits_redundant_project_and_keeps_colored_profile()
     test_model_badge_uses_compact_parenthesized_effort()
     test_terminal_command_is_collapsed_behind_an_accessible_more_control()
-    test_session_title_is_clickable_and_internal_ids_are_hidden()
-    test_technical_information_is_one_useful_line()
+    test_events_without_actionable_details_do_not_open_empty_panels()
+    test_detail_omits_repeated_row_and_technical_information()
     test_common_agent_actions_use_plain_language()
-    test_detail_uses_plain_result_and_explains_targets_and_rules()
+    test_detail_explains_targets_and_rules_without_repeating_result()
     test_project_summary_only_contains_requested_decision_metrics()
     test_project_first_page_requires_one_project_before_showing_metrics_and_timeline()
     print("agent-audit Desktop interaction contract tests: passed")

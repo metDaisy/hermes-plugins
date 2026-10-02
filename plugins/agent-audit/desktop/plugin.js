@@ -71,7 +71,7 @@ const activityTitle = event => {
   if (code === 'desktop.interact') return 'Desktop 조작'
   if (code === 'web.interact' || code === 'web.research') return '웹 정보 확인'
   if (code === 'skill.lifecycle') return 'Skill 사용'
-  if (code === 'skill.inspect') return `Skill 지침 확인 · ${event.activity?.skill || event.skill || '이름 미확인'}`
+  if (code === 'skill.inspect') return 'Skill 지침 확인'
   if (code === 'code.discovery') return '코드 구조 조사'
   if (code === 'code.index') return '코드 검색 인덱스 갱신'
   if (code === 'workflow.plan') return '작업 계획 갱신'
@@ -104,7 +104,7 @@ const eventSummary = event => {
   if (code === 'desktop.interact') return 'Desktop 화면 확인·조작'
   if (code === 'web.interact' || code === 'web.research') return '웹 정보 확인'
   if (code === 'skill.lifecycle') return `${event.activity?.skill || event.skill || 'Skill'} 사용`
-  if (code === 'skill.inspect') return `${event.activity?.skill || event.skill || '이름 미확인'} 지침 확인`
+  if (code === 'skill.inspect') return event.activity?.skill || event.skill || 'Skill 이름 미확인'
   if (code === 'code.discovery') return `${event.activity?.provider || event.scope?.provider || event.provider || '코드 검색 도구'}로 구조 조사`
   if (code === 'code.index') return '코드 검색 인덱스 갱신'
   if (code === 'workflow.plan') return '작업 단계와 진행 상태 갱신'
@@ -121,6 +121,22 @@ const nextAction = event => ({
   kanban_create_without_expected_discovery: 'Task를 만들기 전에 Semble과 Codebase Memory로 코드 구조를 조사하세요.',
   complete_required_validation: '필요한 검증을 완료한 뒤 작업 완료 여부를 다시 확인하세요.'
 }[event.explanation?.next_action_code || event.evidence?.reason_code || event.reason] || null)
+const hasFailureDetails = outcome => Boolean(
+  (Number.isInteger(outcome?.exit_code) && outcome.exit_code !== 0) ||
+  outcome?.failure_type || outcome?.failure_summary
+)
+const hasEventDetails = event => {
+  const code = activityCode(event)
+  const paths = event.scope?.paths || event.paths || event.changed_paths || []
+  const rules = event.scope?.rules || event.rules || event.required_rules || []
+  const outcome = event.outcome || {}
+  return Boolean(
+    event.activity?.command || event.command ||
+    hasFailureDetails(outcome) || paths.length || rules.length || nextAction(event) ||
+    event.scope?.validator || event.scope?.provider ||
+    (code !== 'skill.inspect' && outcome.duration_ms != null)
+  )
+}
 const eventKey = (event, index = 0) => String(event.id ?? `${event.timestamp || 'event'}-${index}`)
 
 function useAuditSummary() {
@@ -284,10 +300,21 @@ function ModelBadge({ model }) {
   return jsx('span', { className: `${pill} text-(--ui-text-secondary)`, title: model?.provider || name, children: `${name}(${effort})` })
 }
 
-function EventRow({ event, eventId, selected, onSelect }) {
+function EventRow({ event, eventId, selected, expandable, onSelect }) {
   const heading = activityTitle(event)
   const state = event.outcome?.state || event.status || 'unknown'
   const detailsId = `audit-detail-${eventId}`
+  const content = jsxs('div', { className: 'grid gap-1.5', children: [
+    jsxs('div', { className: 'flex flex-wrap items-center gap-2 text-[11px]', children: [
+      jsx('time', { className: 'font-mono text-(--ui-text-secondary)', children: timestamp(event.timestamp) }),
+      jsx('span', { className: `${pill} ${tone(state, event.importance)}`, children: statusLabel(state) }),
+      jsx(ProfileBadge, { profile: event.actor?.profile || event.profile_name }),
+      jsx(ModelBadge, { model: event.model })
+    ] }),
+    jsx('strong', { className: 'text-sm font-medium text-(--ui-text-primary)', children: heading }),
+    jsx('p', { className: 'line-clamp-2 text-xs leading-5 text-(--ui-text-tertiary)', children: eventSummary(event) })
+  ] })
+  if (!expandable) return jsx('div', { className: 'w-full px-4 py-3 text-left', children: content })
   return jsx('button', {
     type: 'button',
     onClick: () => onSelect(selected ? null : eventId),
@@ -295,16 +322,7 @@ function EventRow({ event, eventId, selected, onSelect }) {
     'aria-controls': detailsId,
 
     className: `w-full px-4 py-3 text-left transition hover:bg-(--ui-bg-tertiary) focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--ui-accent) ${selected ? 'bg-(--ui-bg-tertiary)' : ''}`,
-    children: jsxs('div', { className: 'grid gap-1.5', children: [
-      jsxs('div', { className: 'flex flex-wrap items-center gap-2 text-[11px]', children: [
-        jsx('time', { className: 'font-mono text-(--ui-text-secondary)', children: timestamp(event.timestamp) }),
-        jsx('span', { className: `${pill} ${tone(state, event.importance)}`, children: statusLabel(state) }),
-        jsx(ProfileBadge, { profile: event.actor?.profile || event.profile_name }),
-        jsx(ModelBadge, { model: event.model })
-      ] }),
-      jsx('strong', { className: 'text-sm font-medium text-(--ui-text-primary)', children: heading }),
-      jsx('p', { className: 'line-clamp-2 text-xs leading-5 text-(--ui-text-tertiary)', children: eventSummary(event) })
-    ] })
+    children: content
   })
 }
 
@@ -365,42 +383,6 @@ function TargetDetails({ event, paths, rules }) {
   ] })
 }
 
-function TechnicalLine({ event, session, profile }) {
-  const code = activityCode(event)
-  const items = [
-    ['도구', event.activity?.tool || event.tool],
-    ['Skill', event.activity?.skill || event.skill],
-    ['검증 도구', event.activity?.validator || event.scope?.validator || event.validator],
-    ['코드 조사 도구', code === 'code.discovery' || code === 'code.index'
-      ? event.activity?.provider || event.scope?.provider || event.provider
-      : null]
-  ].filter(([, value]) => hasDetailValue(value))
-  const linkedSession = session?.id && session?.title ? session : null
-  if (!linkedSession && !items.length) return null
-  return jsxs('div', { className: 'mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-(--ui-stroke-secondary) pt-3 text-[11px] text-(--ui-text-tertiary)', children: [
-    jsx('strong', { className: 'font-semibold text-(--ui-text-secondary)', children: '기술 정보' }),
-    linkedSession ? jsxs('span', { className: 'inline-flex items-center gap-1', children: [
-      jsx('span', { children: '세션' }),
-      jsx(SessionLink, { session: linkedSession, profile })
-    ] }) : null,
-    ...items.map(([label, value]) => jsxs('span', { className: 'inline-flex items-center gap-1', children: [
-      jsx('span', { children: label }),
-      jsx('span', { className: 'font-mono text-(--ui-text-secondary)', children: String(value) })
-    ] }, label))
-  ] })
-}
-
-function SessionLink({ session, profile }) {
-  const sessionTitle = session?.title || '세션 이름 미확인'
-  if (!session?.id) return jsx('span', { className: 'text-xs text-(--ui-text-tertiary)', children: sessionTitle })
-  return jsx('button', {
-    type: 'button',
-    className: 'text-left text-xs text-(--ui-accent) underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--ui-accent)',
-    onClick: () => host.openSession(session.id, { profile, intent: 'in-place', keepAllProfilesScope: true }),
-    children: sessionTitle
-  })
-}
-
 function CommandDetails({ command }) {
   if (!command) return null
   return jsxs('details', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary)', children: [
@@ -411,7 +393,7 @@ function CommandDetails({ command }) {
 
 function FailureDetails({ outcome }) {
   const entries = [
-    ['종료 코드', outcome?.exit_code],
+    ['종료 코드', Number.isInteger(outcome?.exit_code) && outcome.exit_code !== 0 ? outcome.exit_code : null],
     ['실패 유형', outcome?.failure_type ? failureTypeLabel(outcome.failure_type) : null],
     ['실패 원인', outcome?.failure_summary]
   ]
@@ -423,23 +405,16 @@ function FailureDetails({ outcome }) {
 }
 
 function Details({ event, eventId, onClose }) {
-  const state = event.outcome?.state || event.status || 'unknown'
   const paths = event.scope?.paths || event.paths || event.changed_paths || []
   const rules = event.scope?.rules || event.rules || event.required_rules || []
   const action = nextAction(event)
   const command = event.activity?.command || event.command
-  const session = event.session
-  const profile = event.actor?.profile || event.profile_name
   return jsxs('section', { id: `audit-detail-${eventId}`, className: 'border-t border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-4 py-4', 'aria-label': '선택한 Agent 활동 상세', children: [
     jsxs('header', { className: 'flex items-start justify-between gap-3', children: [
-      jsx('div', { children: [jsx('p', { className: 'text-[11px] font-semibold uppercase tracking-[0.14em] text-(--ui-text-tertiary)', children: '활동 상세' }), jsx('h2', { className: 'mt-1 text-base font-semibold text-(--ui-text-primary)', children: activityTitle(event) })] }),
+      jsx('h2', { className: 'text-sm font-semibold text-(--ui-text-primary)', children: '추가 정보' }),
       jsx('button', { type: 'button', className: button, onClick: onClose, 'aria-label': '활동 상세 닫기', children: '닫기' })
     ] }),
-    jsx('p', { className: 'mt-3 text-sm leading-6 text-(--ui-text-secondary)', children: eventSummary(event) }),
-    jsxs('div', { className: 'mt-3 flex flex-wrap gap-2', children: [
-      jsx('span', { className: `${pill} ${tone(state, event.importance)}`, children: statusLabel(state) }),
-      event.outcome?.duration_ms != null ? jsx('span', { className: `${pill} text-(--ui-text-secondary)`, children: `소요 시간 · ${event.outcome.duration_ms}ms` }) : null,
-    ] }),
+    event.outcome?.duration_ms != null ? jsx('p', { className: 'mt-2 text-[11px] text-(--ui-text-tertiary)', children: `소요 시간 · ${event.outcome.duration_ms}ms` }) : null,
     jsx(CommandDetails, { command }),
     jsx(FailureDetails, { outcome: event.outcome }),
     jsx(TargetDetails, { event, paths, rules }),
@@ -447,8 +422,6 @@ function Details({ event, eventId, onClose }) {
       jsx('h3', { className: 'text-xs font-semibold text-(--ui-text-primary)', children: '다음 행동' }),
       jsx('p', { className: 'mt-1 text-xs leading-5 text-(--ui-text-secondary)', children: action })
     ] }) : null,
-    jsx(TechnicalLine, { event, session, profile }),
-    jsx('p', { className: 'mt-4 text-[11px] leading-4 text-(--ui-text-tertiary)', children: 'Prompt, reasoning과 tool 결과는 저장하지 않습니다. Terminal 명령은 credential과 절대 경로를 제거한 뒤 표시합니다.' })
   ] })
 }
 
@@ -457,9 +430,10 @@ function Timeline({ events, selectedId, onSelect }) {
   return jsx('ol', { className: 'divide-y divide-(--ui-stroke-secondary)', children: events.map((event, index) => {
     const id = eventKey(event, index)
     const selected = selectedId === id
+    const expandable = hasEventDetails(event)
     return jsxs('li', { children: [
-      jsx(EventRow, { event, eventId: id, selected, onSelect }),
-      selected ? jsx(Details, { event, eventId: id, onClose: () => onSelect(null) }) : null
+      jsx(EventRow, { event, eventId: id, selected, expandable, onSelect }),
+      selected && expandable ? jsx(Details, { event, eventId: id, onClose: () => onSelect(null) }) : null
     ] }, id)
   }) })
 }
@@ -510,7 +484,7 @@ function Page() {
   ])
   return jsx('main', { className: 'mx-auto max-w-7xl p-4 sm:p-6', children: [
     jsxs('header', { className: 'flex flex-wrap items-start justify-between gap-4', children: [
-      jsx('div', { children: [jsx('p', { className: 'text-[11px] font-semibold uppercase tracking-[0.16em] text-(--ui-text-tertiary)', children: 'Privacy-safe workflow evidence' }), jsx('h1', { className: 'mt-1 text-2xl font-semibold tracking-tight text-(--ui-text-primary)', children: 'agent-audit' }), jsx('p', { className: 'mt-1 text-sm text-(--ui-text-secondary)', children: '프로젝트를 선택하고 Agent 활동과 검증 결과를 시간순으로 확인합니다.' })] }),
+      jsx('div', { children: [jsx('p', { className: 'text-[11px] font-semibold uppercase tracking-[0.16em] text-(--ui-text-tertiary)', children: 'Privacy-safe workflow evidence' }), jsx('h1', { className: 'mt-1 text-2xl font-semibold tracking-tight text-(--ui-text-primary)', children: 'agent-audit' }), jsx('p', { className: 'mt-1 text-sm text-(--ui-text-secondary)', children: '프로젝트를 선택하고 Agent 활동과 검증 결과를 시간순으로 확인합니다.' }), jsx('p', { className: 'mt-1 text-[11px] text-(--ui-text-tertiary)', children: 'Prompt, reasoning과 tool 결과는 저장하지 않습니다. Terminal 명령은 credential과 절대 경로를 제거합니다.' })] }),
       jsx('button', { type: 'button', className: button, disabled: summary.isFetching || events.isFetching, onClick: refresh, children: summary.isFetching || events.isFetching ? '갱신 중…' : '새로고침' })
     ] }),
     summary.error ? jsx('p', { className: 'mt-4 rounded-md border border-(--dt-destructive)/50 p-3 text-sm text-(--dt-destructive)', role: 'alert', children: `프로젝트 목록을 불러오지 못했습니다: ${summary.error.message || String(summary.error)}` }) : null,
