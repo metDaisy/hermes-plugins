@@ -29,7 +29,7 @@ _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.42"
+COORDINATOR_BUILD = "0.2.43"
 
 
 def _health_payload() -> dict[str, object] | None:
@@ -65,11 +65,15 @@ def _coordinator_process_ok(payload: dict[str, object]) -> bool:
         actual_executable = os.path.normcase(os.path.abspath(process.exe()))
         executable_name = Path(actual_executable).name.lower()
         command = process.cmdline()
+        reported_executable = str(payload.get("executable") or actual_executable)
+        reported_name = Path(reported_executable).name.lower()
         try:
-            command_uses_process_executable = os.path.samefile(str(command[0]), actual_executable)
+            command_uses_reported_executable = os.path.samefile(str(command[0]), reported_executable)
         except (OSError, IndexError):
-            command_uses_process_executable = bool(
-                command and os.path.normcase(os.path.abspath(str(command[0]))) == actual_executable
+            command_uses_reported_executable = bool(
+                command
+                and os.path.normcase(os.path.abspath(str(command[0])))
+                == os.path.normcase(os.path.abspath(reported_executable))
             )
         owns_port = any(
             connection.status == psutil.CONN_LISTEN
@@ -79,8 +83,9 @@ def _coordinator_process_ok(payload: dict[str, object]) -> bool:
         return (
             owns_port
             and executable_name in {"python", "python.exe", "python3", "python3.exe", "pythonw.exe"}
+            and reported_name in {"python", "python.exe", "python3", "python3.exe", "pythonw.exe"}
             and len(command) >= 2
-            and command_uses_process_executable
+            and command_uses_reported_executable
             and _trusted_coordinator_script(str(command[1]))
         )
     except Exception:  # noqa: BLE001 - identity failure must fail closed

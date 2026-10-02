@@ -135,6 +135,39 @@ class LlamaCppManagerTests(unittest.TestCase):
                 patch.dict(sys.modules, {"psutil": fake_psutil}):
             self.assertFalse(profile_proxy._healthy())
 
+    def test_coordinator_identity_accepts_reported_python_launcher_alias(self) -> None:
+        import types
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            actual = root / "runtime" / "python.exe"
+            launcher = root / "venv" / "python.exe"
+            script = root / "coordinator_server.py"
+            for path in (actual, launcher, script):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"test")
+
+            class Process:
+                def __init__(self, pid: int) -> None:
+                    self.pid = pid
+
+                def exe(self) -> str:
+                    return str(actual)
+
+                def cmdline(self):
+                    return [str(launcher), str(script)]
+
+                def net_connections(self, kind: str):
+                    return [types.SimpleNamespace(
+                        status="LISTEN", laddr=types.SimpleNamespace(port=profile_proxy.COORDINATOR_PORT),
+                    )]
+
+            fake_psutil = types.SimpleNamespace(Process=Process, CONN_LISTEN="LISTEN")
+            payload = {"pid": 42, "executable": str(launcher)}
+            with patch.object(profile_proxy, "COORDINATOR_SCRIPT", script), \
+                    patch.dict(sys.modules, {"psutil": fake_psutil}):
+                self.assertTrue(profile_proxy._coordinator_process_ok(payload))
+
     def test_unversioned_legacy_coordinator_is_replaced_when_script_identity_matches(self) -> None:
         import types
 
