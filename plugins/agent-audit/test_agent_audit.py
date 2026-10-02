@@ -339,6 +339,35 @@ def test_nonzero_terminal_exit_code_is_failure_even_when_status_says_success() -
     assert tool_call["failure_summary"] == "Command failed with exit code 2"
 
 
+def test_failed_nonterminal_tool_records_sanitized_failure_reason() -> None:
+    events = _reset()
+
+    _AUDIT._on_post_tool_call(
+        tool_name="skill_manage",
+        args={"operations": [{"action": "patch", "name": "missing-skill"}]},
+        result={
+            "error": (
+                "Skill missing-skill was not found at "
+                "C:/Users/leee/private/skills/missing-skill; token=top-secret-token; "
+                "owner=alice@example.com; ssn=123-45-6789; sid=session-cookie; "
+                "url=https://example.com/failure?customer=Alice"
+            )
+        },
+        status="error",
+        session_id="session-skill-manage-failure",
+    )
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    assert tool_call["failure_type"] == "tool_error"
+    assert tool_call["failure_summary"] == "요청한 항목을 찾지 못했습니다."
+    for sensitive in (
+        "missing-skill", "alice@example.com", "123-45-6789", "session-cookie",
+        "customer=Alice", "top-secret-token",
+    ):
+        assert sensitive not in tool_call["failure_summary"]
+    assert "result" not in tool_call
+
+
 def test_retention_rolls_up_and_deletes_only_details_older_than_30_days() -> None:
     with TemporaryDirectory() as directory:
         database_path = Path(directory) / "audit.db"

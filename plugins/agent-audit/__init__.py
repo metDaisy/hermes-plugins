@@ -626,6 +626,34 @@ def _terminal_failure_details(tool_name: str, status: Any, result: Any) -> dict[
     }
 
 
+def _tool_failure_details(tool_name: str, status: Any, result: Any) -> dict[str, Any]:
+    """Return compact sanitized failure evidence for any failed tool call."""
+    terminal_details = _terminal_failure_details(tool_name, status, result)
+    if terminal_details or tool_name == "terminal":
+        return terminal_details
+    if not _looks_failed(status, result):
+        return {}
+    diagnostic = _failure_summary(result).lower()
+    categories = (
+        (("not found", "no such", "missing"), "요청한 항목을 찾지 못했습니다."),
+        (("permission denied", "access is denied", "forbidden", "unauthorized"), "도구 실행 권한이 거부되었습니다."),
+        (("timed out", "timeout"), "도구 실행 시간이 초과되었습니다."),
+        (("invalid", "validation", "malformed"), "도구가 유효하지 않은 입력을 거부했습니다."),
+        (("already exists", "conflict", "duplicate"), "요청이 기존 상태와 충돌했습니다."),
+        (("network", "connection", "unavailable"), "도구가 외부 연결 또는 서비스에 접근하지 못했습니다."),
+        (("prerequisite", "required", "must"), "도구 실행에 필요한 조건을 충족하지 못했습니다."),
+        (("cancelled", "canceled", "interrupted"), "도구 실행이 중단되었습니다."),
+    )
+    summary = next(
+        (message for markers, message in categories if any(marker in diagnostic for marker in markers)),
+        "도구가 오류를 반환했지만 개인정보 보호를 위해 원문은 저장하지 않았습니다.",
+    )
+    return {
+        "failure_type": "tool_error",
+        "failure_summary": summary,
+    }
+
+
 def _validation_kind(tool_name: str, args: Any) -> str:
     text = f"{tool_name} {_text(args)}".lower()
     if "checkstyle" in text:
@@ -779,12 +807,13 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         tool_details["skill"] = skill
     if command:
         tool_details["command"] = command
-    tool_details.update(_terminal_failure_details(tool_name, status, kwargs.get("result")))
+    tool_details.update(_tool_failure_details(tool_name, status, kwargs.get("result")))
+    effective_status = "error" if tool_details.get("failure_type") else status
 
     _write(
         "tool_call",
         tool=_opaque(tool_name),
-        status=_opaque(status),
+        status=_opaque(effective_status),
         duration_ms=kwargs.get("duration_ms"),
         session_id=session_id,
         task_id=_opaque(kwargs.get("task_id")),

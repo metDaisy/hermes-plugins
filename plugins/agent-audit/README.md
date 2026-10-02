@@ -18,7 +18,7 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.10.1`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.10.2`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`
@@ -42,6 +42,7 @@ metadata에도 같은 SemVer 값을 유지합니다.
 
 목록에 이미 표시된 행동명, 요약, 결과, Profile, 모델은 상세에서 반복하지 않으며, 내부 도구명과
 Skill 이름을 다시 나열하던 `기술 정보` 영역도 표시하지 않습니다.
+소요 시간은 상세 영역을 열지 않아도 확인할 수 있도록 각 로그 본문의 오른쪽 아래에 표시합니다.
 
 API는 기존 SQLite row를 변경하지 않고 Desktop용 `schema_version: 2` projection을 생성합니다.
 주요 body는 `actor`, `model`, `activity`, `outcome`, `scope`, `explanation`, `correlation`,
@@ -58,7 +59,9 @@ Session 필터에는 세션 이름, Project, 기록 수를 표시하며 모델 c
 
 Skill 지침 확인 기록은 `skill_view` 입력에서 allowlist된 Skill 이름을 함께 표시합니다. Terminal
 기록은 credential과 절대 경로를 redaction한 전체 실행 명령을 저장하고 상세 화면의 더보기 안에
-표시합니다. 실패한 Terminal 호출은 exit code, 분류, 최대 600자의 sanitized 원인도 표시합니다.
+표시합니다. 실패한 도구 호출은 최대 600자의 sanitized 원인을 저장하며, 원인을 제공하지 않은
+과거 기록이나 도구에는 원인 정보가 기록되지 않았다는 사실을 상세 화면에 명시합니다. 실패한
+Terminal 호출은 exit code와 분류도 함께 표시합니다.
 
 ## Rule mapping 설정
 

@@ -36,7 +36,7 @@ const eventTypeLabel = type => ({
 const failureTypeLabel = type => ({
   nonzero_exit: '종료 코드 오류', timeout: '시간 초과', permission_denied: '권한 거부',
   command_not_found: '명령을 찾지 못함', network_error: '네트워크 오류',
-  cancelled: '사용자 또는 시스템에 의해 취소됨', unknown: '원인 분류 미확인'
+  tool_error: '도구 실행 오류', cancelled: '사용자 또는 시스템에 의해 취소됨', unknown: '원인 분류 미확인'
 }[type] || type)
 const tone = (state, importance) => importance === 'error' || state === 'failed' || state === 'error'
   ? 'text-(--dt-destructive)'
@@ -121,20 +121,20 @@ const nextAction = event => ({
   kanban_create_without_expected_discovery: 'Task를 만들기 전에 Semble과 Codebase Memory로 코드 구조를 조사하세요.',
   complete_required_validation: '필요한 검증을 완료한 뒤 작업 완료 여부를 다시 확인하세요.'
 }[event.explanation?.next_action_code || event.evidence?.reason_code || event.reason] || null)
-const hasFailureDetails = outcome => Boolean(
+const isFailedState = state => ['failed', 'failure', 'error', 'blocked'].includes(String(state || '').toLowerCase())
+const hasFailureDetails = (outcome, state) => Boolean(
   (Number.isInteger(outcome?.exit_code) && outcome.exit_code !== 0) ||
-  outcome?.failure_type || outcome?.failure_summary
+  outcome?.failure_type || outcome?.failure_summary || isFailedState(state)
 )
 const hasEventDetails = event => {
-  const code = activityCode(event)
   const paths = event.scope?.paths || event.paths || event.changed_paths || []
   const rules = event.scope?.rules || event.rules || event.required_rules || []
   const outcome = event.outcome || {}
+  const state = outcome.state || event.status
   return Boolean(
     event.activity?.command || event.command ||
-    hasFailureDetails(outcome) || paths.length || rules.length || nextAction(event) ||
-    event.scope?.validator || event.scope?.provider ||
-    (code !== 'skill.inspect' && outcome.duration_ms != null)
+    hasFailureDetails(outcome, state) || paths.length || rules.length || nextAction(event) ||
+    event.scope?.validator || event.scope?.provider
   )
 }
 const eventKey = (event, index = 0) => String(event.id ?? `${event.timestamp || 'event'}-${index}`)
@@ -312,7 +312,10 @@ function EventRow({ event, eventId, selected, expandable, onSelect }) {
       jsx(ModelBadge, { model: event.model })
     ] }),
     jsx('strong', { className: 'text-sm font-medium text-(--ui-text-primary)', children: heading }),
-    jsx('p', { className: 'line-clamp-2 text-xs leading-5 text-(--ui-text-tertiary)', children: eventSummary(event) })
+    jsxs('div', { className: 'flex items-end justify-between gap-3', children: [
+      jsx('p', { className: 'min-w-0 line-clamp-2 text-xs leading-5 text-(--ui-text-tertiary)', children: eventSummary(event) }),
+      event.outcome?.duration_ms != null ? jsx('span', { className: 'shrink-0 text-[11px] text-(--ui-text-tertiary)', 'aria-label': `소요 시간 ${event.outcome.duration_ms}밀리초`, children: `${event.outcome.duration_ms}ms` }) : null
+    ] })
   ] })
   if (!expandable) return jsx('div', { className: 'w-full px-4 py-3 text-left', children: content })
   return jsx('button', {
@@ -391,11 +394,12 @@ function CommandDetails({ command }) {
   ] })
 }
 
-function FailureDetails({ outcome }) {
+function FailureDetails({ outcome, state }) {
+  const summary = outcome?.failure_summary || (isFailedState(state) ? '실패 원인 정보가 기록되지 않았습니다.' : null)
   const entries = [
     ['종료 코드', Number.isInteger(outcome?.exit_code) && outcome.exit_code !== 0 ? outcome.exit_code : null],
     ['실패 유형', outcome?.failure_type ? failureTypeLabel(outcome.failure_type) : null],
-    ['실패 원인', outcome?.failure_summary]
+    ['실패 원인', summary]
   ]
   if (!entries.some(([, value]) => hasDetailValue(value))) return null
   return jsxs('section', { className: 'mt-4 border-l-2 border-(--dt-destructive) pl-3', children: [
@@ -405,6 +409,7 @@ function FailureDetails({ outcome }) {
 }
 
 function Details({ event, eventId, onClose }) {
+  const state = event.outcome?.state || event.status || 'unknown'
   const paths = event.scope?.paths || event.paths || event.changed_paths || []
   const rules = event.scope?.rules || event.rules || event.required_rules || []
   const action = nextAction(event)
@@ -414,9 +419,8 @@ function Details({ event, eventId, onClose }) {
       jsx('h2', { className: 'text-sm font-semibold text-(--ui-text-primary)', children: '추가 정보' }),
       jsx('button', { type: 'button', className: button, onClick: onClose, 'aria-label': '활동 상세 닫기', children: '닫기' })
     ] }),
-    event.outcome?.duration_ms != null ? jsx('p', { className: 'mt-2 text-[11px] text-(--ui-text-tertiary)', children: `소요 시간 · ${event.outcome.duration_ms}ms` }) : null,
     jsx(CommandDetails, { command }),
-    jsx(FailureDetails, { outcome: event.outcome }),
+    jsx(FailureDetails, { outcome: event.outcome, state }),
     jsx(TargetDetails, { event, paths, rules }),
     action ? jsxs('section', { className: 'mt-4 border-l-2 border-(--ui-accent) pl-3', children: [
       jsx('h3', { className: 'text-xs font-semibold text-(--ui-text-primary)', children: '다음 행동' }),

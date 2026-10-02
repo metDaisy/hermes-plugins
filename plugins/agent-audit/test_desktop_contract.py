@@ -87,10 +87,11 @@ def test_events_without_actionable_details_do_not_open_empty_panels() -> None:
 
     assert "const hasEventDetails" in source
     assert "const hasFailureDetails" in source
+    assert "const isFailedState" in source
     assert "outcome.exit_code !== 0" in source
     assert "event.scope?.validator" in source
     assert "event.scope?.provider" in source
-    assert "code !== 'skill.inspect' && outcome.duration_ms != null" in source
+    assert "outcome.duration_ms" not in source[source.index("const hasEventDetails"):source.index("const eventKey")]
     assert "if (!expandable)" in row
     assert "selected && expandable" in timeline
     assert "function TechnicalLine" not in source
@@ -98,6 +99,27 @@ def test_events_without_actionable_details_do_not_open_empty_panels() -> None:
     assert "['Task'" not in details
     assert "['Turn'" not in details
     assert "['Metadata'" not in details
+
+
+def test_duration_is_shown_at_the_bottom_right_of_the_event_row() -> None:
+    source = _PLUGIN.read_text(encoding="utf-8")
+    row = source[source.index("function EventRow"):source.index("function DetailValue")]
+    details = source[source.index("function Details"):source.index("function Timeline")]
+
+    assert "event.outcome?.duration_ms" in row
+    assert "items-end justify-between" in row
+    assert "shrink-0" in row
+    assert "`소요 시간 ${event.outcome.duration_ms}밀리초`" in row
+    assert "event.outcome?.duration_ms" not in details
+
+
+def test_failed_event_without_stored_diagnostic_shows_honest_fallback() -> None:
+    source = _PLUGIN.read_text(encoding="utf-8")
+    failure = source[source.index("function FailureDetails"):source.index("function Details")]
+    details = source[source.index("function Details"):source.index("function Timeline")]
+
+    assert "실패 원인 정보가 기록되지 않았습니다." in failure
+    assert "jsx(FailureDetails, { outcome: event.outcome, state })" in details
 
 
 def test_detail_omits_repeated_row_and_technical_information() -> None:
@@ -186,6 +208,8 @@ if __name__ == "__main__":
     test_model_badge_uses_compact_parenthesized_effort()
     test_terminal_command_is_collapsed_behind_an_accessible_more_control()
     test_events_without_actionable_details_do_not_open_empty_panels()
+    test_duration_is_shown_at_the_bottom_right_of_the_event_row()
+    test_failed_event_without_stored_diagnostic_shows_honest_fallback()
     test_detail_omits_repeated_row_and_technical_information()
     test_common_agent_actions_use_plain_language()
     test_detail_explains_targets_and_rules_without_repeating_result()

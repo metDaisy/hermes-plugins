@@ -223,7 +223,13 @@ def _event_projection(row: sqlite3.Row) -> dict[str, Any]:
     }
     event.update(payload)
     legacy = {key: value for key, value in event.items() if value is not None}
-    state = _outcome_state(event.get("status") or event.get("validation_status") or event.get("action"))
+    exit_code = event.get("exit_code")
+    has_failure_evidence = bool(event.get("failure_type")) or (
+        isinstance(exit_code, int) and exit_code != 0
+    )
+    state = "failed" if has_failure_evidence else _outcome_state(
+        event.get("status") or event.get("validation_status") or event.get("action")
+    )
     model = _compact(
         {"name": event.get("model"), "provider": event.get("model_provider"),
          "kind": event.get("model_kind"), "reasoning_effort": event.get("reasoning_effort")}

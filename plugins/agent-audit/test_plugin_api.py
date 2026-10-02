@@ -134,6 +134,41 @@ def test_failed_terminal_projection_exposes_only_compact_failure_evidence(tmp_pa
     assert "result" not in event
 
 
+def test_nonzero_exit_overrides_success_status_in_projection_and_insights(tmp_path: Path) -> None:
+    database = _database_with_events(tmp_path / "audit.db")
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                timestamp, project_name, profile_name, session_id,
+                event_type, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _FAILED_EVENT,
+                "hermes-plugins",
+                "main",
+                "session-nonzero",
+                "tool_call",
+                "success",
+                '{"tool":"terminal","command":"npm test","exit_code":2,'
+                '"failure_type":"nonzero_exit","failure_summary":"Command failed"}',
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    event = _API_MODULE.read_events(database, session_id="session-nonzero")["events"][0]
+    insights = _API_MODULE.audit_insights(database, session_id="session-nonzero")
+
+    assert event["outcome"]["state"] == "failed"
+    assert insights["totals"]["succeeded"] == 0
+    assert insights["totals"]["failed"] == 1
+    assert insights["totals"]["success_rate"] == 0
+
+
 def test_events_accept_multiple_values_for_every_filter(tmp_path: Path) -> None:
     database = _database_with_events(tmp_path / "audit.db")
 
