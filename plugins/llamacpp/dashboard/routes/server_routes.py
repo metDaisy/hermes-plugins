@@ -19,7 +19,7 @@ class ServerRouteContext:
     finish: Callable[[dict[str, Any], str], None]
     recent_jobs: Callable[[], list[dict[str, Any]]]
     find_job: Callable[[str], dict[str, Any] | None]
-    logs: Callable[[int], dict[str, Any]]
+    logs: Callable[[int, str], dict[str, Any]]
 
 
 def create_router(context: ServerRouteContext) -> APIRouter:
@@ -57,7 +57,10 @@ def create_router(context: ServerRouteContext) -> APIRouter:
         return value
 
     @router.get("/logs")
-    def logs(limit: int = 250) -> dict[str, Any]:
-        return context.logs(limit)
+    def logs(limit: int = 250, role: str = "server") -> dict[str, Any]:
+        try:
+            return context.logs(limit, role)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

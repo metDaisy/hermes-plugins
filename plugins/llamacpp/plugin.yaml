@@ -1,9 +1,4 @@
 name: llamacpp
-version: 0.2.32
+version: 0.2.41
 description: Unified llama.cpp manager with official and Prism-ML backends.
 kind: standalone
-provides_tools:
-  - llamacpp_status
-  - llamacpp_list_models
-  - llamacpp_start_server
-  - llamacpp_stop_server

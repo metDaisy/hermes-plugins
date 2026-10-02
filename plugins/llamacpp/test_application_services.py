@@ -2,10 +2,175 @@
 from __future__ import annotations
 
 import unittest
+import threading
+import os
 from pathlib import Path
 
 
 class ManagedEndpointConfigTests(unittest.TestCase):
+    def test_desktop_leases_expire_and_wait_for_active_execution(self) -> None:
+        from dashboard.application.desktop_leases import DesktopLeaseRegistry
+
+        now = [100.0]
+        leases = DesktopLeaseRegistry(timeout_seconds=8, clock=lambda: now[0])
+
+        self.assertFalse(leases.should_shutdown())
+        self.assertEqual(leases.touch("desktop-a"), 1)
+        self.assertEqual(leases.touch("desktop-b"), 2)
+        leases.release("desktop-a")
+        self.assertFalse(leases.should_shutdown())
+        now[0] += 9
+        self.assertFalse(leases.should_shutdown(execution_busy=True))
+        self.assertTrue(leases.should_shutdown(execution_busy=False))
+
+    def test_desktop_lease_rejects_missing_or_oversized_client_id(self) -> None:
+        from dashboard.application.desktop_leases import DesktopLeaseRegistry
+
+        leases = DesktopLeaseRegistry()
+        with self.assertRaisesRegex(ValueError, "client_id"):
+            leases.touch("")
+        with self.assertRaisesRegex(ValueError, "client_id"):
+            leases.touch("x" * 129)
+
+    def test_execution_profiles_store_main_and_compression_independently(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "active_model_id": "main-model",
+            "runtime_kind": "official",
+            "models": {"main-model": {}, "small-model": {}},
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda kind, model_id: not (kind == "prism_ml" and model_id == "main-model"),
+        )
+
+        service.save("main", {"runtime_kind": "official", "model_id": "main-model"})
+        result = service.save("compression", {"runtime_kind": "prism_ml", "model_id": "small-model"})
+
+        self.assertEqual(result["execution_mode"], "exclusive_swap")
+        self.assertEqual(result["profiles"]["main"]["runtime_kind"], "official")
+        self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "prism_ml")
+        self.assertEqual(result["profiles"]["main"]["logical_model"], "main-local")
+        self.assertEqual(result["profiles"]["compression"]["logical_model"], "compression-local")
+
+    def test_execution_profiles_allow_official_runtime_for_both_roles(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "models": {"main-model": {}, "small-model": {}},
+            "runtime_kind": "official",
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda _kind, _model_id: True,
+        )
+
+        service.save("main", {"runtime_kind": "official", "model_id": "main-model"})
+        result = service.save("compression", {"runtime_kind": "official", "model_id": "small-model"})
+
+        self.assertEqual(result["profiles"]["main"]["runtime_kind"], "official")
+        self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "official")
+
+    def test_execution_profiles_accept_all_official_and_prism_role_combinations(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        for main_runtime, compression_runtime in (
+            ("official", "official"),
+            ("official", "prism_ml"),
+            ("prism_ml", "official"),
+            ("prism_ml", "prism_ml"),
+        ):
+            with self.subTest(main=main_runtime, compression=compression_runtime):
+                state = {"models": {"main-model": {}, "small-model": {}}}
+                service = ExecutionProfileService(
+                    load_state=lambda: state,
+                    save_state=lambda value: state.update(value),
+                    accepts=lambda _kind, _model_id: True,
+                )
+                service.save("main", {"runtime_kind": main_runtime, "model_id": "main-model"})
+                result = service.save(
+                    "compression",
+                    {"runtime_kind": compression_runtime, "model_id": "small-model"},
+                )
+
+                self.assertEqual(result["profiles"]["main"]["runtime_kind"], main_runtime)
+                self.assertEqual(
+                    result["profiles"]["compression"]["runtime_kind"],
+                    compression_runtime,
+                )
+
+    def test_legacy_active_model_is_persisted_as_main_execution_profile(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "active_model_id": "legacy-main",
+            "runtime_kind": "official",
+            "models": {"legacy-main": {}},
+        }
+
+        def mutate(callback):
+            callback(state)
+            return state
+
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda _kind, _model_id: True,
+            mutate_state=mutate,
+        )
+
+        snapshot = service.snapshot()
+
+        self.assertEqual(snapshot["profiles"]["main"]["model_id"], "legacy-main")
+        self.assertEqual(state["execution_profiles"]["main"]["model_id"], "legacy-main")
+
+    def test_execution_profiles_reject_incompatible_binding(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {"models": {"model": {}}}
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda _kind, _model_id: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "호환"):
+            service.save("compression", {"runtime_kind": "prism_ml", "model_id": "model"})
+
+    def test_concurrent_execution_profile_saves_preserve_both_roles(self) -> None:
+        import tempfile
+        from dashboard.application.execution_profiles import ExecutionProfileService
+        from dashboard.application.state_store import StateStore
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            store = StateStore(
+                Path(raw_root) / "state.json",
+                lambda: {"models": {"main-model": {}, "small-model": {}}},
+            )
+            store.save({"models": {"main-model": {}, "small-model": {}}})
+            service = ExecutionProfileService(store.load, store.save, lambda _kind, _model: True, store.mutate)
+            barrier = threading.Barrier(2)
+
+            def save(role: str, model_id: str) -> None:
+                barrier.wait()
+                service.save(role, {"runtime_kind": "official", "model_id": model_id})
+
+            threads = [
+                threading.Thread(target=save, args=("main", "main-model")),
+                threading.Thread(target=save, args=("compression", "small-model")),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            profiles = store.load()["execution_profiles"]
+            self.assertEqual(profiles["main"]["model_id"], "main-model")
+            self.assertEqual(profiles["compression"]["model_id"], "small-model")
+
     def test_replaces_only_the_plugin_managed_provider_block(self) -> None:
         from dashboard.application.profile_endpoint import ManagedEndpointConfig
 
@@ -63,6 +228,28 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         self.assertIn("END llamacpp endpoint (managed)", repaired)
         self.assertIn('default_model: "model-a"', repaired)
         self.assertIn("fallback_providers:\n", repaired)
+
+    def test_writes_main_and_compression_logical_models_in_one_provider(self) -> None:
+        from dashboard.application.profile_endpoint import ManagedEndpointConfig
+
+        config = ManagedEndpointConfig(
+            key="llamacpp-local",
+            begin="# BEGIN llamacpp endpoint (managed)",
+            end="# END llamacpp endpoint (managed)",
+        )
+
+        updated = config.upsert_models(
+            "providers:\n",
+            "http://127.0.0.1:18380/v1",
+            "main-local",
+            {"main-local": 32768, "compression-local": 8192},
+        )
+
+        self.assertIn('      default_model: "main-local"', updated)
+        self.assertIn('        "main-local":', updated)
+        self.assertIn('          context_length: 32768', updated)
+        self.assertIn('        "compression-local":', updated)
+        self.assertIn('          context_length: 8192', updated)
 
 
 class ServerOptionCatalogTests(unittest.TestCase):
@@ -751,6 +938,56 @@ class ServerLifecycleServiceTests(unittest.TestCase):
             self.assertEqual(unregistered, [True])
             self.assertFalse(log_path.exists())
 
+    def test_stop_does_not_clear_worker_state_until_termination_returns(self) -> None:
+        from dashboard.application.server_lifecycle import ServerLifecycleService
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            state: dict[str, object] = {"pid": 42, "custom_endpoint": {"key": "llamacpp-local"}}
+            termination_finished = threading.Event()
+            observed: list[object] = []
+
+            def terminate(_pid: int) -> None:
+                observed.append(state["pid"])
+                termination_finished.set()
+
+            service = ServerLifecycleService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                pid_alive=lambda pid: pid == 42,
+                terminate=terminate,
+                unregister_endpoint=lambda: None,
+                log_path=Path(raw_root) / "server.log",
+            )
+
+            service.stop(keep_endpoint=True)
+
+            self.assertTrue(termination_finished.is_set())
+            self.assertEqual(observed, [42])
+            self.assertIsNone(state["pid"])
+
+    def test_stop_preserves_live_state_when_identity_validation_refuses_termination(self) -> None:
+        from dashboard.application.server_lifecycle import ServerLifecycleService
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            state: dict[str, object] = {"pid": 42, "custom_endpoint": {"key": "llamacpp-local"}}
+            service = ServerLifecycleService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                pid_alive=lambda pid: pid == 42,
+                terminate=lambda _pid: False,
+                unregister_endpoint=lambda: None,
+                log_path=Path(raw_root) / "server.log",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unverified process identity"):
+                service.stop(keep_endpoint=True)
+
+            self.assertEqual(state["pid"], 42)
+            self.assertEqual(state["custom_endpoint"], {"key": "llamacpp-local"})
+
     def test_stop_retries_a_transient_windows_log_lock_without_failing(self) -> None:
         from dashboard.application.server_lifecycle import ServerLifecycleService
         from unittest.mock import patch
@@ -912,7 +1149,7 @@ class ServerStartupServiceTests(unittest.TestCase):
                 return self.command
 
         class Process:
-            pid = 99
+            pid = os.getpid()
             def poll(self): return None
 
         with tempfile.TemporaryDirectory() as raw_root:
@@ -943,6 +1180,274 @@ class ServerStartupServiceTests(unittest.TestCase):
             self.assertEqual(backend.command[-2:], ["--alias", "Ternary-Bonsai-2-27B"])
             self.assertEqual(endpoint_models, ["Ternary-Bonsai-2-27B"])
 
+    def test_identity_capture_failure_terminates_owned_process_before_state_write(self) -> None:
+        import sys
+        import tempfile
+        import types
+        from unittest.mock import patch
+        from dashboard.application.server_startup import ServerStartupService
+
+        class Backend:
+            def build_command(self, *_args, **_kwargs):
+                return ["llama-server"]
+
+        class Process:
+            pid = 99
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.waited = False
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None) -> None:
+                self.waited = True
+
+            def poll(self):
+                return 1
+
+        class IdentityLookupFails:
+            def __init__(self, _pid: int) -> None:
+                raise RuntimeError("identity unavailable")
+
+        process = Process()
+        writes: list[dict[str, object]] = []
+        fake_psutil = types.SimpleNamespace(Process=IdentityLookupFails)
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            state = {"active_model_id": "model", "models": {"model": {}}}
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda value: writes.append(dict(value)),
+                executable=lambda: root / "llama-server.exe", stop=lambda **_: None,
+                active_path=lambda _: model, load_options=lambda: {"model": {}},
+                runtime_kind=lambda _: "official", backend=lambda _: Backend(),
+                serving_model_name=lambda _: "served", option_args=lambda _: [], watch=lambda _: None,
+                health=lambda _: False, register_endpoint=lambda *_: {}, log_tail=lambda _: {"lines": []},
+                log_path=root / "server.log", spawn=lambda *_: process,
+                now=lambda: 0.0, sleep=lambda _: None,
+            )
+
+            with patch.dict(sys.modules, {"psutil": fake_psutil}):
+                with self.assertRaisesRegex(RuntimeError, "identity"):
+                    service.start()
+
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.waited)
+        self.assertEqual(writes, [])
+
+    def test_state_persistence_failure_terminates_verified_owned_process(self) -> None:
+        import sys
+        import tempfile
+        import types
+        from unittest.mock import patch
+        from dashboard.application.server_startup import ServerStartupService
+
+        class Backend:
+            def build_command(self, *_args, **_kwargs):
+                return ["llama-server"]
+
+        class Process:
+            pid = 99
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.waited = False
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None) -> None:
+                self.waited = True
+
+            def poll(self):
+                return None
+
+        class Identity:
+            def __init__(self, _pid: int) -> None:
+                return
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return "C:/runtime/llama-server.exe"
+
+        process = Process()
+        fake_psutil = types.SimpleNamespace(Process=Identity)
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            state = {"active_model_id": "model", "models": {"model": {}}}
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda _value: None,
+                executable=lambda: Path("C:/runtime/llama-server.exe"), stop=lambda **_: None,
+                active_path=lambda _: model, load_options=lambda: {"model": {}},
+                runtime_kind=lambda _: "official", backend=lambda _: Backend(),
+                serving_model_name=lambda _: "served", option_args=lambda _: [], watch=lambda _: None,
+                health=lambda _: False, register_endpoint=lambda *_: {}, log_tail=lambda _: {"lines": []},
+                log_path=root / "server.log", spawn=lambda *_: process,
+                now=lambda: 0.0, sleep=lambda _: None,
+                mutate_state=lambda _callback: (_ for _ in ()).throw(OSError("state write failed")),
+            )
+
+            with patch.dict(sys.modules, {"psutil": fake_psutil}):
+                with self.assertRaisesRegex(OSError, "state write failed"):
+                    service.start()
+
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.waited)
+
+    def test_endpoint_state_write_failure_terminates_worker_and_clears_pid(self) -> None:
+        import sys
+        import tempfile
+        import types
+        from unittest.mock import patch
+        from dashboard.application.server_startup import ServerStartupService
+
+        class Backend:
+            def build_command(self, *_args, **_kwargs):
+                return ["llama-server"]
+
+        class Process:
+            pid = 99
+
+            def __init__(self) -> None:
+                self.terminated = False
+                self.waited = False
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None) -> None:
+                self.waited = True
+
+            def poll(self):
+                return None
+
+        class Identity:
+            def __init__(self, _pid: int) -> None:
+                return
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return "C:/runtime/llama-server.exe"
+
+        process = Process()
+        state = {"active_model_id": "model", "models": {"model": {}}}
+        mutations = 0
+        stops: list[dict[str, object]] = []
+
+        def mutate(callback) -> None:
+            nonlocal mutations
+            mutations += 1
+            if mutations == 2:
+                raise OSError("endpoint state write failed")
+            callback(state)
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda _value: None,
+                executable=lambda: Path("C:/runtime/llama-server.exe"),
+                stop=lambda **kwargs: stops.append(kwargs),
+                active_path=lambda _: model, load_options=lambda: {"model": {}},
+                runtime_kind=lambda _: "official", backend=lambda _: Backend(),
+                serving_model_name=lambda _: "served", option_args=lambda _: [], watch=lambda _: None,
+                health=lambda _: True, register_endpoint=lambda *_: {"model": "served"},
+                log_tail=lambda _: {"lines": []}, log_path=root / "server.log",
+                spawn=lambda *_: process, now=lambda: 0.0, sleep=lambda _: None,
+                mutate_state=mutate,
+            )
+
+            with patch.dict(sys.modules, {"psutil": types.SimpleNamespace(Process=Identity)}):
+                with self.assertRaisesRegex(OSError, "endpoint state write failed"):
+                    service.start()
+
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.waited)
+        self.assertIsNone(state.get("pid"))
+        self.assertEqual(stops, [
+            {"preserve_log": True, "keep_endpoint": True},
+            {"preserve_log": True},
+        ])
+
+    def test_cleanup_failure_retains_worker_identity_state(self) -> None:
+        import sys
+        import tempfile
+        import types
+        from unittest.mock import patch
+        from dashboard.application.server_startup import ServerStartupService
+
+        class Backend:
+            def build_command(self, *_args, **_kwargs):
+                return ["llama-server"]
+
+        class Process:
+            pid = 99
+
+            def terminate(self) -> None:
+                raise OSError("terminate failed")
+
+            def kill(self) -> None:
+                raise OSError("kill failed")
+
+            def wait(self, timeout=None) -> None:
+                raise TimeoutError("still running")
+
+            def poll(self):
+                return None
+
+        class Identity:
+            def __init__(self, _pid: int) -> None:
+                return
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return "C:/runtime/llama-server.exe"
+
+        process = Process()
+        state = {"active_model_id": "model", "models": {"model": {}}}
+        mutations = 0
+
+        def mutate(callback) -> None:
+            nonlocal mutations
+            mutations += 1
+            if mutations == 2:
+                raise OSError("endpoint state write failed")
+            callback(state)
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda _value: None,
+                executable=lambda: Path("C:/runtime/llama-server.exe"), stop=lambda **_kwargs: None,
+                active_path=lambda _: model, load_options=lambda: {"model": {}},
+                runtime_kind=lambda _: "official", backend=lambda _: Backend(),
+                serving_model_name=lambda _: "served", option_args=lambda _: [], watch=lambda _: None,
+                health=lambda _: True, register_endpoint=lambda *_: {"model": "served"},
+                log_tail=lambda _: {"lines": []}, log_path=root / "server.log",
+                spawn=lambda *_: process, now=lambda: 0.0, sleep=lambda _: None,
+                mutate_state=mutate,
+            )
+
+            with patch.dict(sys.modules, {"psutil": types.SimpleNamespace(Process=Identity)}):
+                with self.assertRaisesRegex(RuntimeError, "retaining worker ownership state"):
+                    service.start()
+
+        self.assertEqual(state.get("pid"), 99)
+        self.assertEqual(state.get("worker_identity", {}).get("pid"), 99)
 
 
 class MmprojAutoTests(unittest.TestCase):
@@ -1072,7 +1577,7 @@ class MmprojAutoTests(unittest.TestCase):
 
 
 class _FakeProcess:
-    pid = 99
+    pid = os.getpid()
 
     def poll(self):
         return None

@@ -54,3 +54,14 @@ class StateStore:
     def save(self, state: dict[str, Any]) -> None:
         with self._lock:
             self.write(self._path, state)
+
+    def mutate(self, update: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        """Apply one read-modify-write transaction while holding the store lock."""
+        with self._lock:
+            value = self.read(None, self._path)
+            state = self._defaults()
+            if isinstance(value, dict):
+                state.update(value)
+            update(state)
+            self.write(self._path, state)
+            return state

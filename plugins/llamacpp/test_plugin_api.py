@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
+import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -18,8 +22,1189 @@ assert SPEC and SPEC.loader
 api = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(api)
 
+PROXY_PATH = Path(__file__).parent / "dashboard" / "plugin_api.py"
+PROXY_SPEC = importlib.util.spec_from_file_location("llamacpp_profile_proxy", PROXY_PATH)
+assert PROXY_SPEC and PROXY_SPEC.loader
+profile_proxy = importlib.util.module_from_spec(PROXY_SPEC)
+PROXY_SPEC.loader.exec_module(profile_proxy)
+
 
 class LlamaCppManagerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from dashboard import inference_proxy
+
+        inference_proxy._transition_lock = asyncio.Lock()
+        inference_proxy._counter_lock = asyncio.Lock()
+        inference_proxy._active_main_requests = 0
+        inference_proxy._queued_main_requests = 0
+
+    def test_plugin_manifest_versions_match(self) -> None:
+        root = Path(__file__).parent
+        plugin_version = next(line.split(":", 1)[1].strip() for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))
+        pack_version = next(line.split(":", 1)[1].strip() for line in (root / "pack.yml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))
+        self.assertEqual(plugin_version, pack_version)
+
+    def test_manifest_does_not_claim_unregistered_agent_tools(self) -> None:
+        root = Path(__file__).parent
+        manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
+        registration = (root / "__init__.py").read_text(encoding="utf-8")
+        if "register_tool" not in registration:
+            self.assertNotIn("provides_tools:", manifest)
+
+    def test_coordinator_start_lease_prevents_duplicate_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            lock_path = root / "backend-start.lock"
+            spawned: list[list[str]] = []
+            log_paths: list[str] = []
+
+            def spawn(command, **kwargs):
+                spawned.append(list(command))
+                log_paths.append(str(getattr(kwargs.get("stdout"), "name", "")))
+                return object()
+
+            with patch.object(profile_proxy, "RUNTIME_ROOT", root), \
+                    patch.object(profile_proxy, "START_LOCK", lock_path), \
+                    patch.object(profile_proxy, "_healthy", return_value=False), \
+                    patch.object(profile_proxy.subprocess, "Popen", side_effect=spawn):
+                profile_proxy._try_start_coordinator()
+                profile_proxy._try_start_coordinator()
+
+            self.assertEqual(len(spawned), 1)
+            self.assertTrue(lock_path.exists())
+            self.assertTrue(log_paths[0].endswith("activity.log"))
+
+    def test_stale_coordinator_start_lease_is_reacquired_in_same_request(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            lock_path = root / "backend-start.lock"
+            lock_path.write_text("stale", encoding="utf-8")
+            old = time.time() - 60
+            os.utime(lock_path, (old, old))
+            spawned: list[list[str]] = []
+
+            with patch.object(profile_proxy, "RUNTIME_ROOT", root), \
+                    patch.object(profile_proxy, "START_LOCK", lock_path), \
+                    patch.object(profile_proxy, "_healthy", return_value=False), \
+                    patch.object(profile_proxy.subprocess, "Popen", side_effect=lambda command, **_: spawned.append(list(command))):
+                self.assertTrue(profile_proxy._try_start_coordinator())
+
+            self.assertEqual(len(spawned), 1)
+
+    def test_coordinator_health_requires_expected_identity_and_build(self) -> None:
+        expected = {
+            "ok": True,
+            "service": profile_proxy.COORDINATOR_SERVICE,
+            "protocol": profile_proxy.COORDINATOR_PROTOCOL,
+            "build": profile_proxy.COORDINATOR_BUILD,
+            "pid": 42,
+        }
+        with patch.object(profile_proxy, "_health_payload", return_value=expected), \
+                patch.object(profile_proxy, "_coordinator_process_ok", return_value=True):
+            self.assertTrue(profile_proxy._healthy())
+        with patch.object(profile_proxy, "_health_payload", return_value={"ok": True, "pid": 123}):
+            self.assertFalse(profile_proxy._healthy())
+
+    def test_coordinator_health_rejects_static_identity_from_untrusted_listener(self) -> None:
+        import types
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def exe(self) -> str:
+                return "C:/untrusted/evil.exe"
+
+            def cmdline(self):
+                return ["C:/untrusted/evil.exe", str(profile_proxy.COORDINATOR_SCRIPT)]
+
+            def net_connections(self, kind: str):
+                return [types.SimpleNamespace(
+                    status="LISTEN", laddr=types.SimpleNamespace(port=profile_proxy.COORDINATOR_PORT),
+                )]
+
+        payload = {
+            "ok": True,
+            "service": profile_proxy.COORDINATOR_SERVICE,
+            "protocol": profile_proxy.COORDINATOR_PROTOCOL,
+            "build": profile_proxy.COORDINATOR_BUILD,
+            "pid": 42,
+        }
+        fake_psutil = types.SimpleNamespace(Process=Process, CONN_LISTEN="LISTEN")
+        with patch.object(profile_proxy, "_health_payload", return_value=payload), \
+                patch.dict(sys.modules, {"psutil": fake_psutil}):
+            self.assertFalse(profile_proxy._healthy())
+
+    def test_unversioned_legacy_coordinator_is_replaced_when_script_identity_matches(self) -> None:
+        import types
+
+        terminated: list[int] = []
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def net_connections(self, kind: str):
+                self.assert_kind = kind
+                return [types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=18380))]
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def cmdline(self):
+                return [
+                    sys.executable,
+                    str(profile_proxy.RUNTIME_ROOT.parents[1] / "profiles" / "coder" / "plugins" /
+                        "llamacpp" / "dashboard" / "coordinator_server.py"),
+                ]
+
+            def terminate(self) -> None:
+                terminated.append(self.pid)
+
+            def wait(self, timeout: int) -> None:
+                return
+
+        listener = types.SimpleNamespace(
+            status="LISTEN", laddr=types.SimpleNamespace(port=profile_proxy.COORDINATOR_PORT), pid=42,
+        )
+        fake_psutil = types.SimpleNamespace(
+            Process=Process, CONN_LISTEN="LISTEN", net_connections=lambda kind: [listener],
+        )
+        with patch.object(profile_proxy, "_health_payload", return_value={"ok": True}), \
+                patch.dict(sys.modules, {"psutil": fake_psutil}):
+            profile_proxy._stop_incompatible_coordinator()
+
+        self.assertEqual(terminated, [42])
+
+    def test_legacy_coordinator_replacement_rejects_script_path_as_unrelated_argument(self) -> None:
+        import types
+
+        terminated: list[int] = []
+        trusted_script = (
+            profile_proxy.RUNTIME_ROOT.parents[1] / "profiles" / "coder" / "plugins" /
+            "llamacpp" / "dashboard" / "coordinator_server.py"
+        )
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def exe(self) -> str:
+                return "C:/untrusted/evil.exe"
+
+            def cmdline(self):
+                return ["C:/untrusted/evil.exe", "--note", str(trusted_script)]
+
+            def net_connections(self, kind: str):
+                return [types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=18380))]
+
+            def terminate(self) -> None:
+                terminated.append(self.pid)
+
+            def wait(self, timeout: int) -> None:
+                return
+
+        listener = types.SimpleNamespace(
+            status="LISTEN", laddr=types.SimpleNamespace(port=profile_proxy.COORDINATOR_PORT), pid=42,
+        )
+        fake_psutil = types.SimpleNamespace(
+            Process=Process, CONN_LISTEN="LISTEN", net_connections=lambda kind: [listener],
+        )
+        with patch.object(profile_proxy, "_health_payload", return_value={"ok": True}), \
+                patch.dict(sys.modules, {"psutil": fake_psutil}):
+            profile_proxy._stop_incompatible_coordinator()
+
+        self.assertEqual(terminated, [])
+
+    def test_profile_proxy_cleanup_closes_client_when_upstream_close_fails(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+
+            async def aiter_raw(self):
+                yield b"chunk"
+
+            async def aclose(self) -> None:
+                raise RuntimeError("close failed")
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        async def exercise() -> bool:
+            client = FakeClient()
+            iterator = profile_proxy._streaming_response(client, FakeResponse()).body_iterator
+            self.assertEqual(await iterator.__anext__(), b"chunk")
+            with self.assertRaises(StopAsyncIteration):
+                await iterator.__anext__()
+            return client.closed
+
+        self.assertTrue(asyncio.run(exercise()))
+
+    def test_coordinator_lifetime_lock_has_single_owner(self) -> None:
+        from dashboard.application.coordinator_lock import MachineFileLock
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            lock_path = Path(raw_root) / "coordinator.lock"
+            first = MachineFileLock(lock_path)
+            second = MachineFileLock(lock_path)
+            self.assertTrue(first.acquire())
+            try:
+                self.assertFalse(second.acquire())
+            finally:
+                first.release()
+            self.assertTrue(second.acquire())
+            second.release()
+
+    def test_cancelled_proxy_stream_closes_upstream(self) -> None:
+        from dashboard.inference_proxy import streaming_response
+
+        class FakeResponse:
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.started = asyncio.Event()
+
+            async def aiter_raw(self):
+                self.started.set()
+                await asyncio.Event().wait()
+                yield b"never"
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        async def exercise() -> tuple[bool, bool]:
+            upstream = FakeResponse()
+            client = FakeClient()
+            response = streaming_response(client, upstream)
+            iterator = response.body_iterator
+            pending = asyncio.create_task(iterator.__anext__())
+            await upstream.started.wait()
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+            await iterator.aclose()
+            return upstream.closed, client.closed
+
+        upstream_closed, client_closed = asyncio.run(exercise())
+        self.assertTrue(upstream_closed)
+        self.assertTrue(client_closed)
+
+    def test_stream_finalizer_runs_even_when_upstream_close_fails(self) -> None:
+        from dashboard.inference_proxy import streaming_response
+
+        finalized = False
+
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+
+            async def aiter_raw(self):
+                yield b"done"
+
+            async def aclose(self) -> None:
+                raise RuntimeError("close failed")
+
+        class FakeClient:
+            async def aclose(self) -> None:
+                return
+
+        async def finalize() -> None:
+            nonlocal finalized
+            finalized = True
+
+        async def exercise() -> None:
+            response = streaming_response(FakeClient(), FakeResponse(), finalize)
+            self.assertEqual([chunk async for chunk in response.body_iterator], [b"done"])
+
+        asyncio.run(exercise())
+        self.assertTrue(finalized)
+
+    def test_downstream_disconnect_cancels_upstream_without_stopping_worker(self) -> None:
+        import httpx
+        import uvicorn
+        from fastapi import FastAPI
+        from fastapi.responses import StreamingResponse
+        from dashboard import inference_proxy
+
+        def free_port() -> int:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                return int(sock.getsockname()[1])
+
+        upstream_port, proxy_port = free_port(), free_port()
+        upstream_closed = threading.Event()
+        upstream_app = FastAPI()
+
+        @upstream_app.post("/v1/chat/completions")
+        async def stream_forever():
+            async def body():
+                try:
+                    yield b"data: first\n\n"
+                    while True:
+                        await asyncio.sleep(0.02)
+                        yield b"data: more\n\n"
+                finally:
+                    upstream_closed.set()
+
+            return StreamingResponse(body(), media_type="text/event-stream")
+
+        proxy_app = FastAPI()
+        proxy_app.include_router(inference_proxy.router)
+        upstream_server = uvicorn.Server(uvicorn.Config(upstream_app, host="127.0.0.1", port=upstream_port, log_level="error"))
+        proxy_server = uvicorn.Server(uvicorn.Config(proxy_app, host="127.0.0.1", port=proxy_port, log_level="error"))
+        threads = [
+            threading.Thread(target=upstream_server.run, daemon=True),
+            threading.Thread(target=proxy_server.run, daemon=True),
+        ]
+        with tempfile.TemporaryDirectory() as raw_root:
+            state_path = Path(raw_root) / "state.json"
+            import psutil
+            process = psutil.Process(os.getpid())
+            state_path.write_text(
+                json.dumps({
+                    "port": upstream_port,
+                    "pid": os.getpid(),
+                    "active_model_id": "actual",
+                    "execution_profiles": {
+                        "main": {"runtime_kind": "official", "model_id": "actual", "preset_id": ""},
+                    },
+                    "worker_identity": {
+                        "pid": os.getpid(),
+                        "create_time": process.create_time(),
+                        "executable": process.exe(),
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            class Backend:
+                @staticmethod
+                def update_execution_queue(_queued: int, _active: int) -> None:
+                    return
+
+                @staticmethod
+                def ensure_execution_role(_role: str) -> None:
+                    return
+
+            with patch.object(inference_proxy, "STATE_PATH", state_path), \
+                    patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                for thread in threads:
+                    thread.start()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not (upstream_server.started and proxy_server.started):
+                    time.sleep(0.02)
+                self.assertTrue(upstream_server.started and proxy_server.started)
+                try:
+                    with httpx.Client(timeout=5, trust_env=False) as client:
+                        with client.stream(
+                            "POST",
+                            f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
+                            json={"model": "main-local", "stream": True, "messages": []},
+                        ) as response:
+                            self.assertEqual(response.status_code, 200)
+                            next(response.iter_bytes())
+                    self.assertTrue(upstream_closed.wait(3), "upstream generator survived the downstream disconnect")
+                    self.assertTrue(upstream_server.started, "persistent worker should remain available after request cancellation")
+                finally:
+                    proxy_server.should_exit = True
+                    upstream_server.should_exit = True
+                    for thread in threads:
+                        thread.join(timeout=5)
+
+    def test_profile_proxy_disconnect_propagates_through_coordinator_to_worker(self) -> None:
+        import httpx
+        import psutil
+        import uvicorn
+        from fastapi import FastAPI
+        from fastapi.responses import StreamingResponse
+        from dashboard import inference_proxy
+
+        def free_port() -> int:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                return int(sock.getsockname()[1])
+
+        worker_port, coordinator_port, profile_port = free_port(), free_port(), free_port()
+        worker_closed = threading.Event()
+        worker_app = FastAPI()
+
+        @worker_app.post("/v1/chat/completions")
+        async def stream_forever():
+            async def body():
+                try:
+                    yield b"data: first\n\n"
+                    while True:
+                        await asyncio.sleep(0.02)
+                        yield b"data: more\n\n"
+                finally:
+                    worker_closed.set()
+
+            return StreamingResponse(body(), media_type="text/event-stream")
+
+        coordinator_app = FastAPI()
+        coordinator_app.include_router(inference_proxy.router)
+        profile_app = FastAPI()
+        profile_app.include_router(profile_proxy.router)
+        servers = [
+            uvicorn.Server(uvicorn.Config(worker_app, host="127.0.0.1", port=worker_port, log_level="error")),
+            uvicorn.Server(uvicorn.Config(coordinator_app, host="127.0.0.1", port=coordinator_port, log_level="error")),
+            uvicorn.Server(uvicorn.Config(profile_app, host="127.0.0.1", port=profile_port, log_level="error")),
+        ]
+        threads = [threading.Thread(target=server.run, daemon=True) for server in servers]
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            process = psutil.Process(os.getpid())
+            state_path = Path(raw_root) / "state.json"
+            state_path.write_text(json.dumps({
+                "port": worker_port,
+                "pid": os.getpid(),
+                "active_model_id": "actual",
+                "execution_profiles": {
+                    "main": {"runtime_kind": "official", "model_id": "actual", "preset_id": ""},
+                },
+                "worker_identity": {
+                    "pid": os.getpid(),
+                    "create_time": process.create_time(),
+                    "executable": process.exe(),
+                },
+            }), encoding="utf-8")
+
+            class Backend:
+                @staticmethod
+                def update_execution_queue(_queued: int, _active: int) -> None:
+                    return
+
+                @staticmethod
+                def ensure_execution_role(_role: str) -> None:
+                    return
+
+            with patch.object(inference_proxy, "STATE_PATH", state_path), \
+                    patch.object(inference_proxy, "_execution_backend", return_value=Backend()), \
+                    patch.object(profile_proxy, "COORDINATOR_URL", f"http://127.0.0.1:{coordinator_port}"), \
+                    patch.object(profile_proxy, "_ensure_coordinator", return_value=None):
+                for thread in threads:
+                    thread.start()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not all(server.started for server in servers):
+                    time.sleep(0.02)
+                self.assertTrue(all(server.started for server in servers))
+                try:
+                    with httpx.Client(timeout=5, trust_env=False) as client:
+                        with client.stream(
+                            "POST", f"http://127.0.0.1:{profile_port}/v1/chat/completions",
+                            json={"model": "main-local", "stream": True, "messages": []},
+                        ) as response:
+                            self.assertEqual(response.status_code, 200)
+                            next(response.iter_bytes())
+                    self.assertTrue(worker_closed.wait(3), "worker request survived the Hermes-side disconnect")
+                finally:
+                    for server in reversed(servers):
+                        server.should_exit = True
+                    for thread in threads:
+                        thread.join(timeout=5)
+
+    def test_live_compression_disconnect_closes_worker_stream_and_restores_main(self) -> None:
+        import httpx
+        import psutil
+        import uvicorn
+        from fastapi import FastAPI
+        from fastapi.responses import StreamingResponse
+        from dashboard import inference_proxy
+
+        def free_port() -> int:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                return int(sock.getsockname()[1])
+
+        worker_port, proxy_port = free_port(), free_port()
+        worker_closed = threading.Event()
+        main_restored = threading.Event()
+        calls: list[str] = []
+        abort_errors: list[str] = []
+        worker_app = FastAPI()
+
+        @worker_app.post("/v1/chat/completions")
+        async def stream_forever():
+            async def body():
+                try:
+                    yield b"data: first\n\n"
+                    while True:
+                        await asyncio.sleep(0.02)
+                        yield b"data: more\n\n"
+                finally:
+                    worker_closed.set()
+
+            return StreamingResponse(body(), media_type="text/event-stream")
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(role: str) -> None:
+                calls.append(role)
+                if role == "main":
+                    main_restored.set()
+
+            @staticmethod
+            def abort_execution_transition(_role: str, error: str) -> None:
+                abort_errors.append(error)
+
+        proxy_app = FastAPI()
+        proxy_app.include_router(inference_proxy.router)
+        servers = [
+            uvicorn.Server(uvicorn.Config(worker_app, host="127.0.0.1", port=worker_port, log_level="error")),
+            uvicorn.Server(uvicorn.Config(proxy_app, host="127.0.0.1", port=proxy_port, log_level="error")),
+        ]
+        threads = [threading.Thread(target=server.run, daemon=True) for server in servers]
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            process = psutil.Process(os.getpid())
+            state_path = Path(raw_root) / "state.json"
+            state_path.write_text(json.dumps({
+                "port": worker_port,
+                "pid": os.getpid(),
+                "active_model_id": "small",
+                "execution_profiles": {
+                    "main": {"runtime_kind": "official", "model_id": "large", "preset_id": ""},
+                    "compression": {"runtime_kind": "official", "model_id": "small", "preset_id": ""},
+                },
+                "worker_identity": {
+                    "pid": os.getpid(),
+                    "create_time": process.create_time(),
+                    "executable": process.exe(),
+                },
+            }), encoding="utf-8")
+            with patch.object(inference_proxy, "STATE_PATH", state_path), \
+                    patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                for thread in threads:
+                    thread.start()
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not all(server.started for server in servers):
+                    time.sleep(0.02)
+                self.assertTrue(all(server.started for server in servers))
+                try:
+                    with httpx.Client(timeout=5, trust_env=False) as client:
+                        with client.stream(
+                            "POST", f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
+                            json={"model": "compression-local", "stream": True, "messages": []},
+                        ) as response:
+                            self.assertEqual(response.status_code, 200)
+                            next(response.iter_bytes())
+                    self.assertTrue(worker_closed.wait(3))
+                    self.assertTrue(main_restored.wait(3), f"Main restoration was not observed; calls={calls}, abort_errors={abort_errors}, locked={inference_proxy._transition_lock.locked()}")
+                    deadline = time.monotonic() + 1
+                    while inference_proxy._transition_lock.locked() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertFalse(inference_proxy._transition_lock.locked())
+                finally:
+                    for server in reversed(servers):
+                        server.should_exit = True
+                    for thread in threads:
+                        thread.join(timeout=5)
+
+        self.assertEqual(calls, ["compression", "main"])
+
+    def test_both_proxy_hops_strip_authorization_headers(self) -> None:
+        from dashboard import inference_proxy
+
+        headers = {"Authorization": "Bearer [REDACTED]", "Content-Type": "application/json"}
+
+        self.assertNotIn("Authorization", profile_proxy._filtered_headers(headers))
+        self.assertNotIn("Authorization", inference_proxy._filtered_headers(headers))
+        self.assertEqual(profile_proxy._filtered_headers(headers)["Content-Type"], "application/json")
+        self.assertEqual(inference_proxy._filtered_headers(headers)["Content-Type"], "application/json")
+
+    def test_compression_execution_restores_main_after_stream_finishes(self) -> None:
+        from dashboard import inference_proxy
+
+        calls: list[str] = []
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(role: str) -> None:
+                calls.append(role)
+
+        async def exercise() -> None:
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                finalize = await inference_proxy._begin_execution("compression")
+                self.assertIsNotNone(finalize)
+                await finalize()
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, ["compression", "main"])
+
+    def test_cancelled_compression_finalizer_restores_main_before_releasing_transition(self) -> None:
+        from dashboard import inference_proxy
+
+        calls: list[str] = []
+        restore_started = threading.Event()
+        allow_restore = threading.Event()
+
+        class Backend:
+            aborted: list[tuple[str, str]] = []
+
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(role: str) -> None:
+                calls.append(role)
+                if role == "main":
+                    restore_started.set()
+                    allow_restore.wait(2)
+
+            @classmethod
+            def abort_execution_transition(cls, role: str, error: str) -> None:
+                cls.aborted.append((role, error))
+
+        async def exercise() -> None:
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                finish = await inference_proxy._begin_execution("compression")
+                task = asyncio.create_task(finish())
+                await asyncio.to_thread(restore_started.wait, 1)
+                task.cancel()
+                await asyncio.sleep(0.05)
+                self.assertTrue(inference_proxy._transition_lock.locked())
+                allow_restore.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertFalse(inference_proxy._transition_lock.locked())
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, ["compression", "main"])
+        self.assertEqual(Backend.aborted, [])
+
+    def test_compression_start_failure_attempts_main_restoration(self) -> None:
+        from dashboard import inference_proxy
+
+        calls: list[str] = []
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(role: str) -> None:
+                calls.append(role)
+                if role == "compression":
+                    raise RuntimeError("compression failed")
+
+        async def exercise() -> None:
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                with self.assertRaisesRegex(RuntimeError, "compression failed"):
+                    await inference_proxy._begin_execution("compression")
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, ["compression", "main"])
+
+    def test_main_request_waits_until_compression_restores_main(self) -> None:
+        from dashboard import inference_proxy
+
+        calls: list[str] = []
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(role: str) -> None:
+                calls.append(role)
+
+        async def exercise() -> None:
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                finish_compression = await inference_proxy._begin_execution("compression")
+                waiting_main = asyncio.create_task(inference_proxy._begin_execution("main"))
+                await asyncio.sleep(0.05)
+                self.assertFalse(waiting_main.done())
+                await finish_compression()
+                finish_main = await asyncio.wait_for(waiting_main, timeout=1)
+                await finish_main()
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, ["compression", "main", "main"])
+
+    def test_cancelled_queued_main_request_does_not_leak_queue_count(self) -> None:
+        from dashboard import inference_proxy
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(_role: str) -> None:
+                return
+
+        async def exercise() -> None:
+            inference_proxy._queued_main_requests = 0
+            inference_proxy._active_main_requests = 0
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                await inference_proxy._transition_lock.acquire()
+                waiting = asyncio.create_task(inference_proxy._begin_execution("main"))
+                await asyncio.sleep(0.05)
+                waiting.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiting
+                inference_proxy._transition_lock.release()
+                self.assertEqual(inference_proxy._queued_main_requests, 0)
+
+        asyncio.run(exercise())
+
+    def test_cancellation_during_initial_queue_publish_rolls_back_queue_count(self) -> None:
+        from dashboard import inference_proxy
+
+        async def exercise() -> None:
+            publish_started = asyncio.Event()
+            release_publish = asyncio.Event()
+            publish_calls = 0
+
+            async def publish() -> None:
+                nonlocal publish_calls
+                publish_calls += 1
+                if publish_calls == 1:
+                    publish_started.set()
+                    await release_publish.wait()
+
+            inference_proxy._queued_main_requests = 0
+            inference_proxy._active_main_requests = 0
+            with patch.object(inference_proxy, "_publish_counts", side_effect=publish):
+                waiting = asyncio.create_task(inference_proxy._begin_execution("main"))
+                await publish_started.wait()
+                waiting.cancel()
+                release_publish.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiting
+
+            self.assertEqual(inference_proxy._queued_main_requests, 0)
+            self.assertEqual(inference_proxy._active_main_requests, 0)
+            self.assertFalse(inference_proxy._transition_lock.locked())
+
+        asyncio.run(exercise())
+
+    def test_cancellation_during_active_count_publish_rolls_back_active_count(self) -> None:
+        from dashboard import inference_proxy
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def ensure_execution_role(_role: str) -> None:
+                return
+
+        async def exercise() -> None:
+            active_publish_started = asyncio.Event()
+            release_publish = asyncio.Event()
+            publish_calls = 0
+
+            async def publish() -> None:
+                nonlocal publish_calls
+                publish_calls += 1
+                if publish_calls == 2:
+                    active_publish_started.set()
+                    await release_publish.wait()
+
+            inference_proxy._queued_main_requests = 0
+            inference_proxy._active_main_requests = 0
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()), \
+                    patch.object(inference_proxy, "_publish_counts", side_effect=publish):
+                waiting = asyncio.create_task(inference_proxy._begin_execution("main"))
+                await active_publish_started.wait()
+                waiting.cancel()
+                release_publish.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiting
+
+            self.assertEqual(inference_proxy._queued_main_requests, 0)
+            self.assertEqual(inference_proxy._active_main_requests, 0)
+            self.assertFalse(inference_proxy._transition_lock.locked())
+
+        asyncio.run(exercise())
+
+    def test_proxy_rejects_physical_model_name_that_bypasses_execution_policy(self) -> None:
+        from dashboard.inference_proxy import validate_logical_model
+
+        with self.assertRaisesRegex(Exception, "logical model"):
+            validate_logical_model(b'{"model":"physical-model"}')
+        with self.assertRaisesRegex(Exception, "logical model"):
+            validate_logical_model(b'{"messages":[]}')
+        with self.assertRaisesRegex(Exception, "logical model"):
+            validate_logical_model(b'{"model":""}')
+
+    def test_execution_role_applies_profile_runtime_model_and_role_log(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            state_path = root / "state.json"
+            activity_path = root / "logs" / "activity.log"
+            state_path.write_text(json.dumps({
+                "models": {"large": {}, "small": {}},
+                "active_model_id": "large",
+                "runtime_kind": "official",
+                "execution_profiles": {
+                    "main": {"runtime_kind": "official", "model_id": "large", "preset_id": ""},
+                    "compression": {"runtime_kind": "prism_ml", "model_id": "small", "preset_id": ""},
+                },
+            }), encoding="utf-8")
+            started_logs: list[Path] = []
+
+            class Startup:
+                def __init__(self, path: Path) -> None:
+                    self.path = path
+
+                def start(self) -> None:
+                    started_logs.append(self.path)
+
+            with patch.object(api, "STATE_PATH", state_path), \
+                    patch.object(api, "TRANSITION_LOG_PATH", activity_path), \
+                    patch.object(api, "ACTIVITY_LOG_PATH", activity_path), \
+                    patch.object(api, "_is_server_running", return_value=False), \
+                    patch.object(api, "_server_startup", side_effect=lambda path=None: Startup(path)):
+                result = api.ensure_execution_role("compression")
+                state = api._state()
+
+            self.assertEqual(result["role"], "compression")
+            self.assertEqual(state["active_model_id"], "small")
+            self.assertEqual(state["runtime_kind"], "prism_ml")
+            self.assertEqual(state["active_role"], "compression")
+            self.assertEqual(state["transition_phase"], "COMPRESSING")
+            self.assertEqual(started_logs, [activity_path])
+            self.assertIn('[transition] {"event": "transition-ready"', activity_path.read_text(encoding="utf-8"))
+
+    def test_main_role_change_waits_for_active_main_request_to_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps({
+                "models": {"old": {}, "new": {}},
+                "active_model_id": "old",
+                "active_role": "main",
+                "runtime_kind": "official",
+                "active_main_requests": 1,
+                "execution_profiles": {
+                    "main": {"runtime_kind": "official", "model_id": "new", "preset_id": ""},
+                },
+            }), encoding="utf-8")
+            started = threading.Event()
+            completed: list[dict[str, object]] = []
+
+            class Startup:
+                def start(self) -> None:
+                    started.set()
+
+            with patch.object(api, "STATE_PATH", state_path), \
+                    patch.object(api, "TRANSITION_LOG_PATH", root / "activity.log"), \
+                    patch.object(api, "ACTIVITY_LOG_PATH", root / "activity.log"), \
+                    patch.object(api, "_is_server_running", return_value=False), \
+                    patch.object(api, "_server_startup", return_value=Startup()):
+                worker = threading.Thread(
+                    target=lambda: completed.append(api.ensure_execution_role("main")), daemon=True,
+                )
+                worker.start()
+                time.sleep(0.05)
+                self.assertFalse(started.is_set())
+                api._mutate_state(lambda state: state.update({"active_main_requests": 0}))
+                worker.join(timeout=1)
+
+            self.assertTrue(started.is_set())
+            self.assertEqual(completed[0]["model_id"], "new")
+
+    def test_failed_profile_endpoint_sync_rolls_back_only_the_written_role(self) -> None:
+        state = {
+            "pid": 10,
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "old", "preset_id": ""},
+            },
+        }
+        old = dict(state["execution_profiles"]["main"])
+        new = {"runtime_kind": "official", "model_id": "new", "preset_id": ""}
+
+        class Service:
+            @staticmethod
+            def save(_role: str, _body: dict[str, object]):
+                state["execution_profiles"]["main"] = dict(new)
+                return {"execution_mode": "exclusive_swap", "profiles": {"main": {**new, "configured": True}}}
+
+        def mutate(callback):
+            callback(state)
+            return state
+
+        def fail_sync():
+            state["pid"] = 99
+            raise RuntimeError("sync failed")
+
+        with patch.object(api, "_state", side_effect=lambda: json.loads(json.dumps(state))), \
+                patch.object(api, "_save_state", side_effect=lambda value: (state.clear(), state.update(value))), \
+                patch.object(api, "_mutate_state", side_effect=mutate), \
+                patch.object(api, "_execution_profiles_service", return_value=Service()), \
+                patch.object(api, "_sync_execution_profile_endpoint", side_effect=fail_sync):
+            with self.assertRaisesRegex(RuntimeError, "sync failed"):
+                api.save_execution_profile("main", new)
+
+        self.assertEqual(state["pid"], 99)
+        self.assertEqual(state["execution_profiles"]["main"], old)
+
+    def test_profile_endpoint_sync_rolls_back_files_after_partial_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            first = root / "main.yaml"
+            second = root / "coder.yaml"
+            first.write_text("providers:\n", encoding="utf-8")
+            second.write_text("providers:\n", encoding="utf-8")
+            writes = 0
+
+            def flaky_write(path: Path, text: str) -> None:
+                nonlocal writes
+                writes += 1
+                if writes == 2:
+                    raise OSError("second profile write failed")
+                path.write_text(text, encoding="utf-8")
+
+            with patch.object(api, "_profile_config_paths", return_value=[first, second]), \
+                    patch.object(api, "_profile_provider_models", return_value={"main-local": 8192}), \
+                    patch.object(api, "_write_profile_config", side_effect=flaky_write):
+                with self.assertRaisesRegex(OSError, "second profile"):
+                    api._sync_execution_profile_endpoint()
+
+            self.assertEqual(first.read_text(encoding="utf-8"), "providers:\n")
+            self.assertEqual(second.read_text(encoding="utf-8"), "providers:\n")
+
+    def test_profile_endpoint_sync_surfaces_rollback_write_failure(self) -> None:
+        first = Path("first.yaml")
+        second = Path("second.yaml")
+        writes = 0
+
+        def broken_write(path: Path, _text: str) -> None:
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("update failed")
+            if writes >= 3:
+                raise OSError("rollback failed")
+
+        with patch.object(api, "_write_profile_config", side_effect=broken_write):
+            with self.assertRaisesRegex(Exception, "rollback failed"):
+                api._apply_profile_updates([
+                    (first, "old-first", "new-first"),
+                    (second, "old-second", "new-second"),
+                ])
+
+    def test_server_termination_refuses_reused_worker_pid_identity(self) -> None:
+        import types
+
+        terminated: list[int] = []
+
+        class NoSuchProcess(Exception):
+            pass
+
+        class TimeoutExpired(Exception):
+            pass
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def create_time(self) -> float:
+                return 200.0
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def terminate(self) -> None:
+                terminated.append(self.pid)
+
+            def wait(self, timeout: int) -> None:
+                return
+
+        fake_psutil = types.SimpleNamespace(
+            Process=Process,
+            NoSuchProcess=NoSuchProcess,
+            TimeoutExpired=TimeoutExpired,
+        )
+        state = {
+            "pid": 42,
+            "worker_identity": {
+                "pid": 42,
+                "create_time": 100.0,
+                "executable": sys.executable,
+            },
+        }
+        with patch.object(api, "_state", return_value=state), \
+                patch.object(api.platform, "system", return_value="Linux"), \
+                patch.dict(sys.modules, {"psutil": fake_psutil}):
+            api._terminate_server(42)
+
+        self.assertEqual(terminated, [])
+
+    def test_server_termination_refuses_identityless_worker_state(self) -> None:
+        import types
+
+        terminated: list[int] = []
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def terminate(self) -> None:
+                terminated.append(self.pid)
+
+            def wait(self, timeout: int) -> None:
+                return
+
+        fake_psutil = types.SimpleNamespace(
+            Process=Process,
+            NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+            TimeoutExpired=type("TimeoutExpired", (Exception,), {}),
+        )
+        with patch.object(api, "_state", return_value={"pid": 42, "worker_identity": None}), \
+                patch.object(api, "_server_executable", return_value=Path(sys.executable)), \
+                patch.object(api.platform, "system", return_value="Linux"), \
+                patch.dict(sys.modules, {"psutil": fake_psutil}):
+            self.assertFalse(api._terminate_server(42))
+
+        self.assertEqual(terminated, [])
+
+    def test_worker_identity_requires_listener_ownership(self) -> None:
+        import types
+        from dashboard import inference_proxy
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def net_connections(self, kind: str):
+                return [types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=9999))]
+
+        fake_psutil = types.SimpleNamespace(Process=Process, CONN_LISTEN="LISTEN")
+        state = {
+            "pid": 42,
+            "port": 18434,
+            "worker_identity": {"pid": 42, "create_time": 100.0, "executable": sys.executable},
+        }
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            self.assertFalse(inference_proxy._worker_identity_ok(state))
+
+    def test_worker_identity_requires_identity_pid_to_match_state_pid(self) -> None:
+        import types
+        from dashboard import inference_proxy
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def net_connections(self, kind: str):
+                return [types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=18434))]
+
+        fake_psutil = types.SimpleNamespace(Process=Process, CONN_LISTEN="LISTEN")
+        state = {
+            "pid": 42,
+            "port": 18434,
+            "worker_identity": {"pid": 99, "create_time": 100.0, "executable": sys.executable},
+        }
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            self.assertFalse(inference_proxy._worker_identity_ok(state))
+
+    def test_proxy_rewrites_logical_main_model_to_bound_worker_model(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        body = b'{"model":"main-local","messages":[]}'
+        state = {
+            "active_model_id": "large",
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "large"},
+                "compression": {"runtime_kind": "prism_ml", "model_id": "small"},
+            },
+        }
+
+        rewritten = rewrite_logical_model(body, state)
+
+        self.assertIn(b'"model":"large"', rewritten)
+
+    def test_proxy_rewrites_inactive_compression_profile_for_coordinated_swap(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        state = {
+            "active_model_id": "large",
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "large"},
+                "compression": {"runtime_kind": "prism_ml", "model_id": "small"},
+            },
+        }
+
+        rewritten = rewrite_logical_model(b'{"model":"compression-local"}', state)
+        self.assertIn(b'"model":"small"', rewritten)
+
+    def test_status_exposes_singleton_coordinator_and_exclusive_execution_policy(self) -> None:
+        class Inspector:
+            @staticmethod
+            def status():
+                return {"server_running": False}
+
+        with patch.object(api, "_runtime_inspector", return_value=Inspector()), \
+                patch.object(api, "_state", return_value={"models": {"large": {}, "small": {}}}):
+            status = api._status()
+
+        self.assertEqual(status["execution_mode"], "exclusive_swap")
+        self.assertEqual(status["coordinator"]["port"], 18380)
+        self.assertTrue(status["coordinator"]["singleton"])
+        self.assertEqual(status["coordinator"]["inference_base_url"], "http://127.0.0.1:18380/v1")
+        self.assertEqual([row["id"] for row in status["profile_model_options"]], ["large", "small"])
+        self.assertEqual(list(status["logs"]), ["activity"])
+        self.assertTrue(status["logs"]["activity"].endswith("activity.log"))
+
+    def test_operations_ui_displays_singleton_proxy_and_cancellation_contract(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        self.assertIn("Singleton proxy", source)
+        self.assertIn("응답 중단 시 upstream 요청도 종료", source)
+        self.assertIn("Exclusive swap", source)
+        self.assertIn("Main + Aux model", source)
+        self.assertIn("Aux 역할은 현재 compress만 지원", source)
+        self.assertIn("label: 'Aux model'", source)
+        self.assertIn("value: 'compress'", source)
+        self.assertIn("`/profiles/${role}`", source)
+        self.assertIn("통합 로그", source)
+        self.assertIn("api('/logs?limit=250')", source)
+        self.assertNotIn("분리 로그", source)
+        self.assertIn("/lifecycle/lease", source)
+        self.assertIn("pagehide", source)
+
     def test_custom_runtime_resolves_directory_and_explicit_executable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -192,11 +1377,34 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("Profile-local proxy", proxy_path.read_text(encoding="utf-8"))
         self.assertIn("from backend_impl import router", coordinator_path.read_text(encoding="utf-8"))
 
-    def test_custom_endpoint_is_self_contained_without_provider_plugin(self) -> None:
+    def test_custom_endpoint_routes_through_coordinator(self) -> None:
         with patch.object(api, "_profile_config_paths", return_value=[]), patch.object(api, "_load_options", return_value={}):
             endpoint = api._register_custom_endpoint(18434, "bonsai")
             self.assertEqual(endpoint["provider"], "custom")
-            self.assertEqual(endpoint["base_url"], "http://127.0.0.1:18434/v1")
+            self.assertEqual(endpoint["base_url"], "http://127.0.0.1:18380/v1")
+            self.assertEqual(endpoint["worker_base_url"], "http://127.0.0.1:18434/v1")
+
+    def test_execution_profile_api_persists_official_and_prism_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            state_path = Path(raw_root) / "state.json"
+            with patch.object(api, "STATE_PATH", state_path):
+                api._save_state({
+                    **api._default_state(),
+                    "models": {
+                        "large": {},
+                        "small": {
+                            "hf_repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+                            "hf_file": "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+                            "paths": [],
+                        },
+                    },
+                })
+                api.save_execution_profile("main", {"runtime_kind": "official", "model_id": "large"})
+                result = api.save_execution_profile("compression", {"runtime_kind": "prism_ml", "model_id": "small"})
+
+            self.assertEqual(result["profiles"]["main"]["model_id"], "large")
+            self.assertEqual(result["profiles"]["compression"]["model_id"], "small")
+            self.assertEqual(result["execution_mode"], "exclusive_swap")
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -270,6 +1478,78 @@ class LlamaCppManagerTests(unittest.TestCase):
             desktop_source,
         )
 
+
+    def test_prism_profile_resolves_managed_runtime_after_global_official_selection(self) -> None:
+        class Backend:
+            key = "prism_ml"
+
+            @staticmethod
+            def managed_root(machine_root: Path) -> Path:
+                return machine_root / "prism-ml"
+
+            @staticmethod
+            def resolve_executable(raw_path: str | Path) -> Path:
+                return Path(raw_path) / "llama-server.exe"
+
+        state = {"runtime_kind": "prism_ml", "runtime_path": None, "custom_runtime_path": None}
+        with patch.object(api, "_state", return_value=state), \
+                patch.object(api, "get_backend", return_value=Backend()):
+            self.assertEqual(
+                api._server_executable(),
+                api.MACHINE_ROOT / "prism-ml" / "llama-server.exe",
+            )
+
+    def test_server_running_rejects_health_from_listener_not_owned_by_recorded_worker(self) -> None:
+        import types
+
+        class Process:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def net_connections(self, kind: str):
+                return []
+
+        state = {
+            "pid": 42,
+            "port": 18434,
+            "worker_identity": {"pid": 42, "create_time": 100.0, "executable": sys.executable},
+        }
+        fake_psutil = types.SimpleNamespace(Process=Process, CONN_LISTEN="LISTEN")
+        with patch.object(api, "_state", return_value=state), \
+                patch.object(api, "_pid_alive", return_value=True), \
+                patch.object(api, "_health", return_value=True), \
+                patch.dict(sys.modules, {"psutil": fake_psutil}):
+            self.assertFalse(api._is_server_running())
+
+    def test_activity_log_tail_reads_unified_execution_log(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            log_path = Path(raw_root) / "activity.log"
+            log_path.write_text("[main] one\n[compression] two\n", encoding="utf-8")
+            with patch.object(api, "ACTIVITY_LOG_PATH", log_path):
+                result = api._server_log_tail(10)
+
+        self.assertEqual(result["lines"], ["[main] one", "[compression] two"])
+        self.assertEqual(result["role"], "activity")
+
+    def test_desktop_lifecycle_contract_stops_coordinator_after_last_lease(self) -> None:
+        source = (Path(__file__).parent / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8")
+        self.assertIn('app.post("/lifecycle/lease")', source)
+        self.assertIn('app.delete("/lifecycle/lease")', source)
+        self.assertIn("_desktop_leases.should_shutdown(execution_busy())", source)
+        self.assertIn("shutdown_machine_runtime()", source)
+        self.assertIn("server.should_exit = True", source)
+
+    def test_worker_spawn_is_bound_to_coordinator_lifetime(self) -> None:
+        source = (Path(__file__).parent / "dashboard" / "backend_impl.py").read_text(encoding="utf-8")
+        self.assertIn("bind_child_to_owner_lifetime(process)", source)
 
     def test_backend_exit_does_not_stop_machine_server(self) -> None:
         with patch.object(api, "_stop_server") as stop_server:

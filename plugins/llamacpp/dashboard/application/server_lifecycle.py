@@ -20,9 +20,10 @@ class ServerLifecycleService:
         load_state: Callable[[], dict[str, Any]],
         save_state: Callable[[dict[str, Any]], None],
         pid_alive: Callable[[Any], bool],
-        terminate: Callable[[int], None],
+        terminate: Callable[[int], bool | None],
         unregister_endpoint: Callable[[], None],
         log_path: Path,
+        mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None,
     ) -> None:
         self._load_state = load_state
         self._save_state = save_state
@@ -30,14 +31,18 @@ class ServerLifecycleService:
         self._terminate = terminate
         self._unregister_endpoint = unregister_endpoint
         self._log_path = log_path
+        self._mutate_state = mutate_state
 
-    def stop(self, preserve_log: bool = False) -> None:
+    def stop(self, preserve_log: bool = False, keep_endpoint: bool = False) -> None:
         state = self._load_state()
         pid = state.get("pid")
         if self._pid_alive(pid):
-            self._terminate(pid)
-        self._clear_owned_state(state)
-        self._unregister_endpoint()
+            terminated = self._terminate(pid)
+            if terminated is False and self._pid_alive(pid):
+                raise RuntimeError("refusing to clear a live llama-server with unverified process identity")
+        self._clear_owned_state(state, pid, clear_endpoint=not keep_endpoint)
+        if not keep_endpoint:
+            self._unregister_endpoint()
         if not preserve_log:
             self._remove_log_when_released()
 
@@ -58,8 +63,7 @@ class ServerLifecycleService:
             state = self._load_state()
             if state.get("pid") != process.pid:
                 return
-            self._clear_owned_state(state)
-            self._unregister_endpoint()
+            self._clear_owned_state(state, process.pid, clear_endpoint=False)
 
         threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
 
@@ -74,7 +78,18 @@ class ServerLifecycleService:
             return {"path": str(self._log_path), "lines": [], "size_bytes": 0}
         return {"path": str(self._log_path), "lines": text.splitlines()[-bounded:], "size_bytes": size_bytes}
 
-    def _clear_owned_state(self, state: dict[str, Any]) -> None:
-        state["pid"] = None
-        state["custom_endpoint"] = None
-        self._save_state(state)
+    def _clear_owned_state(self, state: dict[str, Any], owned_pid: Any,
+                           clear_endpoint: bool) -> None:
+        def clear(current: dict[str, Any]) -> None:
+            if current.get("pid") != owned_pid:
+                return
+            current["pid"] = None
+            current["worker_identity"] = None
+            if clear_endpoint:
+                current["custom_endpoint"] = None
+
+        if self._mutate_state is not None:
+            self._mutate_state(clear)
+        elif state.get("pid") == owned_pid:
+            clear(state)
+            self._save_state(state)

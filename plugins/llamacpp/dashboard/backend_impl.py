@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException
 try:
     from .backends import backend_view, get_backend
     from .application.device_discovery import DeviceDiscoveryService
+    from .application.execution_profiles import ExecutionProfileService
     from .application.download_progress import DownloadProgressTracker
     from .application.huggingface_cache import HuggingFaceCacheService
     from .application.huggingface_download import HuggingFaceDownloadService
@@ -48,7 +49,9 @@ try:
     from .application.server_lifecycle import ServerLifecycleService
     from .application.server_startup import ServerStartupService
     from .application.state_store import StateStore
+    from .child_lifecycle import bind_child_to_owner_lifetime
     from .routes.model_routes import ModelRouteContext, create_router as create_model_router
+    from .routes.execution_profile_routes import ExecutionProfileRouteContext, create_router as create_execution_profile_router
     from .routes.parameter_routes import (
         ParameterRouteContext, create_router as create_parameter_router,
         model_settings as _transport_model_settings,
@@ -69,6 +72,7 @@ except ImportError:
         sys.path.insert(0, _DASHBOARD_DIR)
     from backends import backend_view, get_backend
     from application.device_discovery import DeviceDiscoveryService
+    from application.execution_profiles import ExecutionProfileService
     from application.download_progress import DownloadProgressTracker
     from application.huggingface_cache import HuggingFaceCacheService
     from application.huggingface_download import HuggingFaceDownloadService
@@ -89,7 +93,9 @@ except ImportError:
     from application.server_lifecycle import ServerLifecycleService
     from application.server_startup import ServerStartupService
     from application.state_store import StateStore
+    from child_lifecycle import bind_child_to_owner_lifetime
     from routes.model_routes import ModelRouteContext, create_router as create_model_router
+    from routes.execution_profile_routes import ExecutionProfileRouteContext, create_router as create_execution_profile_router
     from routes.parameter_routes import (
         ParameterRouteContext, create_router as create_parameter_router,
         model_settings as _transport_model_settings,
@@ -117,8 +123,15 @@ STATE_PATH = RUNTIME_ROOT / "state.json"
 OPTIONS_PATH = RUNTIME_ROOT / "model-options.json"
 PRESET_DB_PATH = RUNTIME_ROOT / "presets.db"
 OPTION_METADATA_CACHE_PATH = RUNTIME_ROOT / "parameter-metadata-cache.json"
-SERVER_LOG_PATH = RUNTIME_ROOT / "logs" / "llama-server.log"
+ACTIVITY_LOG_PATH = RUNTIME_ROOT / "logs" / "activity.log"
+# Compatibility aliases for older callers. All runtime events now share one ordered log.
+SERVER_LOG_PATH = ACTIVITY_LOG_PATH
+MAIN_LOG_PATH = ACTIVITY_LOG_PATH
+COMPRESSION_LOG_PATH = ACTIVITY_LOG_PATH
+COORDINATOR_LOG_PATH = ACTIVITY_LOG_PATH
+TRANSITION_LOG_PATH = ACTIVITY_LOG_PATH
 CUSTOM_ENDPOINT_KEY = "llamacpp-local"
+COORDINATOR_PORT = 18380
 CUSTOM_ENDPOINT_BEGIN = "# BEGIN llamacpp endpoint (managed)"
 CUSTOM_ENDPOINT_END = "# END llamacpp endpoint (managed)"
 _custom_endpoint_lock = threading.RLock()
@@ -174,6 +187,11 @@ def _state() -> dict[str, Any]:
 def _save_state(state: dict[str, Any]) -> None:
     with _state_lock:
         _store().save(state)
+
+
+def _mutate_state(update: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    with _state_lock:
+        return _store().mutate(update)
 
 
 def _presets_store() -> PresetStore:
@@ -413,9 +431,12 @@ def _server_executable(tag: str | None = None, backend: str | None = None) -> Pa
         target = (tag, backend)
     else:
         state = _state()
-        if _runtime_kind(state) != "official":
+        runtime_kind = _runtime_kind(state)
+        if runtime_kind != "official":
             try:
-                return _resolve_server_executable_from_path(str(state.get("runtime_path") or state.get("custom_runtime_path") or ""))
+                adapter = get_backend(runtime_kind)
+                raw_path = state.get("runtime_path") or state.get("custom_runtime_path")
+                return adapter.resolve_executable(raw_path or adapter.managed_root(MACHINE_ROOT))
             except RuntimeError:
                 return None
         target = _installed_target()
@@ -438,21 +459,65 @@ def _pid_alive(pid: Any) -> bool:
             return False
 
 
-def _terminate_server(pid: int) -> None:
+def _worker_identity_matches(state: dict[str, Any]) -> bool:
+    try:
+        import psutil
+        pid = int(state.get("pid") or 0)
+        port = int(state.get("port") or 0)
+        identity = state.get("worker_identity")
+        if pid <= 0 or port <= 0 or not isinstance(identity, dict):
+            return False
+        expected_pid = int(identity.get("pid") or 0)
+        expected_time = float(identity.get("create_time"))
+        expected_executable = os.path.normcase(os.path.abspath(str(identity.get("executable") or "")))
+        process = psutil.Process(pid)
+        if (
+            expected_pid != pid
+            or abs(process.create_time() - expected_time) >= 0.01
+            or os.path.normcase(os.path.abspath(process.exe())) != expected_executable
+        ):
+            return False
+        return any(
+            connection.status == psutil.CONN_LISTEN
+            and connection.laddr
+            and int(connection.laddr.port) == port
+            for connection in process.net_connections(kind="tcp")
+        )
+    except Exception:  # noqa: BLE001 - identity uncertainty must fail closed
+        return False
+
+
+def _terminate_server(pid: int) -> bool:
+    import psutil
+
+    try:
+        process = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True
+    state = _state()
+    if not _worker_identity_matches(state):
+        return False
     if platform.system().lower() == "windows":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
     else:
-        os.kill(pid, 15)
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except psutil.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    return True
 
 
-def _server_lifecycle() -> ServerLifecycleService:
+def _server_lifecycle(log_path: Path = SERVER_LOG_PATH) -> ServerLifecycleService:
     return ServerLifecycleService(
         load_state=_state,
         save_state=_save_state,
         pid_alive=_pid_alive,
         terminate=_terminate_server,
         unregister_endpoint=_unregister_custom_endpoint,
-        log_path=SERVER_LOG_PATH,
+        log_path=log_path,
+        mutate_state=_mutate_state,
     )
 
 
@@ -488,6 +553,11 @@ def _config_with_managed_endpoint(text: str, base_url: str, model_id: str, conte
     return _endpoint_config.upsert(text, base_url, model_id, context_length)
 
 
+def _config_with_execution_profiles(text: str, base_url: str, default_model: str,
+                                    models: dict[str, int]) -> str:
+    return _endpoint_config.upsert_models(text, base_url, default_model, models)
+
+
 def _remove_managed_endpoint(text: str) -> tuple[str, bool]:
     return _endpoint_config.remove(text)
 
@@ -496,23 +566,76 @@ def _write_profile_config(path: Path, text: str) -> None:
     write_text_atomically(path, text)
 
 
-def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
-    base_url = f"http://127.0.0.1:{port}/v1"
-    stored_options = _load_options().get(model_id, {})
+def _apply_profile_updates(updates: list[tuple[Path, str, str]]) -> None:
+    written: list[tuple[Path, str]] = []
     try:
-        context_length = int(stored_options.get("ctx-size") or 65536)
-    except (TypeError, ValueError):
-        context_length = 65536
+        for path, original, updated in updates:
+            _write_profile_config(path, updated)
+            written.append((path, original))
+    except Exception as update_error:
+        rollback_errors: list[Exception] = []
+        for path, original in reversed(written):
+            try:
+                _write_profile_config(path, original)
+            except Exception as rollback_error:  # noqa: BLE001 - report every failed recovery write
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            raise ExceptionGroup(
+                "profile endpoint update failed and rollback failed",
+                [update_error, *rollback_errors],
+            )
+        raise
+
+
+def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
+    base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
+    worker_base_url = f"http://127.0.0.1:{port}/v1"
+    endpoint = _sync_execution_profile_endpoint(fallback_model=model_id)
+    endpoint["worker_base_url"] = worker_base_url
+    return endpoint
+
+
+def _profile_provider_models() -> dict[str, int]:
+    snapshot = execution_profiles()
+    profile_models: dict[str, int] = {}
+    options_by_model = _load_options()
+    for profile in snapshot["profiles"].values():
+        bound_model = str(profile.get("model_id") or "")
+        if not bound_model:
+            continue
+        try:
+            profile_models[str(profile["logical_model"])] = int(
+                options_by_model.get(bound_model, {}).get("ctx-size") or 65536
+            )
+        except (TypeError, ValueError):
+            profile_models[str(profile["logical_model"])] = 65536
+    return profile_models
+
+
+def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]:
+    base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
+    provider_models = _profile_provider_models()
+    if not provider_models and fallback_model:
+        stored_options = _load_options().get(fallback_model, {})
+        try:
+            context_length = int(stored_options.get("ctx-size") or 65536)
+        except (TypeError, ValueError):
+            context_length = 65536
+        provider_models = {fallback_model: context_length}
+    if not provider_models:
+        raise RuntimeError("configure a Main or Compression execution profile first")
+    default_model = "main-local" if "main-local" in provider_models else next(iter(provider_models))
     with _custom_endpoint_lock:
-        updates: list[tuple[Path, str]] = []
+        updates: list[tuple[Path, str, str]] = []
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
-            updated = _config_with_managed_endpoint(text, base_url, model_id, context_length)
+            updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
             if updated != text:
-                updates.append((path, updated))
-        for path, updated in updates:
-            _write_profile_config(path, updated)
-    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "base_url": base_url, "model": model_id, "context_length": context_length}
+                updates.append((path, text, updated))
+        _apply_profile_updates(updates)
+    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "base_url": base_url,
+            "model": default_model,
+            "models": provider_models, "context_length": provider_models[default_model]}
 
 
 def _unregister_custom_endpoint() -> None:
@@ -527,8 +650,15 @@ def _unregister_custom_endpoint() -> None:
             _write_profile_config(path, updated)
 
 
-def _stop_server(*, preserve_log: bool = False) -> None:
-    _server_lifecycle().stop(preserve_log)
+def _stop_server(*, preserve_log: bool = False, keep_endpoint: bool = False) -> None:
+    # The activity log spans coordinator and many sequential model workers.
+    _server_lifecycle().stop(True, keep_endpoint)
+
+
+def shutdown_machine_runtime() -> None:
+    """Stop only verified plugin-owned work before the coordinator exits."""
+    _server_lifecycle().stop(preserve_log=True, keep_endpoint=True)
+    update_execution_queue(0, 0)
 
 
 def _watch_server_process(process: subprocess.Popen[Any]) -> None:
@@ -591,21 +721,26 @@ def _active_path(model_id: str) -> Path:
     return _models().active_path(model_id)
 
 
-def _server_startup() -> ServerStartupService:
+def _server_startup(log_path: Path | None = None) -> ServerStartupService:
     def spawn(command: list[str], log: Any, executable: Path) -> subprocess.Popen[Any]:
-        return subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                   cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        bind_child_to_owner_lifetime(process)
+        return process
     return ServerStartupService(_state, _save_state, _server_executable, _stop_server, _active_path, _load_options,
                                 _runtime_kind, get_backend, _serving_model_name, _option_cli_args, _watch_server_process, _health,
-                                _register_custom_endpoint, _server_log_tail, SERVER_LOG_PATH, spawn, time.time, time.sleep)
+                                _register_custom_endpoint, _server_log_tail, log_path or SERVER_LOG_PATH, spawn, time.time, time.sleep,
+                                _mutate_state)
 
 
 def _start_server() -> None:
     _server_startup().start()
 
 
-def _server_log_tail(limit: int = 250) -> dict[str, Any]:
-    return _server_lifecycle().log_tail(limit)
+def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]:
+    result = _server_lifecycle(ACTIVITY_LOG_PATH).log_tail(limit)
+    result["role"] = "activity"
+    return result
 
 
 def _server_rows() -> list[dict[str, Any]]:
@@ -614,7 +749,11 @@ def _server_rows() -> list[dict[str, Any]]:
 
 def _is_server_running() -> bool:
     state = _state()
-    return bool(_pid_alive(state.get("pid")) and _health(int(state.get("port") or 18434)))
+    return bool(
+        _pid_alive(state.get("pid"))
+        and _worker_identity_matches(state)
+        and _health(int(state.get("port") or 18434))
+    )
 
 
 def _model_lifecycle() -> ModelLifecycleService:
@@ -652,8 +791,183 @@ def _runtime_management() -> RuntimeManagementWorkflow:
     )
 
 
+def _execution_profile_accepts(runtime_kind: str, model_id: str) -> bool:
+    if runtime_kind == "official":
+        return True
+    state = _state()
+    model = state.get("models", {}).get(model_id, {})
+    if not isinstance(model, dict):
+        return False
+    repo_id = str(model.get("hf_repo") or "")
+    paths = [str(path) for path in model.get("paths", []) if path]
+    if model.get("hf_file"):
+        paths.append(str(model["hf_file"]))
+    version = str(state.get("prism_release_tag") or "") or None
+    return _model_policy.accepts(runtime_kind, repo_id, paths, version)
+
+
+def _execution_profiles_service() -> ExecutionProfileService:
+    return ExecutionProfileService(_state, _save_state, _execution_profile_accepts, _mutate_state)
+
+
+def execution_profiles() -> dict[str, Any]:
+    return _execution_profiles_service().snapshot()
+
+
+def save_execution_profile(role: str, body: dict[str, Any]) -> dict[str, Any]:
+    previous = _state()
+    previous_profiles = previous.get("execution_profiles")
+    previous_role = (
+        dict(previous_profiles.get(role))
+        if isinstance(previous_profiles, dict) and isinstance(previous_profiles.get(role), dict)
+        else None
+    )
+    result = _execution_profiles_service().save(role, body)
+    written_profile = result.get("profiles", {}).get(role, {})
+    written_fields = {
+        key: str(written_profile.get(key) or "")
+        for key in ("runtime_kind", "model_id", "preset_id")
+    }
+    try:
+        endpoint = _sync_execution_profile_endpoint()
+    except Exception:
+        def rollback(current: dict[str, Any]) -> None:
+            profiles = current.get("execution_profiles")
+            next_profiles = dict(profiles) if isinstance(profiles, dict) else {}
+            current_role = next_profiles.get(role)
+            current_fields = {
+                key: str(current_role.get(key) or "")
+                for key in ("runtime_kind", "model_id", "preset_id")
+            } if isinstance(current_role, dict) else {}
+            if current_fields != written_fields:
+                return
+            if previous_role is None:
+                next_profiles.pop(role, None)
+            else:
+                next_profiles[role] = previous_role
+            current["execution_profiles"] = next_profiles
+
+        _mutate_state(rollback)
+        raise
+
+    def record(current: dict[str, Any]) -> None:
+        current["custom_endpoint"] = endpoint
+
+    _mutate_state(record)
+    return result
+
+
+def _transition_log(event: str, **details: Any) -> None:
+    TRANSITION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    row = {"timestamp": time.time(), "event": event, **details}
+    with TRANSITION_LOG_PATH.open("a", encoding="utf-8") as stream:
+        stream.write("[transition] " + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def update_execution_queue(queued_main: int, active_main: int) -> None:
+    def update(current: dict[str, Any]) -> None:
+        current["queued_main_requests"] = max(0, int(queued_main))
+        current["active_main_requests"] = max(0, int(active_main))
+
+    _mutate_state(update)
+
+
+def ensure_execution_role(role: str) -> dict[str, Any]:
+    role = str(role or "").strip().lower()
+    profiles = execution_profiles()["profiles"]
+    profile = profiles.get(role)
+    if not isinstance(profile, dict) or not profile.get("configured"):
+        raise RuntimeError(f"{role} execution profile is not configured")
+    model_id = str(profile["model_id"])
+    runtime_kind = str(profile["runtime_kind"])
+    state = _state()
+    if (state.get("active_role") == role and state.get("active_model_id") == model_id
+            and _runtime_kind(state) == runtime_kind and _is_server_running()):
+        return {"role": role, "model_id": model_id, "already_running": True}
+
+    if role == "main":
+        while int(state.get("active_main_requests") or 0) > 0:
+            time.sleep(0.02)
+            state = _state()
+
+    _transition_log("transition-start", role=role, model_id=model_id, runtime_kind=runtime_kind)
+
+    def select(current: dict[str, Any]) -> None:
+        current["active_model_id"] = model_id
+        current["runtime_kind"] = runtime_kind
+        current["active_role"] = role
+        current["transition_phase"] = "LOADING_COMPRESSION" if role == "compression" else "RESTORING_MAIN"
+        preset_id = str(profile.get("preset_id") or "")
+        if preset_id:
+            preset = _presets_store().get(preset_id)
+            if preset is None:
+                raise RuntimeError(f"execution profile preset was not found: {preset_id}")
+            settings = current.get("model_settings")
+            options = dict(settings) if isinstance(settings, dict) else {}
+            options[model_id] = dict(preset.get("options") or {})
+            current["model_settings"] = options
+
+    _mutate_state(select)
+    log_path = ACTIVITY_LOG_PATH
+    try:
+        _server_startup(log_path).start()
+    except Exception as exc:
+        def fail(current: dict[str, Any]) -> None:
+            current["transition_phase"] = "FAILED"
+            current["transition_error"] = str(exc)
+        _mutate_state(fail)
+        _transition_log("transition-failed", role=role, model_id=model_id, error=str(exc))
+        raise
+
+    def ready(current: dict[str, Any]) -> None:
+        current["active_role"] = role
+        current["transition_phase"] = "COMPRESSING" if role == "compression" else "MAIN_READY"
+        current["transition_error"] = None
+
+    _mutate_state(ready)
+    _transition_log("transition-ready", role=role, model_id=model_id, runtime_kind=runtime_kind)
+    return {"role": role, "model_id": model_id, "already_running": False}
+
+
+def abort_execution_transition(role: str, error: str) -> None:
+    """Remove a transitional worker when the required Main restoration failed."""
+    _server_lifecycle().stop(preserve_log=True, keep_endpoint=True)
+
+    def fail(current: dict[str, Any]) -> None:
+        current["active_role"] = None
+        current["transition_phase"] = "FAILED"
+        current["transition_error"] = str(error)
+
+    _mutate_state(fail)
+    _transition_log("transition-aborted", role=role, error=str(error))
+
+
 def _status() -> dict[str, Any]:
-    return _runtime_inspector().status()
+    status = _runtime_inspector().status()
+    state = _state()
+    execution = execution_profiles()
+    status.update(execution)
+    models = state.get("models") if isinstance(state.get("models"), dict) else {}
+    status["profile_model_options"] = [
+        {"id": str(model_id), "label": str(model_id)} for model_id in sorted(models)
+    ]
+    status["coordinator"] = {
+        "ok": True,
+        "pid": os.getpid(),
+        "port": COORDINATOR_PORT,
+        "singleton": True,
+        "inference_base_url": f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
+        "cancellation_propagation": True,
+    }
+    status["execution"] = {
+        "active_role": state.get("active_role"),
+        "transition_phase": state.get("transition_phase") or "IDLE",
+        "transition_error": state.get("transition_error"),
+        "queued_main_requests": int(state.get("queued_main_requests") or 0),
+        "active_main_requests": int(state.get("active_main_requests") or 0),
+    }
+    status["logs"] = {"activity": str(ACTIVITY_LOG_PATH)}
+    return status
 
 
 def _hf_download(repo: str, path: str, job: dict[str, Any] | None = None,
@@ -760,6 +1074,9 @@ router.include_router(create_server_router(ServerRouteContext(
     state=_state, stop=_stop_server, start=_start_server, create_job=_job, launch=_spawn,
     finish=_finish, recent_jobs=_jobs, find_job=lambda job_id: _job_manager().find(job_id),
     logs=_server_log_tail,
+)))
+router.include_router(create_execution_profile_router(ExecutionProfileRouteContext(
+    snapshot=execution_profiles, save=save_execution_profile,
 )))
 def status() -> dict[str, Any]:
     return _status()

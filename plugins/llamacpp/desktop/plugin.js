@@ -9,6 +9,7 @@ const jsxs = jsx
 const ID = 'llamacpp'
 const LOG_NEWLINE = String.fromCharCode(10)
 let pluginCtx
+let desktopLeaseDispose
 const modelIdFromPath = path => String(path || '').split('/').pop().replace(/-\d{5}-of-\d{5}(?=\.gguf$)/i, '').replace(/\.gguf$/i, '')
 const card = 'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)'
 const muted = 'text-sm text-(--ui-text-secondary)'
@@ -28,6 +29,34 @@ const themeColorScheme = () => {
 const themedSelect = () => ({ colorScheme: themeColorScheme(), backgroundColor: 'var(--ui-bg-secondary)', color: 'var(--ui-text-primary)' })
 const themedOption = { backgroundColor: 'var(--ui-bg-elevated)', color: 'var(--ui-text-primary)' }
 const api = (path, options) => pluginCtx.rest(path, options)
+
+function startDesktopLease(ctx) {
+  const clientId = globalThis.crypto?.randomUUID?.() || `desktop-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  let stopped = false
+  let sending = false
+  let stopTimer = () => {}
+  let stopPagehide = () => {}
+  let stopBeforeUnload = () => {}
+  const touch = async () => {
+    if (stopped || sending) return
+    sending = true
+    try { await ctx.rest('/lifecycle/lease', { method: 'POST', body: { client_id: clientId } }) } catch { /* expiry handles backend/app shutdown races */ } finally { sending = false }
+  }
+  const release = () => {
+    if (stopped) return
+    stopped = true
+    stopTimer()
+    stopPagehide()
+    stopBeforeUnload()
+    ctx.rest('/lifecycle/lease', { method: 'DELETE', body: { client_id: clientId } }).catch(() => {})
+  }
+  stopTimer = ctx.setInterval(touch, 2500)
+  stopPagehide = ctx.addEventListener(window, 'pagehide', release, { once: true })
+  stopBeforeUnload = ctx.addEventListener(window, 'beforeunload', release, { once: true })
+  ctx.onDispose(release)
+  touch()
+  return release
+}
 
 const optionValueError = (option, value) => {
   const text = String(value || '')
@@ -74,10 +103,10 @@ function ServerLogPanel({ status, jobs }) {
   const [open, setOpen] = useState(true)
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
   const logQuery = useQuery({
-    queryKey: [ID, 'server-log'],
+    queryKey: [ID, 'activity-log'],
     queryFn: () => api('/logs?limit=250'),
     enabled: open,
-    refetchInterval: query => status?.server_running || serverJob?.status === 'running' ? 1500 : false,
+    refetchInterval: query => status?.server_running || serverJob?.status === 'running' ? 2500 : false,
     refetchOnWindowFocus: false
   })
   useEffect(() => {
@@ -95,8 +124,8 @@ function ServerLogPanel({ status, jobs }) {
     el.scrollTop = el.scrollHeight
   }, [lines, logQuery.error, open])
   return jsxs('section', { className: 'relative mt-3 overflow-hidden rounded-md border border(--ui-stroke-secondary)', 'aria-labelledby': 'llama-server-log-title', children: [
-    jsxs('div', { className: 'flex items-center justify-between gap-3 bg(--ui-bg-tertiary) px-3 py-2', children: [jsx('h2', { id: 'llama-server-log-title', className: 'text-xs font-medium text(--ui-text-primary)', children: 'llama-server log' }), jsxs('div', { className: 'flex items-center gap-2', children: [open ? jsx('button', { className: 'text-xs text(--ui-text-secondary) hover:text(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] })] }),
-    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama-server log', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : 'llama-server log가 아직 없습니다.' }) : null
+    jsxs('div', { className: 'flex items-center justify-between gap-3 bg(--ui-bg-tertiary) px-3 py-2', children: [jsx('h2', { id: 'llama-server-log-title', className: 'text-xs font-medium text(--ui-text-primary)', children: '통합 로그' }), jsxs('div', { className: 'flex items-center gap-2', children: [open ? jsx('button', { className: 'text-xs text(--ui-text-secondary) hover:text(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] })] }),
+    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama.cpp 통합 로그', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : '통합 로그가 아직 없습니다.' }) : null
   ] })
 }
 
@@ -114,6 +143,56 @@ function UnexpectedExitPanel({ diagnostic }) {
   return jsxs('section', { className: 'mt-3 overflow-hidden rounded-md border border-(--dt-destructive)/50 bg-(--dt-destructive)/10', role: 'alert', 'aria-labelledby': 'llama-server-exit-title', children: [
     jsx('h2', { id: 'llama-server-exit-title', className: 'px-3 py-2 text-xs font-medium text-(--dt-destructive)', children: '최근 예기치 않은 llama-server 종료' }),
     jsx('pre', { className: 'max-h-52 select-text cursor-text overflow-auto whitespace-pre-wrap break-all border-t border-(--dt-destructive)/30 px-3 py-2 font-mono text-[11px] leading-4 text-(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, children: lines.join(LOG_NEWLINE) })
+  ] })
+}
+
+function ExecutionProfileRow({ role, label, auxRole, status, onRefresh }) {
+  const profile = status?.profiles?.[role] || {}
+  const [runtimeKind, setRuntimeKind] = useState(profile.runtime_kind || 'official')
+  const [modelId, setModelId] = useState(profile.model_id || '')
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+  const models = status?.profile_model_options || []
+  useEffect(() => { setRuntimeKind(profile.runtime_kind || 'official'); setModelId(profile.model_id || '') }, [profile.runtime_kind, profile.model_id])
+  const save = async () => {
+    setSaving(true); setMessage('')
+    try {
+      await api(`/profiles/${role}`, { method: 'PUT', body: { runtime_kind: runtimeKind, model_id: modelId } })
+      await onRefresh()
+      setMessage('저장됨')
+    } catch (cause) { setMessage(`저장 실패: ${cause?.message || String(cause)}`) } finally { setSaving(false) }
+  }
+  return jsxs('div', { className: 'flex flex-wrap items-center gap-2 border-b border-(--ui-stroke-secondary) py-2 last:border-0', children: [
+    jsxs('div', { className: 'w-20 shrink-0', children: [jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: label }), jsx('p', { className: 'mt-0.5 font-mono text-[10px] text-(--ui-text-tertiary)', children: profile.logical_model || `${role}-local` })] }),
+    auxRole ? jsx('select', { className: compactInput, style: { ...themedSelect(), width: '7rem' }, value: 'compress', disabled: true, 'aria-label': 'Aux model 역할', children: jsx('option', { style: themedOption, value: 'compress', children: 'compress' }) }) : null,
+    jsx('select', { className: compactInput, style: { ...themedSelect(), width: '8rem' }, value: runtimeKind, 'aria-label': `${label} runtime`, onChange: event => setRuntimeKind(event.target.value), children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }),
+    jsx('select', { className: compactInput, style: { ...themedSelect(), minWidth: '12rem', flex: '1 1 14rem' }, value: modelId, 'aria-label': `${label} model`, onChange: event => setModelId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: '모델 선택' }), ...models.map(model => jsx('option', { style: themedOption, value: model.id, children: model.label }, model.id))] }),
+    jsxs('div', { className: 'flex items-center gap-2', children: [jsx('button', { className: compactPrimary, disabled: saving || !modelId, onClick: save, children: saving ? '저장 중…' : '저장' }), message ? jsx('span', { className: `text-[11px] ${message.startsWith('저장 실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-tertiary)'}`, role: 'status', children: message }) : null] })
+  ] })
+}
+
+function ExecutionProfilesPanel({ status, onRefresh }) {
+  return jsxs('section', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) p-3', 'aria-labelledby': 'llamacpp-profiles-title', children: [
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-2', children: [jsx('div', { children: [jsx('h2', { id: 'llamacpp-profiles-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Main + Aux model' }), jsx('p', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: 'Aux 역할은 현재 compress만 지원하며, 16GB VRAM에서 한 worker를 교대 사용합니다.' })] }), jsx(Badge, { children: 'single worker' })] }),
+    jsxs('div', { className: 'mt-2', children: [jsx(ExecutionProfileRow, { role: 'main', label: 'Main', status, onRefresh }), jsx(ExecutionProfileRow, { role: 'compression', label: 'Aux model', auxRole: true, status, onRefresh })] })
+  ] })
+}
+
+function CoordinatorStatusPanel({ status }) {
+  const coordinator = status?.coordinator || {}
+  return jsxs('section', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) p-3', 'aria-labelledby': 'llamacpp-coordinator-title', children: [
+    jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
+      jsx('h2', { id: 'llamacpp-coordinator-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Singleton proxy' }),
+      jsx(Badge, { tone: coordinator.ok ? 'good' : 'warn', children: coordinator.ok ? 'running' : 'unavailable' })
+    ] }),
+    jsxs('dl', { className: 'mt-3 grid gap-3 text-xs sm:grid-cols-5', children: [
+      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Coordinator' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: coordinator.pid ? `PID ${coordinator.pid} · :${coordinator.port}` : `:${coordinator.port || 18380}` })] }),
+      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'VRAM 정책' }), jsx('dd', { className: 'mt-1 text-(--ui-text-secondary)', children: status?.execution_mode === 'exclusive_swap' ? 'Exclusive swap' : status?.execution_mode || 'Exclusive swap' })] }),
+      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '전환 상태' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: `${status?.execution?.active_role || '-'} · ${status?.execution?.transition_phase || 'IDLE'}` })] }),
+      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Main queue' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: `${status?.execution?.queued_main_requests || 0} queued · ${status?.execution?.active_main_requests || 0} active` })] }),
+      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '요청 취소' }), jsx('dd', { className: 'mt-1 text-(--ui-text-secondary)', children: coordinator.cancellation_propagation ? '응답 중단 시 upstream 요청도 종료' : '확인되지 않음' })] })
+    ] }),
+    jsx('p', { className: 'mt-3 text-xs text-(--ui-text-tertiary)', children: `여러 Hermes Desktop이 coordinator 하나를 공유합니다. 마지막 Desktop 종료 후 ${status?.coordinator?.desktop_clients ?? 0}개 lease가 만료되면 worker와 coordinator도 종료됩니다.` })
   ] })
 }
 
@@ -140,6 +219,8 @@ function RuntimeCard({ status, jobs, onRefresh }) {
     jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsx('div', { className: 'text-right', children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: activeKind === 'prism_ml' ? 'Prism-ML runtime' : 'official runtime' }), jsx('p', { className: 'font-mono text-sm text-(--ui-text-primary)', children: status?.runtime_version || '미설치' })] })] }),
     jsxs('div', { className: 'mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]', children: [jsx('select', { className: input, style: themedSelect(), value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: changeRuntime, children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), jsxs('div', { className: 'flex flex-wrap gap-2', children: [jsx('button', { className: button, disabled: runtimeBusy, onClick: openFolder, children: '열기' }), requestedKind === activeKind ? null : jsx('button', { className: primary, disabled: runtimeBusy || serverBusy || !available.installed, onClick: () => useRuntime(requestedKind), children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: primary, disabled: runtimeBusy || serverBusy || (Boolean(available.version) && !available.update_available), title: available.version && available.latest_version ? `현재 ${available.version} · GitHub 최신 ${available.latest_version}` : undefined, onClick: install, children: requestedKind === 'prism_ml' ? (available.version ? (available.release_check_error ? 'Prism-ML 확인 실패' : (available.update_available ? 'Prism-ML 업데이트' : 'Prism-ML 최신')) : 'Prism-ML 다운로드') : (available.version ? (available.release_check_error ? 'official 확인 실패' : (available.update_available ? 'official 업데이트' : 'official 최신')) : 'official 다운로드') })] })] }),
     jsxs('div', { className: 'mt-4 grid gap-3 border-t border-(--ui-stroke-secondary) pt-4 sm:grid-cols-3', children: [jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'backend' }), jsx('p', { className: 'mt-1 font-mono text-sm', children: activeKind === 'prism_ml' ? 'Prism-ML' : 'official' })] }), jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: '활성 모델' }), jsx('p', { className: 'mt-1 truncate font-mono text-sm', title: activeModel?.id, children: activeModel?.id || '선택되지 않음' })] }), jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'server' }), jsxs('div', { className: 'mt-1 flex items-center gap-2', children: [jsx(Badge, { tone: status?.server_running ? 'good' : 'warn', children: status?.server_running ? 'running' : 'stopped' }), serverActive ? jsx('button', { className: compactDanger, disabled: runtimeBusy, onClick: () => serverAction('stop'), children: '중지' }) : jsx('button', { className: compactPrimary, disabled: runtimeBusy || !status?.runtime_installed || !status?.active_model_id, onClick: () => serverAction('start'), children: '시작' })] })] })] }),
+    jsx(ExecutionProfilesPanel, { status, onRefresh }),
+    jsx(CoordinatorStatusPanel, { status }),
     message ? jsx('p', { className: `mt-3 text-xs ${message.includes('실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
     jsx(JobProgress, { job: runtimeJob }), jsx(JobProgress, { job: serverJob }), jsx(UnexpectedExitPanel, { diagnostic: status?.last_unexpected_exit }), jsx(ServerLogPanel, { status, jobs })
   ] })
@@ -451,6 +532,8 @@ export default {
   defaultEnabled: true,
   register(ctx) {
     pluginCtx = ctx
+    desktopLeaseDispose?.()
+    desktopLeaseDispose = startDesktopLease(ctx)
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: '/llamacpp' }, render: () => jsx(Page, {}) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/llamacpp', label: 'llama.cpp', codicon: 'server-process' } }
