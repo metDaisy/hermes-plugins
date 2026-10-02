@@ -1,4 +1,4 @@
 name: llamacpp
-version: 0.3.0
-description: Core-native control panel for Hermes Local Models and role assignments.
+version: 0.2.41
+description: Unified llama.cpp manager with official and Prism-ML backends.
 kind: standalone
