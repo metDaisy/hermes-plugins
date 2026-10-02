@@ -150,8 +150,8 @@ _preset_store: PresetStore | None = None
 _preset_store_path: Path | None = None
 _official_runtime_service: OfficialRuntimeService | None = None
 _official_runtime_root: Path | None = None
-_prism_release_cache: tuple[float, dict[str, Any]] | None = None
-_prism_release_cache_lock = threading.RLock()
+_prism_runtime_service: PrismRuntimeInstaller | None = None
+_prism_runtime_root: Path | None = None
 _endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BEGIN, CUSTOM_ENDPOINT_END)
 
 
@@ -375,36 +375,11 @@ def _latest_official_release() -> dict[str, Any]:
 
 
 def _latest_prism_release() -> dict[str, Any]:
-    global _prism_release_cache
-    now = time.monotonic()
-    with _prism_release_cache_lock:
-        if _prism_release_cache and now - _prism_release_cache[0] < 300:
-            return dict(_prism_release_cache[1])
-        try:
-            from .application.prism_runtime import PrismRuntimeInstaller
-        except ImportError:
-            from application.prism_runtime import PrismRuntimeInstaller
-        try:
-            tag, cuda_tag = PrismRuntimeInstaller.release_metadata_from_text(
-                _http_text("https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/setup.ps1")
-            )
-            backend = "cuda" if _backend() == "cuda" else "cpu"
-            asset = (
-                f"llama-{tag}-bin-win-cuda-{cuda_tag}-x64.zip"
-                if backend == "cuda" else f"llama-{tag}-bin-win-cpu-x64.zip"
-            )
-            release = _http_json(f"https://api.github.com/repos/PrismML-Eng/llama.cpp/releases/tags/{tag}")
-            assets = {
-                str(item.get("name") or "") for item in release.get("assets", [])
-                if isinstance(item, dict)
-            } if isinstance(release, dict) else set()
-            if asset not in assets:
-                raise RuntimeError(f"GitHub release {tag} has no compatible {backend} asset")
-            result = {"tag": tag, "backend": backend, "cuda_tag": cuda_tag, "asset": asset}
-        except Exception as exc:  # noqa: BLE001
-            result = {"tag": None, "error": str(exc)}
-        _prism_release_cache = (now, result)
-        return dict(result)
+    try:
+        tag, backend = _prism_installer().latest_target(_backend())
+        return {"tag": tag, "backend": backend}
+    except Exception as exc:  # noqa: BLE001
+        return {"tag": None, "error": str(exc)}
 
 
 def _installed_target() -> tuple[str, str] | None:
@@ -1156,29 +1131,34 @@ def _download_archive(url: str, destination: Path, job: dict[str, Any], floor: i
 
 
 def _prism_installer() -> PrismRuntimeInstaller:
-    def clone(git: str, url: str, destination: Path) -> int:
-        result = subprocess.run(
-            [git, "clone", "--depth", "1", url, str(destination)], capture_output=True,
-            check=False, text=True, encoding="utf-8", errors="replace", timeout=180,
+    global _prism_runtime_service, _prism_runtime_root
+    if _prism_runtime_service is None or _prism_runtime_root != PRISM_RUNTIME_ROOT:
+        _prism_runtime_service = PrismRuntimeInstaller(
+            root=PRISM_RUNTIME_ROOT,
+            load_state=_state,
+            save_state=_save_state,
+            release_loader=lambda: _http_json(
+                "https://api.github.com/repos/PrismML-Eng/llama.cpp/releases?per_page=100"
+            ),
+            backend_detector=_backend,
+            platform_name=platform.system,
+            architecture=platform.machine,
         )
-        return result.returncode
-
-    return PrismRuntimeInstaller(
-        PRISM_RUNTIME_ROOT, _state, _save_state, lambda: shutil.which("git"), clone, _backend,
-        _download_archive, OfficialRuntimeService.extract_archive,
-        lambda root: get_backend("prism_ml").resolve_executable(root),
-    )
+        _prism_runtime_root = PRISM_RUNTIME_ROOT
+    return _prism_runtime_service
 
 
 def _install_prism_runtime() -> dict[str, Any]:
-    job = _job("prism-runtime-install", "Prism-ML GitHub runtime 준비")
+    tag, backend = _prism_installer().latest_target(_backend(), force=True)
+    job = _job("prism-runtime-install", f"Prism-ML {tag} ({backend})")
 
     def run() -> None:
-        tag, _ = _prism_installer().install(job)
+        _prism_installer().install(tag, backend, job, _download_archive)
         _finish(job, f"Prism-ML {tag} ready")
 
     _spawn(job, run, "prism-runtime-install")
-    return {"job_id":job["job_id"],"kind":"prism_ml","repository":"PrismML-Eng/Bonsai-demo"}
+    return {"job_id": job["job_id"], "kind": "prism_ml", "tag": tag,
+            "backend": backend, "repository": "PrismML-Eng/llama.cpp"}
 
 
 

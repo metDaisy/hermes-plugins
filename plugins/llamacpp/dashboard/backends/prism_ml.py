@@ -1,4 +1,4 @@
-"""Adapter for Prism-ML's llama.cpp fork and Bonsai runtime layout."""
+"""Adapter for Prism-ML's official llama.cpp fork releases."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,8 +14,8 @@ except ImportError:
 class PrismMlBackend:
     key = "prism_ml"
     label = "Prism-ML llama.cpp"
-    description = "PrismML-Eng/Bonsai-demo compatible llama-server"
-    repository = "https://github.com/PrismML-Eng/Bonsai-demo"
+    description = "Official PrismML-Eng/llama.cpp release runtime"
+    repository = "https://github.com/PrismML-Eng/llama.cpp"
 
     def managed_root(self, machine_root: Path) -> Path:
         return machine_root / "runtimes" / "prism-ml"

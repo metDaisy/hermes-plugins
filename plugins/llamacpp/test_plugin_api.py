@@ -1204,6 +1204,11 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("분리 로그", source)
         self.assertIn("/lifecycle/lease", source)
         self.assertIn("pagehide", source)
+        runtime_card = source[source.index("function RuntimeCard"):source.index("function ParameterSummary")]
+        self.assertNotIn("openFolder", runtime_card)
+        self.assertNotIn("children: '열기'", runtime_card)
+        self.assertIn("w-44 shrink-0", runtime_card)
+        self.assertLess(runtime_card.index("jsx(ServerLogPanel"), runtime_card.index("jsx(CoordinatorStatusPanel"))
 
     def test_custom_runtime_resolves_directory_and_explicit_executable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

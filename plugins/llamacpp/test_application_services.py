@@ -458,7 +458,7 @@ class ModelRouteAdapterTests(unittest.TestCase):
 
 
 class PrismRuntimeInstallerTests(unittest.TestCase):
-    def test_installs_cpu_runtime_from_bonsai_setup_metadata(self) -> None:
+    def test_resolves_latest_complete_release_and_installs_versioned_cpu_runtime(self) -> None:
         from dashboard.application.prism_runtime import PrismRuntimeInstaller
 
         import tempfile
@@ -472,25 +472,26 @@ class PrismRuntimeInstallerTests(unittest.TestCase):
                 package.writestr("llama-server.exe", b"server")
             state: dict[str, object] = {}
 
-            def clone(_git, _url, destination):
-                (destination / "setup.ps1").parent.mkdir(parents=True)
-                (destination / "setup.ps1").write_text('$ReleaseTag = "b123"\n$CudaTag = "13.3"\n', encoding="utf-8")
-                return 0
-
             installer = PrismRuntimeInstaller(
                 root=root, load_state=lambda: state, save_state=lambda value: state.update(value),
-                find_git=lambda: "git", clone=clone, backend_detector=lambda: "cpu",
-                download=lambda _url, destination, *_: destination.write_bytes(source.read_bytes()),
-                extract=lambda archive, destination: zipfile.ZipFile(archive).extractall(destination),
-                resolve_executable=lambda path: path / "bin" / "cpu" / "llama-server.exe",
+                release_loader=lambda: [
+                    {"tag_name": "prism-b123-aaaaaaa", "assets": [{"name": "llama-prism-b123-aaaaaaa-bin-win-cpu-x64.zip"}]},
+                    {"tag_name": "prism-b124-bbbbbbb", "assets": [{"name": "unrelated.zip"}]},
+                ],
+                backend_detector=lambda: "cpu", platform_name=lambda: "windows", architecture=lambda: "x64",
             )
             job = {"job_id": "job"}
 
-            tag, backend = installer.install(job)
+            self.assertEqual(installer.latest_target(), ("prism-b123-aaaaaaa", "cpu"))
+            tag, backend = installer.install(
+                "prism-b123-aaaaaaa", "cpu", job,
+                download=lambda _url, destination, *_: destination.write_bytes(source.read_bytes()),
+            )
 
-            self.assertEqual((tag, backend), ("b123", "cpu"))
-            self.assertEqual(state["prism_release_tag"], "b123")
-            self.assertTrue((root / "bin" / "cpu" / "llama-server.exe").is_file())
+            self.assertEqual((tag, backend), ("prism-b123-aaaaaaa", "cpu"))
+            self.assertEqual(state["prism_release_tag"], "prism-b123-aaaaaaa")
+            self.assertTrue((root / "prism-b123-aaaaaaa" / "cpu" / "llama-server.exe").is_file())
+            self.assertTrue((root / "prism-b123-aaaaaaa" / "cpu" / "manifest.json").is_file())
 
     def test_preserves_locked_previous_runtime_and_installs_to_fallback_path(self) -> None:
         from dashboard.application.prism_runtime import PrismRuntimeInstaller
@@ -509,17 +510,10 @@ class PrismRuntimeInstallerTests(unittest.TestCase):
                 package.writestr("llama-server.exe", b"server")
             state: dict[str, object] = {}
 
-            def clone(_git, _url, destination):
-                (destination / "setup.ps1").parent.mkdir(parents=True)
-                (destination / "setup.ps1").write_text('$ReleaseTag = "prism-b124"\n$CudaTag = "13.3"\n', encoding="utf-8")
-                return 0
-
             installer = PrismRuntimeInstaller(
                 root=root, load_state=lambda: state, save_state=lambda value: state.update(value),
-                find_git=lambda: "git", clone=clone, backend_detector=lambda: "cpu",
-                download=lambda _url, destination, *_: destination.write_bytes(source.read_bytes()),
-                extract=lambda archive, destination: zipfile.ZipFile(archive).extractall(destination),
-                resolve_executable=lambda path: path / "bin" / "cpu" / "llama-server.exe",
+                release_loader=lambda: [], backend_detector=lambda: "cpu",
+                platform_name=lambda: "windows", architecture=lambda: "x64",
             )
             original_rmtree = shutil.rmtree
 
@@ -529,22 +523,29 @@ class PrismRuntimeInstallerTests(unittest.TestCase):
                 return original_rmtree(path, *args, **kwargs)
 
             with patch.object(shutil, "rmtree", side_effect=locked_rmtree):
-                installer.install({"job_id": "job"})
+                installer.install(
+                    "prism-b124-bbbbbbb", "cpu", {"job_id": "job"},
+                    download=lambda _url, destination, *_: destination.write_bytes(source.read_bytes()),
+                )
 
             installed = Path(str(state["runtime_path"]))
             self.assertNotEqual(installed, root.resolve())
-            self.assertTrue((installed / "bin" / "cpu" / "llama-server.exe").is_file())
+            self.assertTrue((installed / "llama-server.exe").is_file())
             self.assertTrue((root / ".git" / "objects" / "pack" / "locked.idx").is_file())
 
-    def test_parses_remote_setup_metadata_without_cloning(self) -> None:
+    def test_selects_cuda_assets_directly_from_prism_llamacpp_release(self) -> None:
         from dashboard.application.prism_runtime import PrismRuntimeInstaller
 
-        self.assertEqual(
-            PrismRuntimeInstaller.release_metadata_from_text(
-                '$ReleaseTag = "prism-b10743-adfffbe"\n$CudaTag = "13.3"\n'
-            ),
-            ("prism-b10743-adfffbe", "13.3"),
+        installer = PrismRuntimeInstaller(
+            root=Path("runtime"), load_state=lambda: {}, save_state=lambda _value: None,
+            release_loader=lambda: [], backend_detector=lambda: "cuda",
+            platform_name=lambda: "windows", architecture=lambda: "x64",
         )
+
+        self.assertEqual(installer.asset_names("prism-b10743-adfffbe", "cuda"), [
+            "llama-prism-b10743-adfffbe-bin-win-cuda-12.4-x64.zip",
+            "cudart-llama-bin-win-cuda-12.4-x64.zip",
+        ])
 
 
 class RuntimeInspectorTests(unittest.TestCase):
