@@ -51,6 +51,22 @@ class LlamaCppManagerTests(unittest.TestCase):
         if "register_tool" not in registration:
             self.assertNotIn("provides_tools:", manifest)
 
+    def test_hf_cache_removal_uses_typed_repository_id(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch.object(api.shutil, "which", return_value="hf"), \
+                patch.object(api.subprocess, "run", return_value=completed) as run:
+            removed = api._remove_hf_cache("Jackrong/Qwopus3.8-27B-Flash-GGUF")
+
+        self.assertTrue(removed)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "hf", "cache", "rm",
+                "model/Jackrong/Qwopus3.8-27B-Flash-GGUF",
+                "--yes", "--format", "quiet",
+            ],
+        )
+
     def test_coordinator_start_lease_prevents_duplicate_spawn(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -697,6 +713,33 @@ class LlamaCppManagerTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertEqual(calls, ["compression", "main"])
 
+    def test_aux_only_compression_stays_loaded_after_stream_finishes(self) -> None:
+        from dashboard import inference_proxy
+
+        calls: list[str] = []
+
+        class Backend:
+            @staticmethod
+            def update_execution_queue(_queued: int, _active: int) -> None:
+                return
+
+            @staticmethod
+            def execution_role_configured(role: str) -> bool:
+                return role == "compression"
+
+            @staticmethod
+            def ensure_execution_role(role: str) -> None:
+                calls.append(role)
+
+        async def exercise() -> None:
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()):
+                finalize = await inference_proxy._begin_execution("compression")
+                self.assertIsNotNone(finalize)
+                await finalize()
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, ["compression"])
+
     def test_cancelled_compression_finalizer_restores_main_before_releasing_transition(self) -> None:
         from dashboard import inference_proxy
 
@@ -905,12 +948,12 @@ class LlamaCppManagerTests(unittest.TestCase):
             state_path = root / "state.json"
             activity_path = root / "logs" / "activity.log"
             state_path.write_text(json.dumps({
-                "models": {"large": {}, "small": {}},
+                "models": {"large": {}, "Ternary-Bonsai-small": {}},
                 "active_model_id": "large",
                 "runtime_kind": "official",
                 "execution_profiles": {
                     "main": {"runtime_kind": "official", "model_id": "large", "preset_id": ""},
-                    "compression": {"runtime_kind": "prism_ml", "model_id": "small", "preset_id": ""},
+                    "compression": {"runtime_kind": "prism_ml", "model_id": "Ternary-Bonsai-small", "preset_id": ""},
                 },
             }), encoding="utf-8")
             started_logs: list[Path] = []
@@ -931,7 +974,7 @@ class LlamaCppManagerTests(unittest.TestCase):
                 state = api._state()
 
             self.assertEqual(result["role"], "compression")
-            self.assertEqual(state["active_model_id"], "small")
+            self.assertEqual(state["active_model_id"], "Ternary-Bonsai-small")
             self.assertEqual(state["runtime_kind"], "prism_ml")
             self.assertEqual(state["active_role"], "compression")
             self.assertEqual(state["transition_phase"], "COMPRESSING")
@@ -975,6 +1018,42 @@ class LlamaCppManagerTests(unittest.TestCase):
 
             self.assertTrue(started.is_set())
             self.assertEqual(completed[0]["model_id"], "new")
+
+    def test_clearing_the_last_execution_profile_unregisters_the_endpoint(self) -> None:
+        state = {
+            "custom_endpoint": {"key": "llamacpp-local"},
+            "execution_profiles": {
+                "compression": {"runtime_kind": "official", "model_id": "small", "preset_id": ""},
+            },
+        }
+        events: list[str] = []
+
+        class Service:
+            @staticmethod
+            def save(_role: str, _body: dict[str, object]):
+                state["execution_profiles"] = {}
+                return {
+                    "execution_mode": "exclusive_swap",
+                    "profiles": {
+                        "main": {"configured": False},
+                        "compression": {"configured": False},
+                    },
+                }
+
+        def mutate(callback):
+            callback(state)
+            return state
+
+        with patch.object(api, "_state", side_effect=lambda: json.loads(json.dumps(state))), \
+                patch.object(api, "_mutate_state", side_effect=mutate), \
+                patch.object(api, "_execution_profiles_service", return_value=Service()), \
+                patch.object(api, "_unregister_custom_endpoint", side_effect=lambda: events.append("unregister")), \
+                patch.object(api, "_sync_execution_profile_endpoint", side_effect=AssertionError("must not sync an empty endpoint")):
+            result = api.save_execution_profile("compression", {"model_id": ""})
+
+        self.assertFalse(result["profiles"]["compression"]["configured"])
+        self.assertEqual(events, ["unregister"])
+        self.assertIsNone(state["custom_endpoint"])
 
     def test_failed_profile_endpoint_sync_rolls_back_only_the_written_role(self) -> None:
         state = {
@@ -1239,12 +1318,27 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("Singleton proxy", source)
         self.assertIn("응답 중단 시 upstream 요청도 종료", source)
         self.assertIn("Exclusive swap", source)
-        self.assertIn("Main + Aux model", source)
-        self.assertIn("Aux 역할은 현재 compress만 지원", source)
-        self.assertIn("label: 'Aux model'", source)
+        self.assertIn("Main", source)
+        self.assertIn("Auxiliary", source)
+        self.assertIn("Main이 선택되어 있으면 Main을 우선 로드합니다", source)
         self.assertIn("value: 'compress'", source)
-        self.assertIn("`/profiles/${role}`", source)
-        self.assertIn("통합 로그", source)
+        self.assertNotIn("`/profiles/${role}/start`", source)
+        self.assertIn("api('/profiles/start'", source)
+        self.assertIn("api(`/profiles/${role}`", source)
+        self.assertIn("children: '사용 안 함'", source)
+        self.assertIn("const serverRunning = Boolean(status?.server_running)", source)
+        self.assertIn("disabled: serverRunning || saving", source)
+        self.assertIn("'서버 시작'", source)
+        self.assertEqual(source.count("'서버 시작'"), 1)
+        profile_row = source[source.index("function ExecutionProfileRow"):source.index("function ExecutionProfilesPanel")]
+        self.assertNotIn("children: '시작'", profile_row)
+        self.assertNotIn("children: '중지'", profile_row)
+        self.assertIn("modelId.startsWith('Ternary-Bonsai')", source)
+        self.assertNotIn("compressionFallback", source)
+        self.assertIn("disabled: starting || (!mainModelId && !compressionModelId)", source)
+        log_panel = source[source.index("function ServerLogPanel"):source.index("function UnexpectedExitPanel")]
+        self.assertNotIn("통합 로그", log_panel)
+        self.assertIn("'aria-label': 'llama.cpp 로그'", log_panel)
         self.assertIn("api('/logs?limit=250')", source)
         self.assertNotIn("분리 로그", source)
         self.assertIn("/lifecycle/lease", source)
@@ -1254,8 +1348,71 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("children: '열기'", runtime_card)
         self.assertIn("width: '11rem', maxWidth: '11rem', flex: '0 0 11rem'", runtime_card)
         self.assertNotIn("overflow-x-auto", runtime_card)
-        self.assertIn("'Prism-ML 업데이트'", runtime_card)
+        self.assertIn("children: '업데이트'", runtime_card)
+        self.assertNotIn("children: 'backend'", runtime_card)
+        self.assertNotIn("children: '활성 모델'", runtime_card)
+        self.assertNotIn("children: 'server'", runtime_card)
         self.assertLess(runtime_card.index("jsx(ServerLogPanel"), runtime_card.index("jsx(CoordinatorStatusPanel"))
+
+    def test_model_inventory_is_runtime_independent_and_marks_prism_models(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+        downloaded = source[source.index("function DownloadedModelRow"):source.index("function TabBar")]
+        self.assertIn("jsx(PrismOnlyHint, { model: model.repo_id })", downloaded)
+        self.assertNotIn("HF cache inventory", downloaded)
+        self.assertNotIn("아직 plugin에 등록되지 않음", downloaded)
+        self.assertIn("title: 'Prism-ML 전용'", source)
+        self.assertIn("'aria-label': 'Prism-ML 전용 모델 안내'", source)
+
+        page = source[source.index("function Page"):source.index("export default")]
+        self.assertIn("queryKey: [ID, 'hf-models']", page)
+        self.assertNotIn("Prism-ML 호환 다운로드 모델이 없습니다.", page)
+        self.assertIn("runtime 종류와 관계없이 모두 표시합니다.", page)
+
+    def test_model_cards_use_inline_download_panel_and_unregister_action(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+        execution = source[source.index("function ExecutionProfilesPanel"):source.index("function CoordinatorStatusPanel")]
+        self.assertIn("role: 'main'", execution)
+        self.assertIn("role: 'compression'", execution)
+        self.assertNotIn("activeTab", execution)
+
+        model_row = source[source.index("function ModelRow"):source.index("function SettingsAdder")]
+        self.assertIn("children: 'parameter preset'", model_row)
+        self.assertIn("children: '적용'", model_row)
+        self.assertIn("children: '×'", model_row)
+        self.assertIn("disabled: busy || (status?.server_running && isActive)", model_row)
+        self.assertNotIn("absolute right-0 top-4", model_row)
+        header = model_row[model_row.index("jsxs('div', { className: 'flex flex-wrap items-center"):model_row.index("jsx(ParameterSummary")]
+        self.assertIn("children: '×'", header)
+        self.assertNotIn("const activate", model_row)
+        self.assertNotIn("api('/activate'", model_row)
+        self.assertNotIn("children: '선택'", model_row)
+        self.assertNotIn("children: '선택됨'", model_row)
+        self.assertIn("/registration`, { method: 'DELETE'", model_row)
+        self.assertNotIn("window.confirm", model_row)
+        self.assertNotIn("children: '삭제'", model_row)
+        self.assertNotIn("대기 중", model_row)
+        self.assertIn("const compactSize = String(model.size_label || 'unknown').replace(/\\s+/g, '')", model_row)
+        self.assertIn("children: '|'", header)
+        self.assertIn("`크기(${compactSize})`", model_row)
+        self.assertIn("`상태(${activeState})`", model_row)
+        self.assertNotIn("용량 -", model_row)
+        self.assertNotIn("상태 -", model_row)
+
+        wizard = source[source.index("function RegisterWizard"):source.index("function DownloadedModelRow")]
+        self.assertNotIn("fixed inset-0", wizard)
+        self.assertIn("aria-labelledby': 'llama-wizard-title'", wizard)
+        self.assertIn("'data-testid': 'download-actions'", wizard)
+        self.assertIn("children: 'HF 검색'", wizard)
+        self.assertIn("children: '선택 항목 다운로드'", wizard)
+        self.assertNotIn("children: '취소'", wizard)
+
+        page = source[source.index("function Page"):source.index("export default")]
+        models_branch = page[page.index("tab === 'models'"):page.index("tab === 'parameters'")]
+        self.assertIn("wizard ? jsx(RegisterWizard", models_branch)
+        self.assertLess(models_branch.index("wizard ? jsx(RegisterWizard"), models_branch.index("models.length ? models.map"))
+        self.assertNotIn("wizard ? jsx(RegisterWizard", page[page.index("tab === 'parameters'"):])
 
     def test_custom_runtime_resolves_directory_and_explicit_executable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -1413,8 +1570,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("model_presets", source)
         self.assertIn("children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택'", source)
         self.assertIn("/presets/${encodeURIComponent(selectedPresetId)}/apply", source)
-        self.assertIn("const loaded = Boolean(status?.server_running && isActive)", source)
-        self.assertIn("children: activeState", source)
+        self.assertIn("const activeState = status?.server_running && isActive ? 'running' : 'stopped'", source)
+        self.assertIn("children: `상태(${activeState})`", source)
         self.assertNotIn("children: '소스'", source)
         self.assertNotIn("server 사용 중", source)
 
@@ -1524,11 +1681,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'presets'] })", desktop_source)
         self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'status'] })", desktop_source)
         self.assertIn("children: preset.name", desktop_source)
-        self.assertIn(
-            "jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),\n"
-            "        jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [",
-            desktop_source,
-        )
+        model_row = desktop_source[desktop_source.index("function ModelRow"):desktop_source.index("function SettingsAdder")]
+        self.assertLess(model_row.index("jsx(ParameterSummary"), model_row.index("'data-testid': 'model-card-presets'"))
 
 
     def test_prism_profile_resolves_managed_runtime_after_global_official_selection(self) -> None:
@@ -1579,16 +1733,24 @@ class LlamaCppManagerTests(unittest.TestCase):
                 patch.dict(sys.modules, {"psutil": fake_psutil}):
             self.assertFalse(api._is_server_running())
 
-    def test_activity_log_tail_reads_unified_execution_log(self) -> None:
+    def test_activity_log_tail_projects_unified_execution_log_and_retains_raw_evidence(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as raw_root:
             log_path = Path(raw_root) / "activity.log"
-            log_path.write_text("[main] one\n[compression] two\n", encoding="utf-8")
+            log_path.write_text(
+                "I srv spawning server instance with name=main-local on port 19001\n"
+                "[19001] slot prompt processing, n_tokens = 100, progress = 0.50, 25.0 tokens per second\n",
+                encoding="utf-8",
+            )
             with patch.object(api, "ACTIVITY_LOG_PATH", log_path):
                 result = api._server_log_tail(10)
 
-        self.assertEqual(result["lines"], ["[main] one", "[compression] two"])
+        self.assertEqual(result["lines"], [
+            "[Main] 모델 로딩 중",
+            "[Main] prompt 처리 50% · 100 tok · 25.0 tok/s",
+        ])
+        self.assertEqual(len(result["raw_lines"]), 2)
         self.assertEqual(result["role"], "activity")
 
     def test_desktop_lifecycle_contract_stops_coordinator_after_last_lease(self) -> None:

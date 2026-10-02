@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 ROLES = ("main", "compression")
-RUNTIMES = ("official", "prism_ml")
 LOGICAL_MODELS = {"main": "main-local", "compression": "compression-local"}
 
 
@@ -21,7 +20,7 @@ class ExecutionProfileService:
         stored = state.get("execution_profiles")
         profiles = dict(stored) if isinstance(stored, dict) else {}
         active_model = str(state.get("active_model_id") or "")
-        if "main" not in profiles and active_model:
+        if not isinstance(stored, dict) and "main" not in profiles and active_model:
             legacy_main = {
                 "runtime_kind": str(state.get("runtime_kind") or "official"),
                 "model_id": active_model,
@@ -42,19 +41,55 @@ class ExecutionProfileService:
                 persist(state)
                 self.save_state(state)
         normalized = {role: self._normalize(role, profiles.get(role)) for role in ROLES}
-        return {"execution_mode": "exclusive_swap", "profiles": normalized}
+        normalized_storage = {
+            role: {
+                "runtime_kind": profile["runtime_kind"],
+                "model_id": profile["model_id"],
+                "preset_id": profile["preset_id"],
+            }
+            for role, profile in normalized.items()
+            if profile["configured"]
+        }
+        if normalized_storage != profiles:
+            def persist_normalized(current: dict[str, Any]) -> None:
+                current["execution_mode"] = "exclusive_swap"
+                current["execution_profiles"] = normalized_storage
+
+            if self.mutate_state is not None:
+                self.mutate_state(persist_normalized)
+            else:
+                persist_normalized(state)
+                self.save_state(state)
+        current = self.load_state()
+        return {"execution_mode": str(current.get("execution_mode") or "exclusive_swap"),
+                "profiles": normalized}
 
     def save(self, role: str, body: dict[str, Any]) -> dict[str, Any]:
         role = str(role or "").strip().lower()
         if role not in ROLES:
             raise ValueError("role은 main 또는 compression이어야 합니다")
-        runtime_kind = str(body.get("runtime_kind") or "").strip().lower()
-        if runtime_kind not in RUNTIMES:
-            raise ValueError("runtime_kind는 official 또는 prism_ml이어야 합니다")
         model_id = str(body.get("model_id") or "").strip()
+        runtime_kind = self._runtime_for_model(model_id)
         state = self.load_state()
+        if not model_id:
+            def clear(current: dict[str, Any]) -> None:
+                stored = current.get("execution_profiles")
+                profiles = dict(stored) if isinstance(stored, dict) else {}
+                previous = profiles.pop(role, None)
+                previous_model = str(previous.get("model_id") or "") if isinstance(previous, dict) else ""
+                current["execution_mode"] = "exclusive_swap"
+                current["execution_profiles"] = profiles
+                if previous_model and current.get("active_model_id") == previous_model:
+                    current["active_model_id"] = None
+
+            if self.mutate_state is not None:
+                self.mutate_state(clear)
+            else:
+                clear(state)
+                self.save_state(state)
+            return self.snapshot()
         models = state.get("models") if isinstance(state.get("models"), dict) else {}
-        if not model_id or model_id not in models:
+        if model_id not in models:
             raise ValueError("등록된 model_id를 선택해야 합니다")
         if not self.accepts(runtime_kind, model_id):
             raise ValueError("선택한 모델은 해당 runtime과 호환되지 않습니다")
@@ -78,13 +113,17 @@ class ExecutionProfileService:
         return self.snapshot()
 
     @staticmethod
-    def _normalize(role: str, raw: Any) -> dict[str, Any]:
+    def _runtime_for_model(model_id: str) -> str:
+        return "prism_ml" if model_id.startswith("Ternary-Bonsai") else "official"
+
+    @classmethod
+    def _normalize(cls, role: str, raw: Any) -> dict[str, Any]:
         profile = raw if isinstance(raw, dict) else {}
         model_id = str(profile.get("model_id") or "")
         return {
             "role": role,
             "logical_model": LOGICAL_MODELS[role],
-            "runtime_kind": str(profile.get("runtime_kind") or "official"),
+            "runtime_kind": cls._runtime_for_model(model_id),
             "model_id": model_id,
             "preset_id": str(profile.get("preset_id") or ""),
             "configured": bool(model_id),

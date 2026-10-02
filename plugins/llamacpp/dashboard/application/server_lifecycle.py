@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+_PROCESS_LIFECYCLE_LOCK = threading.RLock()
+
+
 class ServerLifecycleService:
     """Keep server lifecycle state transitions consistent across callers."""
 
@@ -32,19 +35,21 @@ class ServerLifecycleService:
         self._unregister_endpoint = unregister_endpoint
         self._log_path = log_path
         self._mutate_state = mutate_state
+        self._lifecycle_lock = _PROCESS_LIFECYCLE_LOCK
 
     def stop(self, preserve_log: bool = False, keep_endpoint: bool = False) -> None:
-        state = self._load_state()
-        pid = state.get("pid")
-        if self._pid_alive(pid):
-            terminated = self._terminate(pid)
-            if terminated is False and self._pid_alive(pid):
-                raise RuntimeError("refusing to clear a live llama-server with unverified process identity")
-        self._clear_owned_state(state, pid, clear_endpoint=not keep_endpoint)
-        if not keep_endpoint:
-            self._unregister_endpoint()
-        if not preserve_log:
-            self._remove_log_when_released()
+        with self._lifecycle_lock:
+            state = self._load_state()
+            pid = state.get("pid")
+            if self._pid_alive(pid):
+                terminated = self._terminate(pid)
+                if terminated is False and self._pid_alive(pid):
+                    raise RuntimeError("refusing to clear a live llama-server with unverified process identity")
+            self._clear_owned_state(state, pid, clear_endpoint=not keep_endpoint)
+            if not keep_endpoint:
+                self._unregister_endpoint()
+            if not preserve_log:
+                self._remove_log_when_released()
 
     def _remove_log_when_released(self) -> None:
         """Avoid reporting a failed stop for Windows' short-lived file-handle race."""
@@ -60,10 +65,12 @@ class ServerLifecycleService:
     def watch(self, process: Any) -> None:
         def wait_for_exit() -> None:
             process.wait()
-            state = self._load_state()
-            if state.get("pid") != process.pid:
-                return
-            self._clear_owned_state(state, process.pid, clear_endpoint=False)
+            with self._lifecycle_lock:
+                state = self._load_state()
+                if state.get("pid") != process.pid:
+                    return
+                self._clear_owned_state(state, process.pid, clear_endpoint=True)
+                self._unregister_endpoint()
 
         threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
 
@@ -87,6 +94,9 @@ class ServerLifecycleService:
             current["worker_identity"] = None
             if clear_endpoint:
                 current["custom_endpoint"] = None
+                current["active_role"] = None
+                current["transition_phase"] = "IDLE"
+                current["transition_error"] = None
 
         if self._mutate_state is not None:
             self._mutate_state(clear)

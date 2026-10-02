@@ -99,6 +99,15 @@ function JobProgress({ job }) {
   ] })
 }
 
+function isPrismOnlyModel(value) {
+  return String(value || '').split('/').pop().startsWith('Ternary-Bonsai')
+}
+
+function PrismOnlyHint({ model }) {
+  if (!isPrismOnlyModel(model)) return null
+  return jsx('span', { className: 'inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-full border border-(--ui-stroke-secondary) text-[11px] font-semibold text-(--ui-text-secondary)', title: 'Prism-ML 전용', 'aria-label': 'Prism-ML 전용 모델 안내', tabIndex: 0, children: '?' })
+}
+
 function ServerLogPanel({ status, jobs }) {
   const [open, setOpen] = useState(true)
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
@@ -123,9 +132,9 @@ function ServerLogPanel({ status, jobs }) {
     if (!el) return
     el.scrollTop = el.scrollHeight
   }, [lines, logQuery.error, open])
-  return jsxs('section', { className: 'relative mt-3 overflow-hidden rounded-md border border(--ui-stroke-secondary)', 'aria-labelledby': 'llama-server-log-title', children: [
-    jsxs('div', { className: 'flex items-center justify-between gap-3 bg(--ui-bg-tertiary) px-3 py-2', children: [jsx('h2', { id: 'llama-server-log-title', className: 'text-xs font-medium text(--ui-text-primary)', children: '통합 로그' }), jsxs('div', { className: 'flex items-center gap-2', children: [open ? jsx('button', { className: 'text-xs text(--ui-text-secondary) hover:text(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] })] }),
-    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama.cpp 통합 로그', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : '통합 로그가 아직 없습니다.' }) : null
+  return jsxs('section', { className: 'relative mt-3 overflow-hidden rounded-md border border(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 로그', children: [
+    jsx('div', { className: 'flex items-center justify-end bg(--ui-bg-tertiary) px-3 py-2', children: jsxs('div', { className: 'flex items-center gap-2', children: [open ? jsx('button', { className: 'text-xs text(--ui-text-secondary) hover:text(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] }) }),
+    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama.cpp 로그', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : '로그가 아직 없습니다.' }) : null
   ] })
 }
 
@@ -146,35 +155,63 @@ function UnexpectedExitPanel({ diagnostic }) {
   ] })
 }
 
-function ExecutionProfileRow({ role, label, auxRole, status, onRefresh }) {
+function ExecutionProfileRow({ role, label, auxRole, status, modelId, onModelChange, saving }) {
   const profile = status?.profiles?.[role] || {}
-  const [runtimeKind, setRuntimeKind] = useState(profile.runtime_kind || 'official')
-  const [modelId, setModelId] = useState(profile.model_id || '')
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
   const models = status?.profile_model_options || []
-  useEffect(() => { setRuntimeKind(profile.runtime_kind || 'official'); setModelId(profile.model_id || '') }, [profile.runtime_kind, profile.model_id])
-  const save = async () => {
-    setSaving(true); setMessage('')
-    try {
-      await api(`/profiles/${role}`, { method: 'PUT', body: { runtime_kind: runtimeKind, model_id: modelId } })
-      await onRefresh()
-      setMessage('저장됨')
-    } catch (cause) { setMessage(`저장 실패: ${cause?.message || String(cause)}`) } finally { setSaving(false) }
-  }
+  const runtimeKind = modelId.startsWith('Ternary-Bonsai') ? 'prism_ml' : 'official'
+  const serverRunning = Boolean(status?.server_running)
+  const running = Boolean(serverRunning && status?.execution?.active_role === role && status?.active_model_id === modelId)
   return jsxs('div', { className: 'flex flex-wrap items-center gap-2 border-b border-(--ui-stroke-secondary) py-2 last:border-0', children: [
     jsxs('div', { className: 'w-20 shrink-0', children: [jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: label }), jsx('p', { className: 'mt-0.5 font-mono text-[10px] text-(--ui-text-tertiary)', children: profile.logical_model || `${role}-local` })] }),
-    auxRole ? jsx('select', { className: compactInput, style: { ...themedSelect(), width: '7rem' }, value: 'compress', disabled: true, 'aria-label': 'Aux model 역할', children: jsx('option', { style: themedOption, value: 'compress', children: 'compress' }) }) : null,
-    jsx('select', { className: compactInput, style: { ...themedSelect(), width: '8rem' }, value: runtimeKind, 'aria-label': `${label} runtime`, onChange: event => setRuntimeKind(event.target.value), children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }),
-    jsx('select', { className: compactInput, style: { ...themedSelect(), minWidth: '12rem', flex: '1 1 14rem' }, value: modelId, 'aria-label': `${label} model`, onChange: event => setModelId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: '모델 선택' }), ...models.map(model => jsx('option', { style: themedOption, value: model.id, children: model.label }, model.id))] }),
-    jsxs('div', { className: 'flex items-center gap-2', children: [jsx('button', { className: compactPrimary, disabled: saving || !modelId, onClick: save, children: saving ? '저장 중…' : '저장' }), message ? jsx('span', { className: `text-[11px] ${message.startsWith('저장 실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-tertiary)'}`, role: 'status', children: message }) : null] })
+    auxRole ? jsx('select', { className: compactInput, style: { ...themedSelect(), width: '7rem' }, value: 'compress', 'aria-label': 'Auxiliary 역할', onChange: () => {}, children: jsx('option', { style: themedOption, value: 'compress', children: 'compress' }) }) : null,
+    jsx('div', { className: 'flex h-8 w-24 shrink-0 items-center rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) px-2 font-mono text-xs text-(--ui-text-secondary)', 'aria-label': `${label} runtime`, children: runtimeKind === 'prism_ml' ? 'Prism-ML' : 'official' }),
+    jsx('select', { className: compactInput, style: { ...themedSelect(), minWidth: '12rem', flex: '1 1 14rem' }, value: modelId, disabled: serverRunning || saving, 'aria-label': `${label} model`, onChange: event => onModelChange(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: '사용 안 함' }), ...models.map(model => jsx('option', { style: themedOption, value: model.id, children: model.label }, model.id))] }),
+    jsx(Badge, { tone: running ? 'good' : modelId ? 'neutral' : 'warn', children: running ? 'running' : modelId ? role === 'compression' ? 'on demand' : 'selected' : 'not set' })
   ] })
 }
 
 function ExecutionProfilesPanel({ status, onRefresh }) {
+  const mainProfile = status?.profiles?.main || {}
+  const compressionProfile = status?.profiles?.compression || {}
+  const [mainModelId, setMainModelId] = useState(mainProfile.model_id || '')
+  const [compressionModelId, setCompressionModelId] = useState(compressionProfile.model_id || '')
+  const [starting, setStarting] = useState(false)
+  const [savingRole, setSavingRole] = useState('')
+  const [message, setMessage] = useState('')
+  const running = Boolean(status?.server_running)
+  useEffect(() => { setMainModelId(mainProfile.model_id || '') }, [mainProfile.model_id])
+  useEffect(() => { setCompressionModelId(compressionProfile.model_id || '') }, [compressionProfile.model_id])
+  const saveProfile = async (role, value, previous, setter) => {
+    setter(value); setSavingRole(role); setMessage('')
+    try {
+      await api(`/profiles/${role}`, { method: 'PUT', body: { model_id: value } })
+      await onRefresh()
+      setMessage(`${role === 'main' ? 'Main' : 'Auxiliary'} 구성을 저장했습니다.`)
+    } catch (cause) {
+      setter(previous)
+      setMessage(`모델 구성 저장 실패: ${cause?.message || String(cause)}`)
+    } finally { setSavingRole('') }
+  }
+  const start = async () => {
+    setStarting(true); setMessage('')
+    try {
+      const result = await api('/profiles/start', { method: 'POST', body: { main_model_id: mainModelId, compression_model_id: compressionModelId } })
+      await onRefresh()
+      setMessage(`${result.startup_role === 'main' ? 'Main' : 'Auxiliary'} 서버 시작 요청됨`)
+    } catch (cause) { setMessage(`서버 시작 실패: ${cause?.message || String(cause)}`) } finally { setStarting(false) }
+  }
+  const stop = async () => {
+    setStarting(true); setMessage('')
+    try { await api('/server', { method: 'POST', body: { action: 'stop' } }); await onRefresh(); setMessage('서버를 중지했습니다.') }
+    catch (cause) { setMessage(`서버 중지 실패: ${cause?.message || String(cause)}`) } finally { setStarting(false) }
+  }
   return jsxs('section', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) p-3', 'aria-labelledby': 'llamacpp-profiles-title', children: [
-    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-2', children: [jsx('div', { children: [jsx('h2', { id: 'llamacpp-profiles-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Main + Aux model' }), jsx('p', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: 'Aux 역할은 현재 compress만 지원하며, 16GB VRAM에서 한 worker를 교대 사용합니다.' })] }), jsx(Badge, { children: 'single worker' })] }),
-    jsxs('div', { className: 'mt-2', children: [jsx(ExecutionProfileRow, { role: 'main', label: 'Main', status, onRefresh }), jsx(ExecutionProfileRow, { role: 'compression', label: 'Aux model', auxRole: true, status, onRefresh })] })
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-2', children: [jsx('div', { children: [jsx('h2', { id: 'llamacpp-profiles-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Main / Auxiliary 모델' }), jsx('p', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: '각 역할은 선택하지 않아도 됩니다. Main이 선택되어 있으면 Main을 우선 로드합니다. Auxiliary만 선택하면 Auxiliary로 시작합니다.' })] }), jsx(Badge, { children: 'single worker' })] }),
+    jsxs('div', { className: 'mt-3', children: [
+      jsx(ExecutionProfileRow, { role: 'main', label: 'Main', status, modelId: mainModelId, saving: Boolean(savingRole), onModelChange: value => saveProfile('main', value, mainModelId, setMainModelId) }),
+      jsx(ExecutionProfileRow, { role: 'compression', label: 'Auxiliary', auxRole: true, status, modelId: compressionModelId, saving: Boolean(savingRole), onModelChange: value => saveProfile('compression', value, compressionModelId, setCompressionModelId) })
+    ] }),
+    jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2', children: [running ? jsx('button', { className: compactDanger, disabled: starting, onClick: stop, children: '서버 중지' }) : jsx('button', { className: compactPrimary, disabled: starting || (!mainModelId && !compressionModelId), onClick: start, children: starting ? '시작 중…' : '서버 시작' }), message ? jsx('span', { className: `text-[11px] ${message.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-tertiary)'}`, role: 'status', children: message }) : null] })
   ] })
 }
 
@@ -206,18 +243,16 @@ function RuntimeCard({ status, jobs, onRefresh }) {
   const available = status?.runtime_options?.[requestedKind] || {}
   const runtimeBusy = busy || runtimeJob?.status === 'running'
   const serverBusy = serverJob?.status === 'running'
-  const serverActive = status?.server_running || serverBusy
+
   useEffect(() => { setRequestedKind(status?.runtime_kind || 'official') }, [status?.runtime_kind])
   useEffect(() => { if (runtimeJob?.status === 'done') { setMessage('runtime 준비가 완료되었습니다.'); onRefresh() } }, [runtimeJob?.job_id, runtimeJob?.status])
   const install = async () => { setBusy(true); setMessage(''); try { await api('/runtime/install', { method: 'POST', body: { kind: requestedKind } }); await onRefresh(); setMessage('runtime 준비 작업을 시작했습니다.') } catch (cause) { setMessage(`runtime 준비 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
   const useRuntime = async kind => { setBusy(true); setMessage(''); try { await api('/runtime', { method: 'PUT', body: { kind } }); await onRefresh(); setMessage('선택한 runtime으로 전환했습니다.') } catch (cause) { setMessage(`runtime 전환 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
   const changeRuntime = async event => { const kind = event.target.value; setRequestedKind(kind); if (kind === activeKind) return; const candidate = status?.runtime_options?.[kind] || {}; if (!candidate.installed) { setMessage('먼저 선택한 runtime을 다운로드하세요.'); return } await useRuntime(kind) }
-  const serverAction = async action => { setBusy(true); try { await api('/server', { method: 'POST', body: { action } }); await onRefresh() } catch (cause) { setMessage(`server 작업 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
-  const activeModel = status?.models?.find(model => model.id === status?.active_model_id)
+
   return jsxs('section', { className: `${card} p-4 sm:p-5`, children: [
     jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsx('div', { className: 'text-right', children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: activeKind === 'prism_ml' ? 'Prism-ML runtime' : 'official runtime' }), jsx('p', { className: 'font-mono text-sm text-(--ui-text-primary)', children: status?.runtime_version || '미설치' })] })] }),
-    jsxs('div', { className: 'mt-4 flex items-center gap-2', children: [jsx('select', { className: `${input} shrink-0`, style: { ...themedSelect(), width: '11rem', maxWidth: '11rem', flex: '0 0 11rem' }, value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: changeRuntime, children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), requestedKind === activeKind ? null : jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || !available.installed, onClick: () => useRuntime(requestedKind), children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || (Boolean(available.version) && !available.update_available), 'aria-label': `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} runtime 업데이트`, title: available.version && available.latest_version ? `현재 ${available.version} · GitHub 최신 ${available.latest_version}` : undefined, onClick: install, children: requestedKind === 'prism_ml' ? (available.version ? (available.release_check_error ? 'Prism-ML 확인 실패' : (available.update_available ? 'Prism-ML 업데이트' : 'Prism-ML 최신')) : 'Prism-ML 다운로드') : (available.version ? (available.release_check_error ? 'official 확인 실패' : (available.update_available ? 'official 업데이트' : 'official 최신')) : 'official 다운로드') })] }),
-    jsxs('div', { className: 'mt-4 grid gap-3 border-t border-(--ui-stroke-secondary) pt-4 sm:grid-cols-3', children: [jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'backend' }), jsx('p', { className: 'mt-1 font-mono text-sm', children: activeKind === 'prism_ml' ? 'Prism-ML' : 'official' })] }), jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: '활성 모델' }), jsx('p', { className: 'mt-1 truncate font-mono text-sm', title: activeModel?.id, children: activeModel?.id || '선택되지 않음' })] }), jsxs('div', { children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: 'server' }), jsxs('div', { className: 'mt-1 flex items-center gap-2', children: [jsx(Badge, { tone: status?.server_running ? 'good' : 'warn', children: status?.server_running ? 'running' : 'stopped' }), serverActive ? jsx('button', { className: compactDanger, disabled: runtimeBusy, onClick: () => serverAction('stop'), children: '중지' }) : jsx('button', { className: compactPrimary, disabled: runtimeBusy || !status?.runtime_installed || !status?.active_model_id, onClick: () => serverAction('start'), children: '시작' })] })] })] }),
+    jsxs('div', { className: 'mt-4 flex items-center gap-2', children: [jsx('select', { className: `${input} shrink-0`, style: { ...themedSelect(), width: '11rem', maxWidth: '11rem', flex: '0 0 11rem' }, value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: changeRuntime, children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), requestedKind === activeKind ? null : jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || !available.installed, onClick: () => useRuntime(requestedKind), children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || (Boolean(available.version) && !available.update_available), 'aria-label': `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} runtime 업데이트`, title: available.version && available.latest_version ? `현재 ${available.version} · GitHub 최신 ${available.latest_version}` : undefined, onClick: install, children: '업데이트' })] }),
     jsx(ExecutionProfilesPanel, { status, onRefresh }),
     jsx(ServerLogPanel, { status, jobs }),
     message ? jsx('p', { className: `mt-3 text-xs ${message.includes('실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
@@ -241,15 +276,13 @@ function ModelRow({ model, status, refresh }) {
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const [presetMessage, setPresetMessage] = useState('')
   const isActive = status?.active_model_id === model.id
-  const loaded = Boolean(status?.server_running && isActive)
   const display = model.id || 'unknown model'
   const parameterQuery = useQuery({ queryKey: [ID, 'model-settings', model.id], queryFn: () => api(`/settings/${encodeURIComponent(model.id)}`), refetchOnWindowFocus: false })
   const presetsQuery = useQuery({ queryKey: [ID, 'presets'], queryFn: () => api('/presets'), staleTime: 0, refetchOnMount: 'always', refetchOnWindowFocus: true })
   useEffect(() => { const applied = status?.model_presets?.[model.id] || ''; setSelectedPresetId(applied) }, [status?.model_presets?.[model.id], model.id])
   const activeState = status?.server_running && isActive ? 'running' : 'stopped'
-  const activate = async () => { setBusy(true); try { await api('/activate', { method: 'POST', body: { model_id: model.id } }); refresh() } finally { setBusy(false) } }
-  const eject = async () => { setBusy(true); try { await api('/eject', { method: 'POST', body: { model_id: model.id } }); refresh() } finally { setBusy(false) } }
-  const remove = async () => { if (!window.confirm(`'${display}' 모델을 삭제할까요?`)) return; setBusy(true); try { await api(`/models/${encodeURIComponent(model.id)}`, { method: 'DELETE' }); refresh() } finally { setBusy(false) } }
+  const compactSize = String(model.size_label || 'unknown').replace(/\s+/g, '')
+  const unregister = async () => { setBusy(true); try { await api(`/models/${encodeURIComponent(model.id)}/registration`, { method: 'DELETE' }); await refresh() } finally { setBusy(false) } }
   const applyPreset = async () => {
     if (!selectedPresetId) return
     setBusy(true); setPresetMessage('')
@@ -262,23 +295,22 @@ function ModelRow({ model, status, refresh }) {
     } catch (cause) { setPresetMessage(`preset 적용 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
   }
   return jsxs('article', { className: 'border-b border-(--ui-stroke-secondary) py-5 last:border-0', 'aria-label': `${display} 등록 모델`, children: [
-    jsxs('div', { className: 'grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]', children: [
-      jsxs('div', { className: 'min-w-0', children: [
-        jsxs('div', { className: 'flex flex-wrap items-center gap-2', children: [jsx('h3', { className: 'min-w-0 break-words font-medium', title: display, children: display }), jsx(Badge, { tone: loaded ? 'good' : 'neutral', children: loaded ? '메모리 사용 중' : '대기 중' })] }),
-        jsxs('dl', { className: 'mt-3 grid grid-cols-2 gap-x-5 gap-y-2 text-xs sm:grid-cols-3', children: [
-          jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '용량' }), jsx('dd', { className: 'mt-0.5 text-(--ui-text-secondary)', children: model.size_label || 'size unknown' })] }),
-          jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '상태' }), jsx('dd', { className: 'mt-0.5 text-(--ui-text-secondary)', children: activeState })] })
-        ] }),
-        jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),
-        jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [
-          jsx('label', { className: 'shrink-0 text-xs font-medium text-(--ui-text-primary)', htmlFor: `model-preset-${model.id}`, children: '' }),
-          jsx('select', { id: `model-preset-${model.id}`, className: 'min-w-44 flex-1 rounded-md border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-xs text-(--ui-text-primary)', style: themedSelect(), value: selectedPresetId, onChange: event => setSelectedPresetId(event.target.value), 'aria-label': `${display} preset 선택`, children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
-          jsx('button', { className: compactPrimary, disabled: busy || !selectedPresetId, onClick: applyPreset, children: '저장' }),
-          presetMessage ? jsx('span', { className: `basis-full text-xs ${presetMessage.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-secondary)'}`, role: 'status', children: presetMessage }) : null
-        ] })
-      ] }),
-      jsxs('div', { className: 'flex flex-wrap items-center gap-2 md:justify-end', children: [isActive ? jsx('button', { className: button, disabled: true, 'aria-label': `${display} 선택됨`, children: '선택됨' }) : jsx('button', { className: primary, disabled: busy || status?.server_running, onClick: activate, 'aria-label': `${display} 선택`, title: status?.server_running ? 'server 중지 후 다른 모델을 선택할 수 있습니다.' : undefined, children: '선택' }), jsx('button', { className: danger, disabled: busy || status?.server_running, onClick: remove, 'aria-label': `${display} 삭제`, children: '삭제' })] })
+    jsxs('div', { className: 'flex flex-wrap items-center gap-x-3 gap-y-2', children: [
+      jsx('h3', { className: 'min-w-0 break-words font-medium', title: display, children: display }),
+      jsx(PrismOnlyHint, { model: display }),
+      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', 'aria-hidden': true, children: '|' }),
+      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `크기(${compactSize})` }),
+      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', 'aria-hidden': true, children: '|' }),
+      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `상태(${activeState})` }),
+      jsx('button', { className: 'ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-lg text-(--ui-text-secondary) transition hover:bg-(--dt-destructive)/10 hover:text-(--dt-destructive) disabled:cursor-not-allowed disabled:opacity-50', disabled: busy || (status?.server_running && isActive), onClick: unregister, title: '모델 등록에서 제거', 'aria-label': `${display} 모델 등록 해제`, children: '×' })
     ] }),
+    jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),
+    jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [
+      jsx('label', { className: 'shrink-0 text-xs font-medium text-(--ui-text-primary)', htmlFor: `model-preset-${model.id}`, children: 'parameter preset' }),
+      jsx('select', { id: `model-preset-${model.id}`, className: 'min-w-44 flex-1 rounded-md border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-xs text-(--ui-text-primary)', style: themedSelect(), value: selectedPresetId, onChange: event => setSelectedPresetId(event.target.value), 'aria-label': `${display} preset 선택`, children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
+      jsx('button', { className: compactPrimary, disabled: busy || !selectedPresetId, onClick: applyPreset, children: '적용' }),
+      presetMessage ? jsx('span', { className: `basis-full text-xs ${presetMessage.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-secondary)'}`, role: 'status', children: presetMessage }) : null
+    ] })
   ] })
 }
 
@@ -478,9 +510,15 @@ function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' })
   const running = job.data?.status === 'running'
   useEffect(() => { setRepo(initialRepo); setFileIndex(''); setActionMessage('') }, [initialRepo])
   useEffect(() => { if (mode === 'register' && fileIndex === '' && groups.length) setFileIndex('0') }, [mode, fileIndex, groups.length])
-  return jsxs('section', { className: `${card} mt-5 p-4 sm:p-5`, 'aria-labelledby': 'llama-wizard-title', children: [
+  return jsxs('section', { className: `${card} mt-4 p-4 sm:p-5`, 'aria-labelledby': 'llama-wizard-title', children: [
     jsxs('div', { className: 'flex items-start justify-between gap-4', children: [jsx('div', { className: 'min-w-0', children: [jsx('div', { className: 'text-[11px] font-semibold uppercase tracking-[0.16em] text-(--ui-accent)', children: mode === 'register' ? '다운받은 모델 등록' : '모델 다운로드' }), jsx('h2', { id: 'llama-wizard-title', className: 'mt-1 text-lg font-semibold', children: mode === 'register' ? '다운받은 GGUF 파일 등록' : 'Hugging Face 저장소와 양자화 선택' })] }), jsx('button', { className: button, onClick: close, 'aria-label': '모델 wizard 닫기', children: '닫기' })] }),
-    mode === 'download' ? jsxs('div', { className: 'mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]', children: [jsx('input', { className: input, type: 'search', value: queryText, 'aria-label': 'Hugging Face 모델 검색', placeholder: '예: Qwen GGUF, unsloth/Qwen…', onChange: event => setQueryText(event.target.value), onKeyDown: event => { if (event.key === 'Enter') setSearched(true) } }), jsx('button', { className: primary, onClick: () => setSearched(true), 'aria-label': 'Hugging Face 검색 실행', children: 'HF 검색' })] }) : null,
+    mode === 'download' ? jsxs('div', { className: 'mt-5', children: [
+      jsx('input', { className: input, type: 'search', value: queryText, 'aria-label': 'Hugging Face 모델 검색', placeholder: '예: Qwen GGUF, unsloth/Qwen…', onChange: event => setQueryText(event.target.value), onKeyDown: event => { if (event.key === 'Enter') setSearched(true) } }),
+      jsxs('div', { className: 'mt-3 grid grid-cols-2 gap-3', 'data-testid': 'download-actions', children: [
+        jsx('button', { className: primary, onClick: () => setSearched(true), 'aria-label': 'Hugging Face 검색 실행', children: 'HF 검색' }),
+        jsx('button', { className: primary, disabled: !selected || running, onClick: download, 'aria-label': '선택한 GGUF 다운로드', children: '선택 항목 다운로드' })
+      ] })
+    ] }) : null,
     mode === 'download' && search.isLoading ? jsx('p', { className: `mt-3 ${muted}`, children: 'Hugging Face 검색 중…' }) : null,
     mode === 'download' && search.error ? jsx('p', { className: 'mt-3 text-sm text-(--dt-destructive)', children: String(search.error.message || search.error) }) : null,
     mode === 'download' && search.data?.hits?.length ? jsx('div', { className: 'mt-3 rounded-md border border-(--ui-stroke-secondary) overscroll-contain', style: { maxHeight: '24rem', overflowY: 'auto', scrollbarColor: 'var(--ui-stroke-secondary) transparent' }, children: search.data.hits.map(hit => jsx('button', { className: 'flex w-full items-center justify-between border-b border-(--ui-stroke-secondary) px-3 py-2 text-left text-sm last:border-0 hover:bg-(--ui-bg-tertiary)', onClick: () => { setRepo(hit.repo); setFileIndex(''); setActionMessage('') }, children: [jsx('span', { className: 'min-w-0 break-words pr-3 font-mono', children: hit.repo }), jsx('span', { className: `shrink-0 ${muted}`, children: `${Number(hit.downloads || 0).toLocaleString()} downloads` })] }, hit.repo))}) : null,
@@ -488,13 +526,13 @@ function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' })
     mode === 'download' && repo ? jsxs('div', { className: 'mt-5', children: [jsx('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('span', { className: 'min-w-0 break-words text-sm font-medium', children: repo }), jsx('span', { className: `shrink-0 text-xs ${muted}`, children: 'Q4 / Q5 / IQ / F16' })] }), files.isLoading ? jsx('p', { className: muted, role: 'status', children: 'repo의 GGUF 양자화 목록을 불러오는 중…' }) : jsx('select', { className: input, style: themedSelect(), value: fileIndex, 'aria-label': '다운로드할 양자화 선택', onChange: event => setFileIndex(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: '양자화를 선택하세요' }), ...groups.map((group, index) => jsx('option', { style: themedOption, value: index, children: `${group.label} · ${(Number(group.total_bytes || 0) / (1 << 30)).toFixed(1)} GB · ${group.fit}` }, `${group.label}-${index}`))] }), selected ? jsx('p', { className: `mt-2 ${muted}`, children: `${selected.paths.length > 1 ? `${selected.paths.length}개 split part 다운로드 · ` : ''}${selected.fit}` }) : null] }) : null,
     jsx(JobProgress, { job: job.data }),
     actionMessage ? jsx('p', { className: `mt-3 text-xs ${muted}`, role: 'status', children: actionMessage }) : null,
-    jsxs('div', { className: 'mt-5 flex flex-wrap justify-end gap-2', children: [jsx('button', { className: button, onClick: close, 'aria-label': '모델 wizard 취소', children: '취소' }), mode === 'download' ? jsx('button', { className: primary, disabled: !selected || running, onClick: download, 'aria-label': '선택한 GGUF 다운로드', children: '선택 항목 다운로드' }) : jsx('button', { className: primary, disabled: !selected || running, onClick: registerModel, 'aria-label': '선택한 GGUF 등록', children: '선택 항목 등록' })] })
+    mode === 'register' ? jsx('div', { className: 'mt-5 flex justify-end', children: jsx('button', { className: primary, disabled: !selected || running, onClick: registerModel, 'aria-label': '선택한 GGUF 등록', children: '선택 항목 등록' }) }) : null
   ] })
 }
 
 function DownloadedModelRow({ model, onRegister, onDelete }) {
   return jsxs('article', { className: 'grid gap-3 border-b border-(--ui-stroke-secondary) py-4 last:border-0 sm:grid-cols-[minmax(0,1fr)_auto]', 'aria-label': `${model.repo_id} 다운로드 모델`, children: [
-    jsxs('div', { className: 'min-w-0', children: [jsx('h3', { className: 'break-words font-medium', title: model.repo_id, children: model.repo_id }), jsx('p', { className: `mt-1 text-xs ${muted}`, children: 'HF cache inventory · 아직 plugin에 등록되지 않음' })] }),
+    jsx('div', { className: 'min-w-0', children: jsxs('div', { className: 'flex items-center gap-2', children: [jsx('h3', { className: 'break-words font-medium', title: model.repo_id, children: model.repo_id }), jsx(PrismOnlyHint, { model: model.repo_id })] }) }),
     jsxs('div', { className: 'flex flex-wrap items-center gap-2 sm:justify-end', children: [jsx(Badge, { children: model.size || 'size unknown' }), jsx('button', { className: primary, onClick: () => onRegister(model.repo_id), 'aria-label': `${model.repo_id} 등록`, children: '등록' }), jsx('button', { className: danger, onClick: () => onDelete(model.repo_id), 'aria-label': `${model.repo_id} cache 삭제`, children: '삭제' })] })
   ] })
 }
@@ -509,7 +547,7 @@ function Page() {
   const [tab, setTab] = useState('runtime')
   const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: true })
   const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
-  const hfModels = useQuery({ queryKey: [ID, 'hf-models', status.data?.runtime_kind], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
+  const hfModels = useQuery({ queryKey: [ID, 'hf-models'], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
   const data = status.data; const models = data?.models || []; const localModels = hfModels.data?.models || []; const runtimeJobs = jobs.data?.jobs || []
   useEffect(() => { if (runtimeJobs.some(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && job.status === 'done')) queryClient.invalidateQueries({ queryKey: [ID, 'status'] }) }, [runtimeJobs])
   const refreshStatus = () => Promise.all([queryClient.invalidateQueries({ queryKey: [ID, 'status'] }), queryClient.invalidateQueries({ queryKey: [ID, 'jobs'] })])
@@ -520,9 +558,8 @@ function Page() {
   const deleteDownloaded = async repoId => { if (!window.confirm(`'${repoId}' HF cache를 삭제할까요?`)) return; try { await api('/hf-models/delete', { method: 'POST', body: { repo_id: repoId } }); await hfModels.refetch() } catch (cause) { window.alert(`모델 삭제 실패: ${cause?.message || String(cause)}`) } }
   const activeModel = models.find(model => model.id === data?.active_model_id)
   return jsxs('main', { className: 'mx-auto max-w-5xl p-4 sm:p-6', children: [jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus }) : null,
-    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: data?.runtime_kind === 'prism_ml' ? 'Prism-ML Bonsai/Ternary GGUF만 표시·등록합니다.' : '등록 모델과 HF cache inventory를 분리해 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: data?.runtime_kind === 'prism_ml' ? 'Prism-ML 호환 다운로드 모델이 없습니다.' : '다운받은 모델이 없습니다.' })] })] }) : null,
-    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: '파라미터와 preset' }), jsx('p', { className: `mt-1 ${muted}`, children: '모델을 선택한 뒤 parameter를 검색·추가하고 현재 설정을 preset으로 저장합니다.' }), activeModel ? jsx(ModelSettingsEditor, { modelId: activeModel.id, appliedPresetId: data?.model_presets?.[activeModel.id] || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '먼저 모델 탭에서 사용할 모델을 선택하세요.' })] }) : null,
-    wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode }) : null
+    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '등록 모델과 다운받은 HF cache 모델을 runtime 종류와 관계없이 모두 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode }) : null, jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
+    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: '파라미터와 preset' }), jsx('p', { className: `mt-1 ${muted}`, children: '모델을 선택한 뒤 parameter를 검색·추가하고 현재 설정을 preset으로 저장합니다.' }), activeModel ? jsx(ModelSettingsEditor, { modelId: activeModel.id, appliedPresetId: data?.model_presets?.[activeModel.id] || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '먼저 모델 탭에서 사용할 모델을 선택하세요.' })] }) : null
   ] })
 }
 export default {

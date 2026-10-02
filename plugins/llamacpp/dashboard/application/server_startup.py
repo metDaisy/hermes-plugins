@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+import os
 import re
 
 
@@ -59,13 +60,16 @@ def _terminate_owned_process(process: Any) -> bool:
 class ServerStartupService:
     """Own command assembly, startup persistence, health polling, and cleanup."""
 
-    def __init__(self, load_state: Callable[[], dict[str, Any]], save_state: Callable[[dict[str, Any]], None], executable: Callable[[], Path | None], stop: Callable[..., None], active_path: Callable[[str], Path], load_options: Callable[[], dict[str, dict[str, str]]], runtime_kind: Callable[[dict[str, Any]], str], backend: Callable[[str], Any], serving_model_name: Callable[[str], str], option_args: Callable[[dict[str, str]], list[str]], watch: Callable[[Any], None], health: Callable[[int], bool], register_endpoint: Callable[[int, str], dict[str, Any]], log_tail: Callable[[int], dict[str, Any]], log_path: Path | None, spawn: Callable[..., Any], now: Callable[[], float], sleep: Callable[[float], None], mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None) -> None:
+    def __init__(self, load_state: Callable[[], dict[str, Any]], save_state: Callable[[dict[str, Any]], None], executable: Callable[[], Path | None], stop: Callable[..., None], active_path: Callable[[str], Path], load_options: Callable[[], dict[str, dict[str, str]]], runtime_kind: Callable[[dict[str, Any]], str], backend: Callable[[str], Any], serving_model_name: Callable[[str], str], option_args: Callable[[dict[str, str]], list[str]], watch: Callable[[Any], None], health: Callable[[int], bool], register_endpoint: Callable[[int, str], dict[str, Any]], log_tail: Callable[[int], dict[str, Any]], log_path: Path | None, spawn: Callable[..., Any], now: Callable[[], float], sleep: Callable[[float], None], mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None, router_plan: Callable[[dict[str, Any], Path], Any | None] | None = None, router_preset_path: Path | None = None, router_ready: Callable[[int, str], bool] | None = None) -> None:
         self._load_state, self._save_state, self._executable, self._stop = load_state, save_state, executable, stop
         self._active_path, self._load_options, self._runtime_kind, self._backend = active_path, load_options, runtime_kind, backend
         self._serving_model_name = serving_model_name
         self._option_args, self._watch, self._health, self._register_endpoint = option_args, watch, health, register_endpoint
         self._log_tail, self._log_path, self._spawn, self._now, self._sleep = log_tail, log_path, spawn, now, sleep
         self._mutate_state = mutate_state
+        self._router_plan = router_plan
+        self._router_preset_path = router_preset_path
+        self._router_ready = router_ready
 
     def start(self) -> None:
         state = self._load_state()
@@ -76,28 +80,40 @@ class ServerStartupService:
         if executable is None:
             raise RuntimeError("llama-server runtime is not installed")
         self._stop(preserve_log=True, keep_endpoint=True)
-        entry = state.get("models", {}).get(model_id, {}) if isinstance(state.get("models"), dict) else {}
         options = self._load_options().get(model_id, {})
-        try:
-            port = int(options.get("port", state.get("port") or 18434))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"invalid server port: {options.get('port')}") from exc
-        model_path = self._active_path(model_id)
-        serving_model = self._serving_model_name(model_id)
-        command = self._backend(self._runtime_kind(state)).build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, options, model_path=model_path)
-        if "mmproj-auto" in options and "no-mmproj" not in options and self._log_path is not None:
-            mmproj_path = _find_mmproj_near(model_path)
-            if mmproj_path is not None:
-                command.extend(["--mmproj", str(mmproj_path)])
-            else:
-                print("mmproj-auto enabled but no projector gguf found next to the model; starting without image support.", flush=True)
-        command.extend(["--alias", serving_model])
-        command.extend(self._option_args({key: value for key, value in options.items() if key not in {"port", "alias", "mmproj-auto"}}))
+        native_router = self._router_plan(state, executable) if self._router_plan is not None else None
+        if native_router is not None:
+            if self._router_preset_path is None:
+                raise RuntimeError("native router preset path is required")
+            self._router_preset_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self._router_preset_path.with_suffix(self._router_preset_path.suffix + ".tmp")
+            temporary.write_text(native_router.preset_text, encoding="utf-8", newline="\n")
+            os.replace(temporary, self._router_preset_path)
+            port = int(native_router.port)
+            serving_model = str(native_router.default_model)
+            command = list(native_router.command)
+        else:
+            entry = state.get("models", {}).get(model_id, {}) if isinstance(state.get("models"), dict) else {}
+            try:
+                port = int(options.get("port", state.get("port") or 18434))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"invalid server port: {options.get('port')}") from exc
+            model_path = self._active_path(model_id)
+            serving_model = self._serving_model_name(model_id)
+            command = self._backend(self._runtime_kind(state)).build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, options, model_path=model_path)
+            if "mmproj-auto" in options and "no-mmproj" not in options and self._log_path is not None:
+                mmproj_path = _find_mmproj_near(model_path)
+                if mmproj_path is not None:
+                    command.extend(["--mmproj", str(mmproj_path)])
+                else:
+                    print("mmproj-auto enabled but no projector gguf found next to the model; starting without image support.", flush=True)
+            command.extend(["--alias", serving_model])
+            command.extend(self._option_args({key: value for key, value in options.items() if key not in {"port", "alias", "mmproj-auto"}}))
         if self._log_path is None:
             raise RuntimeError("server log path is required")
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         log = self._log_path.open("ab", buffering=0)
-        role = str(state.get("active_role") or "server")
+        role = "router" if native_router is not None else str(state.get("active_role") or "server")
         log.write(f"\n[{role}] --- llama-server start: model={model_id}, port={port} ---\n".encode())
         try:
             process = self._spawn(command, log, executable)
@@ -120,6 +136,7 @@ class ServerStartupService:
         def record_worker(current: dict[str, Any]) -> None:
             current["pid"], current["port"] = process.pid, port
             current["worker_identity"] = identity
+            current["execution_mode"] = "native_router" if native_router is not None else "exclusive_swap"
 
         def terminate_and_clear_worker() -> None:
             if not _terminate_owned_process(process):
@@ -158,6 +175,9 @@ class ServerStartupService:
                 detail = "\n".join(self._log_tail(40).get("lines", [])[-40:])
                 raise RuntimeError("llama-server exited during startup" + (f"\n{detail}" if detail else ""))
             if self._health(port):
+                if native_router is not None and self._router_ready is not None and not self._router_ready(port, serving_model):
+                    self._sleep(0.5)
+                    continue
                 try:
                     endpoint = self._register_endpoint(port, serving_model)
                 except Exception as exc:

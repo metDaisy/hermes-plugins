@@ -43,6 +43,14 @@ def create_router(context: ModelRouteContext) -> APIRouter:
         except RuntimeError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @router.delete("/models/{model_id}/registration")
+    def unregister(model_id: str) -> dict[str, Any]:
+        try:
+            return context.lifecycle().unregister(model_id)
+        except RuntimeError as exc:
+            status_code = 409 if "stop llama-server" in str(exc) else 404
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
     @router.get("/search")
     def search(q: str = "", limit: int = 20) -> dict[str, Any]:
         try:

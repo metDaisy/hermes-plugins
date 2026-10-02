@@ -80,6 +80,26 @@ class ModelLifecycleService:
             self._save_state(state)
         return {"ok": True, "model_id": model_id}
 
+    def unregister(self, model_id: str) -> dict[str, Any]:
+        state = self._load_state()
+        models = state.get("models")
+        entry = models.get(model_id) if isinstance(models, dict) else None
+        if not isinstance(entry, dict):
+            raise RuntimeError("model not found")
+        if self._server_running() and state.get("active_model_id") == model_id:
+            raise RuntimeError("stop llama-server before removing model registration")
+        if state.get("active_model_id") == model_id:
+            state["active_model_id"] = None
+        models.pop(model_id, None)
+        profiles = state.get("execution_profiles")
+        if isinstance(profiles, dict):
+            for profile in profiles.values():
+                if isinstance(profile, dict) and profile.get("model_id") == model_id:
+                    profile["model_id"] = ""
+                    profile["runtime_kind"] = "official"
+        self._save_state(state)
+        return {"ok": True, "model_id": model_id, "unregistered": True}
+
     def delete(self, model_id: str) -> dict[str, Any]:
         state = self._load_state()
         if state.get("active_model_id") == model_id:

@@ -45,9 +45,8 @@ class HuggingFaceModelWorkflow:
     def local_models(self) -> dict[str, Any]:
         models, _executable, warning = self._cache_models()
         kind = self._runtime_kind(self._load_state())
-        allowed = set(self._visible_repositories(kind, [str(model.get("repo_id") or "") for model in models]))
         return {
-            "models": [model for model in models if str(model.get("repo_id") or "") in allowed],
+            "models": models,
             "warning": warning,
             "runtime_kind": kind,
         }

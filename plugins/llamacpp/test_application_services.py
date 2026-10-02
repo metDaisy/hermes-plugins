@@ -38,7 +38,7 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         state = {
             "active_model_id": "main-model",
             "runtime_kind": "official",
-            "models": {"main-model": {}, "small-model": {}},
+            "models": {"main-model": {}, "Ternary-Bonsai-small": {}},
         }
         service = ExecutionProfileService(
             load_state=lambda: state,
@@ -47,7 +47,7 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         )
 
         service.save("main", {"runtime_kind": "official", "model_id": "main-model"})
-        result = service.save("compression", {"runtime_kind": "prism_ml", "model_id": "small-model"})
+        result = service.save("compression", {"runtime_kind": "official", "model_id": "Ternary-Bonsai-small"})
 
         self.assertEqual(result["execution_mode"], "exclusive_swap")
         self.assertEqual(result["profiles"]["main"]["runtime_kind"], "official")
@@ -74,33 +74,107 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         self.assertEqual(result["profiles"]["main"]["runtime_kind"], "official")
         self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "official")
 
-    def test_execution_profiles_accept_all_official_and_prism_role_combinations(self) -> None:
+    def test_execution_profiles_derive_runtime_from_model_name(self) -> None:
         from dashboard.application.execution_profiles import ExecutionProfileService
 
-        for main_runtime, compression_runtime in (
-            ("official", "official"),
-            ("official", "prism_ml"),
-            ("prism_ml", "official"),
-            ("prism_ml", "prism_ml"),
+        for model_id, expected_runtime in (
+            ("regular-model", "official"),
+            ("Ternary-Bonsai-2-27B-PQ2_0", "prism_ml"),
         ):
-            with self.subTest(main=main_runtime, compression=compression_runtime):
-                state = {"models": {"main-model": {}, "small-model": {}}}
+            with self.subTest(model=model_id):
+                state = {"models": {model_id: {}}}
                 service = ExecutionProfileService(
                     load_state=lambda: state,
                     save_state=lambda value: state.update(value),
                     accepts=lambda _kind, _model_id: True,
                 )
-                service.save("main", {"runtime_kind": main_runtime, "model_id": "main-model"})
-                result = service.save(
-                    "compression",
-                    {"runtime_kind": compression_runtime, "model_id": "small-model"},
-                )
+                result = service.save("main", {"runtime_kind": "prism_ml", "model_id": model_id})
 
-                self.assertEqual(result["profiles"]["main"]["runtime_kind"], main_runtime)
-                self.assertEqual(
-                    result["profiles"]["compression"]["runtime_kind"],
-                    compression_runtime,
-                )
+                self.assertEqual(result["profiles"]["main"]["runtime_kind"], expected_runtime)
+
+    def test_execution_profiles_migrate_saved_runtime_to_model_rule(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "models": {"Ternary-Bonsai-2-27B-PQ2_0": {}},
+            "execution_profiles": {
+                "main": {
+                    "runtime_kind": "official",
+                    "model_id": "Ternary-Bonsai-2-27B-PQ2_0",
+                },
+            },
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda _kind, _model_id: True,
+        )
+
+        result = service.snapshot()
+
+        self.assertEqual(result["profiles"]["main"]["runtime_kind"], "prism_ml")
+
+    def test_execution_profiles_allow_each_role_to_be_cleared_independently(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "active_model_id": "main-model",
+            "models": {"main-model": {}, "small-model": {}},
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "main-model", "preset_id": ""},
+                "compression": {"runtime_kind": "official", "model_id": "small-model", "preset_id": ""},
+            },
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda _kind, _model_id: True,
+        )
+
+        result = service.save("main", {"model_id": ""})
+
+        self.assertFalse(result["profiles"]["main"]["configured"])
+        self.assertTrue(result["profiles"]["compression"]["configured"])
+        self.assertNotIn("main", state["execution_profiles"])
+        self.assertIsNone(state["active_model_id"])
+
+    def test_execution_profile_start_route_uses_main_or_aux_from_one_server_action(self) -> None:
+        from fastapi import HTTPException
+        from dashboard.routes.execution_profile_routes import ExecutionProfileRouteContext, create_router
+
+        events = []
+        job = {"job_id": "job-1"}
+        context = ExecutionProfileRouteContext(
+            snapshot=lambda: {},
+            save=lambda role, body: events.append(("save", role, body)) or {},
+            start=lambda role: events.append(("start", role)),
+            create_job=lambda kind, detail: events.append(("job", kind, detail)) or job,
+            launch=lambda _job, run, _name: run(),
+            finish=lambda _job, detail: events.append(("finish", detail)),
+        )
+        router = create_router(context)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/profiles/start")
+        direct = next(route.endpoint for route in router.routes if route.path == "/profiles/{role}/start")
+
+        result = endpoint({"main_model_id": "large-model", "compression_model_id": "small-model"})
+
+        self.assertEqual(result["job_id"], "job-1")
+        self.assertEqual(events[0], ("save", "main", {"model_id": "large-model"}))
+        self.assertEqual(events[1], ("save", "compression", {"model_id": "small-model"}))
+        self.assertEqual(events[3], ("start", "main"))
+
+        events.clear()
+        result = endpoint({"main_model_id": "", "compression_model_id": "small-model"})
+        self.assertEqual(result["job_id"], "job-1")
+        self.assertEqual(events[3], ("start", "compression"))
+
+        with self.assertRaises(HTTPException) as rejected:
+            endpoint({"main_model_id": "", "compression_model_id": ""})
+        self.assertEqual(rejected.exception.status_code, 422)
+
+        with self.assertRaises(HTTPException) as rejected:
+            direct("compression", {"model_id": "small-model"})
+        self.assertEqual(rejected.exception.status_code, 409)
 
     def test_legacy_active_model_is_persisted_as_main_execution_profile(self) -> None:
         from dashboard.application.execution_profiles import ExecutionProfileService
@@ -451,7 +525,7 @@ class ModelRouteAdapterTests(unittest.TestCase):
         router = create_router(context)
         paths = {route.path: route.endpoint for route in router.routes}
 
-        self.assertTrue({"/activate", "/eject", "/models/{model_id}", "/search", "/repo", "/download-browsed", "/register", "/sideload", "/hf-models", "/hf-models/files", "/hf-models/delete"}.issubset(paths))
+        self.assertTrue({"/activate", "/eject", "/models/{model_id}", "/models/{model_id}/registration", "/search", "/repo", "/download-browsed", "/register", "/sideload", "/hf-models", "/hf-models/files", "/hf-models/delete"}.issubset(paths))
         with self.assertRaises(HTTPException) as raised:
             paths["/search"]("test", 20)
         self.assertEqual(raised.exception.status_code, 502)
@@ -718,6 +792,46 @@ class JobManagerTests(unittest.TestCase):
 
 
 class ModelLifecycleServiceTests(unittest.TestCase):
+    def test_unregister_removes_only_registration_and_clears_role_bindings(self) -> None:
+        from dashboard.application.model_lifecycle import ModelLifecycleService
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "registered.gguf"
+            model.write_bytes(b"model")
+            state: dict[str, object] = {
+                "active_model_id": "registered",
+                "models": {"registered": {"paths": [str(model)], "owned": True}},
+                "execution_profiles": {
+                    "main": {"model_id": "registered", "runtime_kind": "official"},
+                    "compression": {"model_id": "registered", "runtime_kind": "official"},
+                },
+            }
+
+            class Registry:
+                def rows(self): return [{"id": "registered", "paths": [str(model)]}]
+                def active_path(self, _model_id): return model
+                def register(self, *_args, **_kwargs): return None
+
+            service = ModelLifecycleService(
+                registry=Registry(), load_state=lambda: state, save_state=lambda value: state.update(value),
+                runtime_kind=lambda _: "official", accepts=lambda *_: True,
+                server_running=lambda: False, stop_server=lambda: None,
+                models_root=root, model_id=lambda path: path.stem,
+            )
+
+            result = service.unregister("registered")
+
+            self.assertEqual(result, {"ok": True, "model_id": "registered", "unregistered": True})
+            self.assertTrue(model.exists())
+            self.assertNotIn("registered", state["models"])
+            self.assertIsNone(state["active_model_id"])
+            self.assertEqual(state["execution_profiles"]["main"]["model_id"], "")
+            self.assertEqual(state["execution_profiles"]["compression"]["model_id"], "")
+
     def test_activate_switch_delete_and_sideload_share_model_lifecycle_invariants(self) -> None:
         from dashboard.application.model_lifecycle import ModelLifecycleService
 
@@ -920,7 +1034,13 @@ class ServerLifecycleServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_root:
             log_path = Path(raw_root) / "llama-server.log"
             log_path.write_text("diagnostic", encoding="utf-8")
-            state: dict[str, object] = {"pid": 42, "custom_endpoint": {"key": "llamacpp-local"}}
+            state: dict[str, object] = {
+                "pid": 42,
+                "custom_endpoint": {"key": "llamacpp-local"},
+                "active_role": "main",
+                "transition_phase": "MAIN_READY",
+                "transition_error": "stale",
+            }
             stopped: list[int] = []
             unregistered: list[bool] = []
             service = ServerLifecycleService(
@@ -937,6 +1057,9 @@ class ServerLifecycleServiceTests(unittest.TestCase):
             self.assertEqual(stopped, [42])
             self.assertIsNone(state["pid"])
             self.assertIsNone(state["custom_endpoint"])
+            self.assertIsNone(state["active_role"])
+            self.assertEqual(state["transition_phase"], "IDLE")
+            self.assertIsNone(state["transition_error"])
             self.assertEqual(unregistered, [True])
             self.assertFalse(log_path.exists())
 
@@ -1061,6 +1184,35 @@ class JsonHttpClientTests(unittest.TestCase):
 
 
 class HuggingFaceModelWorkflowTests(unittest.TestCase):
+    def test_local_models_lists_every_cached_repository_regardless_of_runtime(self) -> None:
+        from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
+
+        cached = [
+            {"repo_id": "owner/Regular-GGUF", "size": "2 GB"},
+            {"repo_id": "prism-ml/Ternary-Bonsai-2-27B-gguf", "size": "7 GB"},
+        ]
+        workflow = HuggingFaceModelWorkflow(
+            load_state=lambda: {"runtime_kind": "prism_ml"},
+            runtime_kind=lambda current: str(current["runtime_kind"]),
+            accepts=lambda *_: True,
+            cache_models=lambda: (cached, "hf", None),
+            cached_files=lambda _repo: ([], None),
+            cached_paths=lambda _repo, _paths: ([], None),
+            http_json=lambda _url: [],
+            download=lambda *_args, **_kwargs: None,
+            register=lambda *_args, **_kwargs: None,
+            remove_cache=lambda _repo: True,
+            model_id=lambda path: path.stem,
+            visible_repositories=lambda _kind, repositories: [
+                repo for repo in repositories if repo.startswith("prism-ml/")
+            ],
+        )
+
+        result = workflow.local_models()
+
+        self.assertEqual(result["models"], cached)
+        self.assertEqual(result["runtime_kind"], "prism_ml")
+
     def test_groups_remote_files_filters_search_and_registers_only_cached_selection(self) -> None:
         from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
 
@@ -1097,6 +1249,24 @@ class HuggingFaceModelWorkflowTests(unittest.TestCase):
 
 
 class HuggingFaceDownloadServiceTests(unittest.TestCase):
+    def test_worker_emits_monotonic_progress_and_reserves_completion(self) -> None:
+        from dashboard.application import hf_download_worker
+
+        import io
+        from unittest.mock import patch
+
+        output = io.StringIO()
+        hf_download_worker._LAST_PERCENT = -1
+        with patch("sys.stderr", output):
+            hf_download_worker._emit_percent(1, 4)
+            hf_download_worker._emit_percent(1, 4)
+            hf_download_worker._emit_percent(4, 4)
+
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            ["HERMES_PROGRESS:25%", "HERMES_PROGRESS:99%"],
+        )
+
     def test_validates_the_exact_cli_reported_path(self) -> None:
         from dashboard.application.huggingface_download import HuggingFaceDownloadService
 
@@ -1113,14 +1283,70 @@ class HuggingFaceDownloadServiceTests(unittest.TestCase):
             def wait(self, timeout=None): return 0
 
         with tempfile.TemporaryDirectory() as raw_root:
-            model = Path(raw_root) / "model.gguf"
+            root = Path(raw_root)
+            model = root / "model.gguf"
             model.write_bytes(b"gguf")
+            scripts = root / "Scripts"
+            scripts.mkdir()
+            hf = scripts / "hf.exe"
+            hf.write_bytes(b"")
+            (scripts / "python.exe").write_bytes(b"")
             process = Process()
             process.stdout = Stream((str(model) + "\n").encode())
             process.stderr = Stream(b"")
             service = HuggingFaceDownloadService(lambda _argv: process, cwd=lambda: Path(raw_root))
 
-            self.assertEqual(service.download("hf", "owner/repo", "model.gguf"), model.resolve())
+            self.assertEqual(service.download(str(hf), "owner/repo", "model.gguf"), model.resolve())
+
+    def test_enables_cli_progress_and_parses_human_reported_path(self) -> None:
+        from dashboard.application.huggingface_download import HuggingFaceDownloadService
+
+        import tempfile
+        from pathlib import Path
+
+        class Stream:
+            def __init__(self, value): self.value = value
+            def read(self, _): value, self.value = self.value, b""; return value
+
+        class AvailableStream(Stream):
+            def read(self, _): return b""
+            def read1(self, _): value, self.value = self.value, b""; return value
+
+        class Process:
+            stdout = None
+            stderr = None
+            def wait(self, timeout=None): return 0
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            scripts = root / "Scripts"
+            scripts.mkdir()
+            hf = scripts / "hf.exe"
+            python = scripts / "python.exe"
+            hf.write_bytes(b"")
+            python.write_bytes(b"")
+            process = Process()
+            process.stdout = Stream((f"✓ Downloaded\n  path: {model}\n").encode())
+            process.stderr = AvailableStream(b"HERMES_PROGRESS:42%\n")
+            argv: list[str] = []
+            progress: list[int] = []
+
+            def start_process(command: list[str]):
+                argv.extend(command)
+                return process
+
+            service = HuggingFaceDownloadService(start_process, cwd=lambda: Path(raw_root))
+
+            self.assertEqual(
+                service.download(str(hf), "owner/repo", "model.gguf", progress.append),
+                model.resolve(),
+            )
+            self.assertEqual(argv[0], str(python))
+            self.assertTrue(argv[1].endswith("hf_download_worker.py"))
+            self.assertEqual(argv[2:], ["owner/repo", "model.gguf"])
+            self.assertEqual(progress, [42])
 
 
 class ServerStartupServiceTests(unittest.TestCase):

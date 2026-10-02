@@ -13,7 +13,6 @@ HERMES_ROOT = Path.home() / "AppData" / "Local" / "hermes"
 HEALTH = "http://127.0.0.1:18380/__llamacpp_backend_health"
 EXPECTED_SERVICE = "hermes-llamacpp-coordinator"
 EXPECTED_PROTOCOL = 1
-EXPECTED_BUILD = "0.2.45"
 
 
 def load_proxy(profile: str):
@@ -26,14 +25,14 @@ def load_proxy(profile: str):
     return module
 
 
-def health() -> dict:
+def health(expected_build: str) -> dict:
     with urllib.request.urlopen(HEALTH, timeout=3) as response:
         payload = json.loads(response.read())
     expected = {
         "ok": True,
         "service": EXPECTED_SERVICE,
         "protocol": EXPECTED_PROTOCOL,
-        "build": EXPECTED_BUILD,
+        "build": expected_build,
     }
     if any(payload.get(key) != value for key, value in expected.items()):
         raise RuntimeError(f"unexpected coordinator identity: {payload}")
@@ -55,10 +54,14 @@ def main() -> None:
     if len(profiles) < 2:
         raise SystemExit("two installed profile copies are required")
     seen = []
+    builds = []
     for profile in profiles:
         proxy = load_proxy(profile)
         proxy._ensure_coordinator()
-        seen.append(int(health()["pid"]))
+        builds.append(str(proxy.COORDINATOR_BUILD))
+        seen.append(int(health(builds[-1])["pid"]))
+    if len(set(builds)) != 1:
+        raise SystemExit(f"profile proxies expect different coordinator builds: {builds}")
     if len(set(seen)) != 1:
         raise SystemExit(f"profile proxies reached different coordinators: {seen}")
     owner = seen[0]
@@ -71,7 +74,7 @@ def main() -> None:
     if duplicate.returncode != 0:
         raise SystemExit(f"duplicate coordinator did not exit cleanly: {duplicate.returncode}")
     time.sleep(0.2)
-    after = health()
+    after = health(builds[0])
     if int(after["pid"]) != owner or listener_pids() != {owner}:
         raise SystemExit("duplicate launch disturbed the healthy coordinator")
     print(f"shared coordinator live verification passed: pid={owner}, profiles={','.join(profiles)}")

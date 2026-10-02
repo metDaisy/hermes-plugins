@@ -38,10 +38,13 @@ try:
     from .application.model_lifecycle import ModelLifecycleService
     from .application.model_registry import RegisteredModelService
     from .application.model_policy import ModelPolicyService
+    from .application.native_router import NativeRouterPlan, build_native_router_plan
     from .application.option_catalog import ServerOptionCatalog
     from .application.official_runtime import OfficialRuntimeService
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
+    from .application.activity_log_projection import project_activity_lines
+    from .application.profile_model_routing import sync_profile_models
     from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from .application.prism_runtime import PrismRuntimeInstaller
     from .application.runtime_inspector import RuntimeInspector
@@ -82,10 +85,13 @@ except ImportError:
     from application.model_lifecycle import ModelLifecycleService
     from application.model_registry import RegisteredModelService
     from application.model_policy import ModelPolicyService
+    from application.native_router import NativeRouterPlan, build_native_router_plan
     from application.option_catalog import ServerOptionCatalog
     from application.official_runtime import OfficialRuntimeService
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
+    from application.activity_log_projection import project_activity_lines
+    from application.profile_model_routing import sync_profile_models
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
     from application.runtime_inspector import RuntimeInspector
@@ -123,6 +129,7 @@ STATE_PATH = RUNTIME_ROOT / "state.json"
 OPTIONS_PATH = RUNTIME_ROOT / "model-options.json"
 PRESET_DB_PATH = RUNTIME_ROOT / "presets.db"
 OPTION_METADATA_CACHE_PATH = RUNTIME_ROOT / "parameter-metadata-cache.json"
+ROUTER_PRESET_PATH = RUNTIME_ROOT / "router-models.ini"
 ACTIVITY_LOG_PATH = RUNTIME_ROOT / "logs" / "activity.log"
 # Compatibility aliases for older callers. All runtime events now share one ordered log.
 SERVER_LOG_PATH = ACTIVITY_LOG_PATH
@@ -159,7 +166,8 @@ def _default_state() -> dict[str, Any]:
     return {"active_model_id": None, "tag": "latest", "backend": "auto", "port": 18434,
             "pid": None, "custom_endpoint": None, "models": {}, "model_settings": {},
             "runtime_kind": "official", "runtime_path": None,
-            "runtime_mode": "official", "custom_runtime_path": None}
+            "runtime_mode": "official", "custom_runtime_path": None,
+            "execution_mode": "exclusive_swap"}
 
 
 def _store() -> StateStore:
@@ -508,6 +516,26 @@ def _health(port: int) -> bool:
         return False
 
 
+def _router_model_ready(port: int, model_id: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/models", timeout=3) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return False
+        return any(
+            isinstance(row, dict)
+            and str(row.get("id") or "") == model_id
+            and isinstance(row.get("status"), dict)
+            and str(row["status"].get("value") or "") == "loaded"
+            for row in rows
+        )
+    except Exception:  # noqa: BLE001 - readiness polling is fail-closed
+        return False
+
+
 def _endpoint_config_path() -> Path:
     """Return this profile's config for compatibility with older callers."""
     return PROFILE_ROOT / "config.yaml"
@@ -605,6 +633,13 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
+            if path.parent.name in {"project-manager", "coder", "reviewer"}:
+                updated = sync_profile_models(
+                    updated,
+                    base_url=base_url,
+                    main_served="main-local" in provider_models,
+                    compression_served="compression-local" in provider_models,
+                )
             if updated != text:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
@@ -615,14 +650,22 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
 
 def _unregister_custom_endpoint() -> None:
     with _custom_endpoint_lock:
-        updates: list[tuple[Path, str]] = []
+        updates: list[tuple[Path, str, str]] = []
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated, changed = _remove_managed_endpoint(text)
+            if path.parent.name in {"project-manager", "coder", "reviewer"}:
+                routed = sync_profile_models(
+                    updated,
+                    base_url=f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
+                    main_served=False,
+                    compression_served=False,
+                )
+                changed = changed or routed != updated
+                updated = routed
             if changed:
-                updates.append((path, updated))
-        for path, updated in updates:
-            _write_profile_config(path, updated)
+                updates.append((path, text, updated))
+        _apply_profile_updates(updates)
 
 
 def _stop_server(*, preserve_log: bool = False, keep_endpoint: bool = False) -> None:
@@ -696,6 +739,49 @@ def _active_path(model_id: str) -> Path:
     return _models().active_path(model_id)
 
 
+def _native_router_plan(state: dict[str, Any], executable: Path) -> NativeRouterPlan | None:
+    snapshot = execution_profiles()
+    profiles = snapshot.get("profiles") if isinstance(snapshot, dict) else None
+    if not isinstance(profiles, dict):
+        return None
+    required = ("main", "compression")
+    if any(not isinstance(profiles.get(role), dict) or not profiles[role].get("configured") for role in required):
+        return None
+    if any(str(profiles[role].get("runtime_kind") or "") != "official" for role in required):
+        return None
+
+    all_options = _load_options()
+    model_paths: dict[str, Path] = {}
+    role_options: dict[str, dict[str, Any]] = {}
+    for role in required:
+        profile = profiles[role]
+        model_id = str(profile.get("model_id") or "")
+        if not model_id:
+            return None
+        model_paths[role] = _active_path(model_id)
+        options = dict(all_options.get(model_id, {}))
+        preset_id = str(profile.get("preset_id") or "")
+        if preset_id:
+            preset = _presets_store().get(preset_id)
+            if preset is None:
+                raise RuntimeError(f"execution profile preset was not found: {preset_id}")
+            options.update(dict(preset.get("options") or {}))
+        role_options[role] = options
+
+    try:
+        port = int(role_options["main"].get("port", state.get("port") or 18434))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid server port: {role_options['main'].get('port')}") from exc
+    return build_native_router_plan(
+        executable=executable,
+        port=port,
+        preset_path=ROUTER_PRESET_PATH,
+        profiles=profiles,
+        model_paths=model_paths,
+        model_options=role_options,
+    )
+
+
 def _server_startup(log_path: Path | None = None) -> ServerStartupService:
     def spawn(command: list[str], log: Any, executable: Path) -> subprocess.Popen[Any]:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -705,7 +791,7 @@ def _server_startup(log_path: Path | None = None) -> ServerStartupService:
     return ServerStartupService(_state, _save_state, _server_executable, _stop_server, _active_path, _load_options,
                                 _runtime_kind, get_backend, _serving_model_name, _option_cli_args, _watch_server_process, _health,
                                 _register_custom_endpoint, _server_log_tail, log_path or SERVER_LOG_PATH, spawn, time.time, time.sleep,
-                                _mutate_state)
+                                _mutate_state, _native_router_plan, ROUTER_PRESET_PATH, _router_model_ready)
 
 
 def _start_server() -> None:
@@ -713,9 +799,16 @@ def _start_server() -> None:
 
 
 def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]:
-    result = _server_lifecycle(ACTIVITY_LOG_PATH).log_tail(limit)
-    result["role"] = "activity"
-    return result
+    raw = _server_lifecycle(ACTIVITY_LOG_PATH).log_tail(limit)
+    raw_lines = list(raw.get("lines") or [])
+    projected = project_activity_lines(raw_lines)
+    return {
+        **raw,
+        "role": "activity",
+        "raw_lines": raw_lines,
+        "lines": projected["lines"],
+        "events": projected["events"],
+    }
 
 
 def _server_rows() -> list[dict[str, Any]]:
@@ -804,7 +897,15 @@ def save_execution_profile(role: str, body: dict[str, Any]) -> dict[str, Any]:
         for key in ("runtime_kind", "model_id", "preset_id")
     }
     try:
-        endpoint = _sync_execution_profile_endpoint()
+        configured = any(
+            isinstance(profile, dict) and profile.get("configured")
+            for profile in result.get("profiles", {}).values()
+        )
+        if configured:
+            endpoint = _sync_execution_profile_endpoint()
+        else:
+            _unregister_custom_endpoint()
+            endpoint = None
     except Exception:
         def rollback(current: dict[str, Any]) -> None:
             profiles = current.get("execution_profiles")
@@ -856,6 +957,16 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
     model_id = str(profile["model_id"])
     runtime_kind = str(profile["runtime_kind"])
     state = _state()
+    if state.get("execution_mode") == "native_router" and _is_server_running():
+        def route(current: dict[str, Any]) -> None:
+            current["active_model_id"] = model_id
+            current["active_role"] = role
+            current["transition_phase"] = "ROUTER_READY"
+            current["transition_error"] = None
+
+        _mutate_state(route)
+        _transition_log("router-role-selected", role=role, model_id=model_id, runtime_kind=runtime_kind)
+        return {"role": role, "model_id": model_id, "already_running": True, "router_managed": True}
     if (state.get("active_role") == role and state.get("active_model_id") == model_id
             and _runtime_kind(state) == runtime_kind and _is_server_running()):
         return {"role": role, "model_id": model_id, "already_running": True}
@@ -902,6 +1013,11 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
     _mutate_state(ready)
     _transition_log("transition-ready", role=role, model_id=model_id, runtime_kind=runtime_kind)
     return {"role": role, "model_id": model_id, "already_running": False}
+
+
+def execution_role_configured(role: str) -> bool:
+    profile = execution_profiles()["profiles"].get(str(role or "").strip().lower())
+    return isinstance(profile, dict) and bool(profile.get("configured"))
 
 
 def abort_execution_transition(role: str, error: str) -> None:
@@ -972,8 +1088,9 @@ def _remove_hf_cache(repo_id: str) -> bool:
     executable = shutil.which("hf")
     if not executable:
         raise RuntimeError("hf CLI was not found on PATH")
+    typed_repo_id = repo_id if repo_id.startswith("model/") else f"model/{repo_id}"
     result = subprocess.run(
-        [executable, "cache", "rm", repo_id, "--yes", "--format", "quiet"],
+        [executable, "cache", "rm", typed_repo_id, "--yes", "--format", "quiet"],
         capture_output=True, check=False, text=True, encoding="utf-8", errors="replace",
         env=_hf_env(), timeout=120,
     )
@@ -1051,7 +1168,8 @@ router.include_router(create_server_router(ServerRouteContext(
     logs=_server_log_tail,
 )))
 router.include_router(create_execution_profile_router(ExecutionProfileRouteContext(
-    snapshot=execution_profiles, save=save_execution_profile,
+    snapshot=execution_profiles, save=save_execution_profile, start=ensure_execution_role,
+    create_job=_job, launch=_spawn, finish=_finish,
 )))
 def status() -> dict[str, Any]:
     return _status()

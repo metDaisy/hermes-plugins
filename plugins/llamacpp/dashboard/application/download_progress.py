@@ -1,4 +1,4 @@
-"""Honest download-progress state transitions for quiet HF downloads."""
+"""Honest download-progress state transitions for HF CLI downloads."""
 from __future__ import annotations
 from typing import Any, MutableMapping
 

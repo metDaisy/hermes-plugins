@@ -114,6 +114,8 @@ def rewrite_logical_model(body: bytes, state: dict[str, Any]) -> bytes:
     role = logical_role(body)
     if not role:
         return body
+    if state.get("execution_mode") == "native_router":
+        return body
     profiles = state.get("execution_profiles")
     profile = profiles.get(role) if isinstance(profiles, dict) else None
     if role == "main" and not isinstance(profile, dict) and state.get("active_model_id"):
@@ -214,6 +216,11 @@ async def _ensure_role(role: str) -> None:
     await _await_uncancelled(operation)
 
 
+def _role_configured(role: str) -> bool:
+    checker = getattr(_execution_backend(), "execution_role_configured", None)
+    return True if checker is None else bool(checker(role))
+
+
 async def _abort_transition(role: str, error: BaseException) -> None:
     backend = _execution_backend()
     abort = getattr(backend, "abort_execution_transition", None)
@@ -277,6 +284,7 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
 
         return finish_main
 
+    restore_main = _role_configured("main")
     await transition_lock.acquire()
     try:
         while True:
@@ -287,7 +295,8 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
         await _ensure_role("compression")
     except BaseException as original_error:
         try:
-            await _ensure_role("main")
+            if restore_main:
+                await _ensure_role("main")
         except asyncio.CancelledError:
             pass
         except BaseException as restore_error:
@@ -299,13 +308,14 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
 
     async def finish_compression() -> None:
         try:
-            try:
-                await _ensure_role("main")
-            except asyncio.CancelledError:
-                raise
-            except BaseException as restore_error:
-                await _abort_transition("compression", restore_error)
-                raise
+            if restore_main:
+                try:
+                    await _ensure_role("main")
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as restore_error:
+                    await _abort_transition("compression", restore_error)
+                    raise
         finally:
             transition_lock.release()
 
