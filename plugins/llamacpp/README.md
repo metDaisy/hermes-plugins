@@ -1,9 +1,14 @@
 # llamacpp
 
-Unified standalone llama.cpp plugin.
+Core-native control panel for Hermes Local Models.
 
-- **Manager frontend:** `desktop/plugin.js` manages registered GGUF models, parameters, server lifecycle, logs, and backend selection.
-- **Official backend:** `dashboard/backends/official.py` installs and runs official ggml-org releases.
-- **Prism-ML backend:** `dashboard/backends/prism_ml.py` resolves Bonsai-compatible commands. The explicit Prism install action shallow-clones `PrismML-Eng/Bonsai-demo`, downloads its pinned GitHub llama.cpp binary release, verifies `llama-server`, and selects it. It never downloads a model.
+- Hermes Core owns the model registry, runtime installation, `llama-server`
+  supervisor, jobs, autoload/LRU behavior, and provider assignments.
+- The plugin reads those public Core HTTP APIs and exposes Main/Compression role
+  assignment, status, hardware, activate/eject, and server controls.
+- The plugin does not start a coordinator, install a second runtime, register a
+  duplicate provider endpoint, or own another `llama-server` lifecycle.
+- A `models_max=1` Core configuration is the expected policy for a 16 GB VRAM
+  machine so Main and Compression models are resident one at a time.
 
-The plugin owns a standard Hermes `custom` provider endpoint only after a healthy server starts; no separate model-provider plugin is required.
+The built-in **Settings → Providers → Local Models** UI remains unchanged.
