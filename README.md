@@ -7,6 +7,7 @@ metDaisy가 관리하는 Hermes Agent plugin monorepo입니다.
 | Plugin | Version | Description |
 |---|---:|---|
 | [`agent-audit`](plugins/agent-audit/README.md) | `0.5.1` | Privacy-safe lifecycle, validation evidence, SQLite audit storage, dashboard API, Desktop UI |
+| [`kanban-control`](plugins/kanban-control/README.md) | `0.1.0` | Profile-configured `/kcp run` entrypoint with current-session Kanban progress delivery |
 | [`llamacpp`](plugins/llamacpp/README.md) | `0.2.0` | Unified manager frontend with official llama.cpp and Prism-ML backends, GGUF registration, server lifecycle, custom endpoint, and logs |
 
 각 plugin은 독립적인 `plugin.yaml`을 가지며 `plugins/<plugin-name>/`을 plugin root로 사용합니다.
@@ -16,6 +17,7 @@ metDaisy가 관리하는 Hermes Agent plugin monorepo입니다.
 ```text
 plugins/
 ├── agent-audit/
+├── kanban-control/         # deterministic Kanban workflow entrypoint
 └── llamacpp/               # unified manager frontend + official/Prism backends
 ```
 

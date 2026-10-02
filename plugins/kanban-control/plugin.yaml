@@ -1,0 +1,38 @@
+manifest_version: 2
+api_version: 1
+name: kanban-control
+label: Kanban Control
+version: 0.1.0
+description: Deterministic entrypoint for profile-configured workflows on Hermes Kanban.
+author: metDaisy
+license: MIT
+kind: standalone
+tags:
+  - kanban
+  - workflow
+  - orchestration
+config_schema:
+  manager_profile:
+    type: string
+    required: true
+    description: Profile assigned to the initial workflow-control card.
+  worker_profile:
+    type: string
+    required: true
+    description: Profile used by the manager for implementation cards.
+  reviewer_profile:
+    type: string
+    required: true
+    description: Profile used by the manager for independent review cards.
+  board:
+    type: string
+    default: ""
+    description: Optional Kanban board slug. Empty uses the active board.
+  workspace:
+    type: string
+    default: ""
+    description: Absolute shared workspace path for the initial manager card.
+  project:
+    type: string
+    default: ""
+    description: Optional Hermes project id or slug; use instead of workspace for managed worktrees.
