@@ -35,6 +35,7 @@ def test_post_tool_payload_reaches_existing_writer() -> None:
         "tool_input": {"path": "docs/index.md"},
         "session_id": "session-desktop",
         "profile": "main",
+        "cwd": "C:/Users/leee/IdeaProjects/hermes-plugins",
         "extra": {
             "status": "success",
             "duration_ms": 12,
@@ -57,6 +58,7 @@ def test_post_tool_payload_reaches_existing_writer() -> None:
             "turn_id": "turn-1",
             "paths": ["docs/index.md"],
             "profile_name": "main",
+            "project_name": "hermes-plugins",
         }
     ]
 
@@ -72,6 +74,7 @@ def test_adapter_writes_sqlite_event_from_shell_payload() -> None:
             "tool_input": {"path": "docs/index.md"},
             "session_id": "session-desktop",
             "profile": "main",
+            "cwd": "C:/Users/leee/IdeaProjects/hermes-plugins",
             "extra": {"status": "success", "duration_ms": 7},
         }
         with patch("sys.stdin", StringIO(json.dumps(payload))):
@@ -80,12 +83,54 @@ def test_adapter_writes_sqlite_event_from_shell_payload() -> None:
         connection = sqlite3.connect(database)
         try:
             row = connection.execute(
-                "SELECT profile_name, session_id, event_type, status FROM audit_events"
+                "SELECT project_name, profile_name, session_id, event_type, status FROM audit_events"
             ).fetchone()
         finally:
             connection.close()
 
-    assert row == ("main", "session-desktop", "tool_call", "success")
+    assert row == ("hermes-plugins", "main", "session-desktop", "tool_call", "success")
+
+
+def test_pre_api_request_payload_records_model_context_for_following_tool() -> None:
+    adapter = _load(_SHELL_HOOK, "agent_audit_shell_hook_model")
+    with TemporaryDirectory() as directory:
+        database = Path(directory) / "audit.db"
+        adapter._AUDIT._db_path = lambda: database
+        adapter._dispatch(
+            {
+                "hook_event_name": "pre_api_request",
+                "session_id": "session-model",
+                "profile": "main",
+                "extra": {
+                    "model": "gpt-5.6-sol",
+                    "provider": "openai-codex",
+                    "base_url": "https://api.openai.com/v1",
+                    "turn_id": "turn-model",
+                },
+            }
+        )
+        adapter._dispatch(
+            {
+                "hook_event_name": "post_tool_call",
+                "tool_name": "search_files",
+                "tool_input": {"path": "desktop"},
+                "session_id": "session-model",
+                "profile": "main",
+                "extra": {"status": "success", "turn_id": "turn-model"},
+            }
+        )
+
+        connection = sqlite3.connect(database)
+        try:
+            payload = connection.execute(
+                "SELECT payload_json FROM audit_events WHERE event_type = 'tool_call'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+    assert '"model":"gpt-5.6-sol"' in payload
+    assert '"model_provider":"openai-codex"' in payload
+    assert '"model_kind":"cloud"' in payload
 
 
 def test_cli_payload_is_not_double_recorded_by_shell_bridge() -> None:
@@ -110,4 +155,6 @@ def test_cli_payload_is_not_double_recorded_by_shell_bridge() -> None:
 if __name__ == "__main__":
     test_post_tool_payload_reaches_existing_writer()
     test_adapter_writes_sqlite_event_from_shell_payload()
+    test_pre_api_request_payload_records_model_context_for_following_tool()
+    test_cli_payload_is_not_double_recorded_by_shell_bridge()
     print("agent-audit shell-hook tests: passed")

@@ -19,6 +19,14 @@ def _yaml_metadata() -> dict[str, str]:
     return values
 
 
+def _pack_version() -> str:
+    for line in (_ROOT / "pack.yml").read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key == "version":
+            return value.strip().strip("'\"")
+    raise AssertionError("pack.yml version is missing")
+
+
 def test_unified_plugin_metadata_matches() -> None:
     plugin = _yaml_metadata()
     dashboard = json.loads((_ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
@@ -27,6 +35,10 @@ def test_unified_plugin_metadata_matches() -> None:
     assert re.fullmatch(r"0\.\d+\.\d+", plugin["version"])
     assert dashboard["name"] == plugin["name"]
     assert dashboard["version"] == plugin["version"]
+    assert _pack_version() == plugin["version"]
+
+    manifest = (_ROOT / "plugin.yaml").read_text(encoding="utf-8")
+    assert "  - pre_api_request" in manifest
 
 
 if __name__ == "__main__":

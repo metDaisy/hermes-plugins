@@ -23,7 +23,7 @@ _AUDIT = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_AUDIT)
 
 
-_OBSERVER_EVENTS = {"on_skill_lifecycle", "post_tool_call", "on_session_end"}
+_OBSERVER_EVENTS = {"pre_api_request", "on_skill_lifecycle", "post_tool_call", "on_session_end"}
 _PYTHON_PLUGIN_SURFACES = {"cli", "gateway"}
 
 
@@ -34,9 +34,14 @@ def _extra(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _common(payload: dict[str, Any]) -> dict[str, Any]:
     extra = _extra(payload)
+    try:
+        project_name = Path(str(payload.get("cwd") or "")).name or None
+    except (OSError, ValueError):
+        project_name = None
     return {
         "session_id": payload.get("session_id"),
         "profile_name": payload.get("profile"),
+        "project_name": project_name,
         "task_id": extra.get("task_id"),
         "turn_id": extra.get("turn_id"),
     }
@@ -53,7 +58,14 @@ def _dispatch(payload: dict[str, Any]) -> dict[str, Any] | None:
     extra = _extra(payload)
     common = _common(payload)
 
-    if event == "post_tool_call":
+    if event == "pre_api_request":
+        _AUDIT._on_pre_api_request(
+            model=extra.get("model"),
+            provider=extra.get("provider"),
+            base_url=extra.get("base_url"),
+            **common,
+        )
+    elif event == "post_tool_call":
         _AUDIT._on_post_tool_call(
             tool_name=payload.get("tool_name"),
             args=payload.get("tool_input"),

@@ -1,6 +1,6 @@
 """Project-local, privacy-conscious Hermes audit hooks.
 
-The plugin records compact lifecycle metadata in ``.hermes/events.jsonl``.
+The plugin records compact lifecycle metadata in ``.hermes/audit.db``.
 It observes discovery and validation without persisting prompts, commands,
 tool arguments, or results.
 """
@@ -14,6 +14,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     from .audit_storage import database_path, storage_root
@@ -49,6 +50,7 @@ _SAFE_EVENT_FIELDS = {
     "schema_version",
     "timestamp",
     "event",
+    "project_name",
     "profile_name",
     "session_id",
     "task_id",
@@ -85,6 +87,13 @@ _SAFE_EVENT_FIELDS = {
     "failed",
     "interrupted",
     "turn_exit_reason",
+    "model",
+    "model_provider",
+    "model_kind",
+}
+
+_LOCAL_MODEL_PROVIDERS = {
+    "llamacpp", "llama.cpp", "ollama", "lmstudio", "lm-studio", "local", "vllm"
 }
 
 
@@ -222,6 +231,18 @@ def _profile_name(kwargs: dict[str, Any]) -> str | None:
     return _opaque(kwargs.get("profile_name") or kwargs.get("profile")) or _current_profile_name()
 
 
+def _current_project_name() -> str | None:
+    """Return only the working-directory basename, never an absolute path."""
+    try:
+        return _opaque(Path.cwd().name)
+    except OSError:
+        return None
+
+
+def _project_name(kwargs: dict[str, Any]) -> str | None:
+    return _opaque(kwargs.get("project_name")) or _current_project_name()
+
+
 def _initialize_database(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
@@ -246,18 +267,50 @@ def _initialize_database(connection: sqlite3.Connection) -> None:
             ON audit_events(event_type, timestamp DESC);
         CREATE INDEX IF NOT EXISTS audit_events_status_timestamp_idx
             ON audit_events(status, timestamp DESC);
+        CREATE TABLE IF NOT EXISTS audit_model_contexts (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            profile_name TEXT,
+            session_id TEXT NOT NULL,
+            task_id TEXT,
+            turn_id TEXT,
+            model TEXT NOT NULL,
+            provider TEXT,
+            model_kind TEXT NOT NULL
+        );
+        """
+    )
+    event_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_events)")}
+    if "project_name" not in event_columns:
+        connection.execute("ALTER TABLE audit_events ADD COLUMN project_name TEXT")
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS audit_events_project_timestamp_idx
+            ON audit_events(project_name, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS audit_model_contexts_session_turn_timestamp_idx
+            ON audit_model_contexts(session_id, turn_id, timestamp DESC, id DESC);
         """
     )
 
 
-def _write(event: str, **fields: Any) -> None:
-    """Persist one privacy-safe event; audit failure must never break the Agent."""
-    payload = {
-        "schema_version": 1,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "event": event,
-        **{key: value for key, value in fields.items() if value is not None and key in _SAFE_EVENT_FIELDS},
-    }
+def _model_kind(provider: Any, base_url: Any) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider in _LOCAL_MODEL_PROVIDERS:
+        return "local"
+    try:
+        hostname = (urlparse(str(base_url or "")).hostname or "").lower()
+    except ValueError:
+        hostname = ""
+    if hostname in {"localhost", "127.0.0.1", "::1"}:
+        return "local"
+    return "cloud" if normalized_provider or hostname else "unknown"
+
+
+def _record_model_context(**kwargs: Any) -> None:
+    model = _opaque(kwargs.get("model"))
+    session_id = _opaque(kwargs.get("session_id"))
+    if not model or not session_id:
+        return
     connection: sqlite3.Connection | None = None
     try:
         path = _db_path()
@@ -268,13 +321,100 @@ def _write(event: str, **fields: Any) -> None:
             _initialize_database(connection)
             connection.execute(
                 """
-                INSERT INTO audit_events (
+                INSERT INTO audit_model_contexts (
                     timestamp, profile_name, session_id, task_id, turn_id,
+                    model, provider, model_kind
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    _profile_name(kwargs),
+                    session_id,
+                    _opaque(kwargs.get("task_id")),
+                    _opaque(kwargs.get("turn_id")),
+                    model,
+                    _opaque(kwargs.get("provider")),
+                    _model_kind(kwargs.get("provider"), kwargs.get("base_url")),
+                ),
+            )
+            connection.commit()
+    except (OSError, TypeError, ValueError, sqlite3.Error):
+        return
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _latest_model_context(
+    connection: sqlite3.Connection, session_id: Any, turn_id: Any
+) -> dict[str, str]:
+    session = _opaque(session_id)
+    turn = _opaque(turn_id)
+    if not session:
+        return {}
+    if turn:
+        row = connection.execute(
+            """
+            SELECT model, provider, model_kind
+            FROM audit_model_contexts
+            WHERE session_id = ? AND turn_id = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+            """,
+            (session, turn),
+        ).fetchone()
+        if row:
+            return {"model": row[0], "model_provider": row[1], "model_kind": row[2]}
+    row = connection.execute(
+        """
+        SELECT model, provider, model_kind
+        FROM audit_model_contexts
+        WHERE session_id = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT 1
+        """,
+        (session,),
+    ).fetchone()
+    if not row:
+        return {}
+    return {"model": row[0], "model_provider": row[1], "model_kind": row[2]}
+
+
+def _write(event: str, **fields: Any) -> None:
+    """Persist one privacy-safe event; audit failure must never break the Agent."""
+    connection: sqlite3.Connection | None = None
+    try:
+        path = _db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _LOCK:
+            connection = sqlite3.connect(path, timeout=1)
+            connection.execute("PRAGMA busy_timeout = 1000")
+            _initialize_database(connection)
+            safe_fields = {
+                key: value for key, value in fields.items()
+                if value is not None and key in _SAFE_EVENT_FIELDS
+            }
+            safe_fields.setdefault("project_name", _current_project_name())
+            for key, value in _latest_model_context(
+                connection, safe_fields.get("session_id"), safe_fields.get("turn_id")
+            ).items():
+                safe_fields.setdefault(key, value)
+            payload = {
+                "schema_version": 1,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": event,
+                **safe_fields,
+            }
+            connection.execute(
+                """
+                INSERT INTO audit_events (
+                    timestamp, project_name, profile_name, session_id, task_id, turn_id,
                     event_type, status, generation, rule_id, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["timestamp"],
+                    payload.get("project_name"),
                     payload.get("profile_name"),
                     payload.get("session_id"),
                     payload.get("task_id"),
@@ -462,6 +602,11 @@ def _on_skill_lifecycle(**kwargs: Any) -> None:
     )
 
 
+def _on_pre_api_request(**kwargs: Any) -> None:
+    """Persist only model identity needed to attribute later audit events."""
+    _record_model_context(**kwargs)
+
+
 def _on_post_tool_call(**kwargs: Any) -> None:
     tool_name = str(kwargs.get("tool_name") or "")
     session_id = _opaque(kwargs.get("session_id")) or "unknown"
@@ -469,6 +614,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
     status = kwargs.get("status")
     paths = _paths_from_args(args)
     profile_name = _profile_name(kwargs)
+    project_name = _project_name(kwargs)
 
     _write(
         "tool_call",
@@ -480,6 +626,7 @@ def _on_post_tool_call(**kwargs: Any) -> None:
         turn_id=_opaque(kwargs.get("turn_id")),
         paths=paths,
         profile_name=profile_name,
+        project_name=project_name,
     )
 
     discovery = _discovery_call(tool_name, args)
@@ -715,6 +862,7 @@ def _on_session_end(**kwargs: Any) -> None:
 
 
 def register(ctx: Any) -> None:
+    ctx.register_hook("pre_api_request", _on_pre_api_request)
     ctx.register_hook("on_skill_lifecycle", _on_skill_lifecycle)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("pre_verify", _on_pre_verify)

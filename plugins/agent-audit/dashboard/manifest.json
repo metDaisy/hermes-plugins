@@ -1,9 +1,9 @@
 {
   "name": "agent-audit",
   "label": "agent-audit",
-  "description": "Read-only privacy-safe agent-audit event explorer",
+  "description": "Human-readable privacy-safe Agent activity explorer",
   "icon": "ShieldCheck",
-  "version": "0.5.1",
+  "version": "0.7.0",
   "tab": {
     "path": "/agent-audit",
     "position": "after:skills"

@@ -247,6 +247,25 @@ def test_tool_call_records_profile_name_without_other_runtime_context() -> None:
     assert "args" not in tool_call
 
 
+def test_writer_records_privacy_safe_project_name_from_current_directory() -> None:
+    events = _reset()
+    original = _AUDIT._current_project_name
+    try:
+        _AUDIT._current_project_name = lambda: "hermes-plugins"
+        _AUDIT._on_post_tool_call(
+            tool_name="read_file",
+            args={"path": "docs/index.md"},
+            status="success",
+            session_id="session-project",
+            profile_name="main",
+        )
+    finally:
+        _AUDIT._current_project_name = original
+
+    tool_call = next(event for event in events if event["event"] == "tool_call")
+    assert tool_call["project_name"] == "hermes-plugins"
+
+
 def test_tool_call_derives_profile_name_when_hook_context_omits_it() -> None:
     events = _reset()
     original = _AUDIT._current_profile_name
@@ -293,6 +312,51 @@ def test_write_persists_privacy_safe_profile_event_in_sqlite() -> None:
 
     assert row[:3] == ("project-manager", "tool_call", "success")
     assert "unsafe_prompt" not in row[3]
+
+
+def test_model_context_distinguishes_cloud_and_local_models() -> None:
+    assert _AUDIT._model_kind("openai-codex", "https://api.openai.com/v1") == "cloud"
+    assert _AUDIT._model_kind("llamacpp", "http://127.0.0.1:8080/v1") == "local"
+    assert _AUDIT._model_kind("custom", "http://localhost:9000/v1") == "local"
+
+
+def test_tool_event_inherits_latest_privacy_safe_model_context() -> None:
+    with TemporaryDirectory() as directory:
+        database_path = Path(directory) / "audit.db"
+        spec = importlib.util.spec_from_file_location("agent_audit_model_context", _PLUGIN)
+        assert spec and spec.loader
+        audit = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        audit._db_path = lambda: database_path
+
+        audit._on_pre_api_request(
+            model="Qwen3-Coder-30B-A3B-Instruct",
+            provider="llamacpp",
+            base_url="http://127.0.0.1:8080/v1",
+            session_id="session-local-model",
+            turn_id="turn-local-model",
+            profile_name="main",
+        )
+        audit._on_post_tool_call(
+            tool_name="read_file",
+            args={"path": "docs/index.md"},
+            status="success",
+            session_id="session-local-model",
+            turn_id="turn-local-model",
+            profile_name="main",
+        )
+
+        connection = sqlite3.connect(database_path)
+        try:
+            payload = connection.execute(
+                "SELECT payload_json FROM audit_events WHERE event_type = 'tool_call'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+    assert '"model":"Qwen3-Coder-30B-A3B-Instruct"' in payload
+    assert '"model_provider":"llamacpp"' in payload
+    assert '"model_kind":"local"' in payload
 
 
 def test_patch_add_and_delete_headers_preserve_paths() -> None:

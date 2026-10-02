@@ -18,12 +18,38 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.5.1`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.7.0`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`
+- `pack.yml`의 `version`
 기능·계약 변경 시 SemVer 규칙에 따라 버전을 올리고
 `python plugins/agent-audit/test_metadata.py`로 metadata 일치를 확인합니다.
+
+## Desktop에서 보이는 정보
+
+이벤트 목록은 내부 hook 이름보다 사용자가 이해할 수 있는 행동을 우선 표시합니다. 예를 들어
+`search_files · tool_call` 대신 “프로젝트 파일을 검색했습니다”와 대상 경로 요약을 표시합니다.
+항목을 선택하면 상세 내용이 페이지 위로 이동하지 않고 **선택한 항목 바로 아래**에 펼쳐지며,
+한 번에 하나의 상세만 열립니다.
+
+상세 화면은 다음 순서로 정보를 제공합니다.
+
+1. Agent가 수행한 행동과 결과
+2. 사용 모델 이름, provider, `클라우드 모델`/`로컬 모델` 구분
+3. 대상 경로와 검증 Rule
+4. 실패 또는 절차 이탈 시 다음 행동
+5. Session, Task, Turn 같은 기술 정보(접힌 영역)
+
+API는 기존 SQLite row를 변경하지 않고 Desktop용 `schema_version: 2` projection을 생성합니다.
+주요 body는 `actor`, `model`, `activity`, `outcome`, `scope`, `explanation`, `correlation`,
+`evidence`, `privacy`로 구성됩니다. 이전 Desktop copy와의 한 버전 호환을 위해 기존 flat field도
+함께 반환합니다.
+
+목록 필터는 Hermes Desktop의 native `Select`를 사용하며 `Project → Profile → 활동 유형 → 결과`
+순서로 범위를 좁힙니다. Project에는 절대 경로 대신 Agent 작업 디렉터리의 마지막 이름만 저장합니다.
+목록의 각 이벤트에는 Project, Profile, 사용 모델을 함께 표시하고, 모델 context가 없는 과거 기록은
+`모델 미확인`으로 명시합니다.
 
 ## Rule mapping 설정
 
@@ -91,8 +117,9 @@ python plugins/agent-audit/test_agent_audit.py
 python plugins/agent-audit/test_shell_hook.py
 python plugins/agent-audit/test_metadata.py
 python plugins/agent-audit/test_plugin_api.py
+python plugins/agent-audit/test_desktop_contract.py
 ```
 
-Desktop/TUI/dashboard chat은 Hermes shell hook을 사용합니다. Profile에는 `post_tool_call`, `on_skill_lifecycle`, `pre_verify`, `on_session_end` hook entry가 있어야 하며, 각 entry는 이 plugin의 `shell_hook.py`를 가리켜야 합니다. Python plugin hook만으로는 CLI/Gateway에서만 동작합니다.
+Desktop/TUI/dashboard chat은 Hermes shell hook을 사용합니다. Profile에는 `pre_api_request`, `post_tool_call`, `on_skill_lifecycle`, `pre_verify`, `on_session_end` hook entry가 있어야 하며, 각 entry는 이 plugin의 `shell_hook.py`를 가리켜야 합니다. Python plugin hook만으로는 CLI/Gateway에서만 동작합니다.
 
 Plugin discovery 또는 manifest 동작을 변경한 경우에는 관련 Hermes Plugin Doctor/runtime 검사도 수행합니다. Active Profile policy 또는 사용자의 명시적인 선택으로 플러그인을 비활성화한 경우에는 계속 비활성화 상태로 유지합니다. 정적 문서와 regression check가 runtime 활성화를 의미하지는 않습니다.
