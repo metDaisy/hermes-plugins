@@ -1,10 +1,10 @@
 name: llamacpp-pack
 description: Install the unified llama.cpp manager from the metDaisy Hermes plugin monorepo.
 author: metDaisy
-version: 0.2.42
+version: 0.2.43
 plugins:
   - repo: metDaisy/hermes-plugins
     subdir: plugins/llamacpp
-    ref: 1f81f3b2f1ec742cdd1e3209d013ad42ae34a191
+    ref: bc1ac35c2b66a00124a6368afc5b860213c87c6c
 config: {}
 skills: []
