@@ -37,7 +37,7 @@ LIFETIME_LOCK = RUNTIME_ROOT / ("coordinator.lock" if COORDINATOR_PORT == 18380 
 COORDINATOR_STOP_MARKER = RUNTIME_ROOT / "coordinator-stopped"
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.82"
+COORDINATOR_BUILD = "0.2.83"
 DESKTOP_LEASE_TIMEOUT_SECONDS = 8.0
 _desktop_leases = DesktopLeaseRegistry(DESKTOP_LEASE_TIMEOUT_SECONDS)
 
@@ -79,7 +79,7 @@ async def coordinator_events(websocket: WebSocket) -> None:
     await websocket.send_json({
         "id": cursor,
         "type": "connected",
-        "refresh": ["status", "jobs", "logs", "metrics"],
+        "refresh": ["status", "jobs", "logs", "metrics", "inventory"],
     })
     try:
         while True:
@@ -88,7 +88,7 @@ async def coordinator_events(websocket: WebSocket) -> None:
                 await websocket.send_json({
                     "id": batch["cursor"],
                     "type": "gap",
-                    "refresh": ["status", "jobs", "logs", "metrics"],
+                    "refresh": ["status", "jobs", "logs", "metrics", "inventory"],
                 })
             for event in batch["events"]:
                 await websocket.send_json(event)
