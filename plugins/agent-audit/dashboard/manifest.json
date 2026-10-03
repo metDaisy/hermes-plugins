@@ -3,7 +3,7 @@
   "label": "agent-audit",
   "description": "Human-readable privacy-safe Agent activity explorer",
   "icon": "ShieldCheck",
-  "version": "0.10.2",
+  "version": "0.10.4",
   "tab": {
     "path": "/agent-audit",
     "position": "after:skills"

@@ -27,6 +27,18 @@ def test_model_and_reasoning_effort_are_not_repeated_in_details() -> None:
     assert "추론 강도" not in details
 
 
+def test_project_and_session_selectors_use_identity_only_labels() -> None:
+    source = _PLUGIN.read_text(encoding="utf-8")
+    project_selector = source[source.index("function ProjectSelector"):source.index("function ProjectSummary")]
+    filters = source[source.index("function Filters"):source.index("function FilterOption")]
+
+    assert "projects.map(([name])" in project_selector
+    assert "${count}건" not in project_selector
+    assert "${session.count}건" not in filters
+    assert "return session.title || '세션 이름 미확인'" in filters
+    assert "session.project" not in filters
+
+
 def test_project_selector_precedes_native_secondary_filters() -> None:
     source = _PLUGIN.read_text(encoding="utf-8")
     filters = source[source.index("function Filters"):source.index("function ModelBadge")]
@@ -203,6 +215,7 @@ def test_project_first_page_requires_one_project_before_showing_metrics_and_time
 if __name__ == "__main__":
     test_selected_detail_is_inline_and_accessible()
     test_model_and_reasoning_effort_are_not_repeated_in_details()
+    test_project_and_session_selectors_use_identity_only_labels()
     test_project_selector_precedes_native_secondary_filters()
     test_row_omits_redundant_project_and_keeps_colored_profile()
     test_model_badge_uses_compact_parenthesized_effort()

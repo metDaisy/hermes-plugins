@@ -187,7 +187,7 @@ function ProjectSelector({ summary, selected, onSelect }) {
       ] }),
       jsxs(Select, { value: selected, onValueChange: onSelect, children: [
         jsx(SelectTrigger, { className: 'h-9 min-w-72 text-sm', 'aria-label': '프로젝트 선택', children: jsx(SelectValue, { placeholder: '프로젝트를 선택하세요' }) }),
-        jsx(SelectContent, { children: projects.map(([name, count]) => jsx(SelectItem, { value: name, children: `${name} · ${count}건` }, name)) })
+        jsx(SelectContent, { children: projects.map(([name]) => jsx(SelectItem, { value: name, children: name }, name)) })
       ] })
     ] })
   ] })
@@ -223,7 +223,7 @@ function Filters({ summary, sessions, filters, setFilters }) {
   const sessionLabel = id => {
     const session = sessionItems.find(item => item.id === id)
     if (!session) return '세션 이름 미확인'
-    return `${session.title || '세션 이름 미확인'} · ${session.project || 'Project 미확인'} · ${session.count}건`
+    return session.title || '세션 이름 미확인'
   }
   const eventTypes = Object.keys(summary?.event_types || {})
   const statuses = Object.keys(summary?.statuses || {})

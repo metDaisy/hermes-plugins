@@ -18,7 +18,7 @@ Hermes용 privacy-safe audit plugin입니다. 개인정보 보호를 고려한 l
 
 ## 버전 관리
 
-현재 버전은 `0.10.2`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
+현재 버전은 `0.10.4`입니다. 버전의 기준값은 `plugin.yaml`의 `version`이며, 다음
 metadata에도 같은 SemVer 값을 유지합니다.
 
 - `dashboard/manifest.json`의 `version`
@@ -54,7 +54,8 @@ API는 기존 SQLite row를 변경하지 않고 Desktop용 `schema_version: 2` p
 표시합니다. 보조 필터는 `Session → Profile → 활동 유형 → 결과` 순서입니다. Project는 세션의
 Git 저장소 또는 작업 디렉터리 basename으로 보정하며 절대 경로는 노출하지 않습니다.
 목록의 각 이벤트에는 색상으로 구분한 Profile 이름, 사용 모델과 `reasoning-effort`를 표시합니다.
-Session 필터에는 세션 이름, Project, 기록 수를 표시하며 모델 context가 없는 과거 기록은
+Project 선택 항목에는 Project 이름만 표시하고, Session 필터에는 세션 이름만 표시합니다.
+선택 항목에 반복적인 기록 수는 표시하지 않습니다. 모델 context가 없는 과거 기록은
 `모델 미확인`으로 명시합니다.
 
 Skill 지침 확인 기록은 `skill_view` 입력에서 allowlist된 Skill 이름을 함께 표시합니다. Terminal
