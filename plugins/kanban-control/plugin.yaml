@@ -2,7 +2,7 @@ manifest_version: 2
 api_version: 1
 name: kanban-control
 label: Kanban Control
-version: 0.1.0
+version: 0.5.1
 description: Deterministic entrypoint for profile-configured workflows on Hermes Kanban.
 author: metDaisy
 license: MIT
