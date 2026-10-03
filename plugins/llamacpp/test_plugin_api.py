@@ -88,6 +88,9 @@ class LlamaCppManagerTests(unittest.TestCase):
         plugin_version = next(line.split(":", 1)[1].strip() for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))
         pack_version = next(line.split(":", 1)[1].strip() for line in (root / "pack.yml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))
         self.assertEqual(plugin_version, pack_version)
+        expected_build = f'COORDINATOR_BUILD = "{plugin_version}"'
+        self.assertIn(expected_build, (root / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8"))
+        self.assertIn(expected_build, (root / "dashboard" / "plugin_api.py").read_text(encoding="utf-8"))
 
     def test_manifest_does_not_claim_unregistered_agent_tools(self) -> None:
         root = Path(__file__).parent
@@ -1011,6 +1014,33 @@ class LlamaCppManagerTests(unittest.TestCase):
             validate_logical_model(b'{"messages":[]}')
         with self.assertRaisesRegex(Exception, "logical model"):
             validate_logical_model(b'{"model":""}')
+
+    def test_proxy_advertises_only_configured_logical_models(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from dashboard import inference_proxy
+
+        state = {
+            "execution_profiles": {
+                "main": {"model_id": "Ternary-Bonsai-2-27B"},
+                "compression": {"model_id": "Qwen3.5-4B-UD-Q6_K_XL"},
+            },
+        }
+        app = FastAPI()
+        app.include_router(inference_proxy.router)
+        with patch.object(inference_proxy, "_worker_state", return_value=state):
+            response = TestClient(app).get("/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertEqual([model["id"] for model in payload["data"]], [
+            "main-local", "compression-local",
+        ])
+        self.assertEqual([model["model"] for model in payload["models"]], [
+            "main-local", "compression-local",
+        ])
+        self.assertNotIn("Ternary-Bonsai-2-27B", json.dumps(payload))
 
     def test_execution_role_applies_profile_runtime_model_and_role_log(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

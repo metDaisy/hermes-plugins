@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 import anyio
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 router = APIRouter()
@@ -134,6 +134,28 @@ def validate_logical_model(body: bytes) -> str:
     if role is None:
         raise HTTPException(status_code=400, detail="llama.cpp requests must use a configured logical model")
     return role
+
+
+def logical_models_payload(state: dict[str, Any]) -> dict[str, Any]:
+    """Advertise the stable aliases accepted by the coordinator, never worker ids."""
+    profiles = state.get("execution_profiles")
+    configured = profiles if isinstance(profiles, dict) else {}
+    aliases = [
+        logical_model
+        for role, logical_model in (("main", "main-local"), ("compression", "compression-local"))
+        if isinstance(configured.get(role), dict) and configured[role].get("model_id")
+    ]
+    return {
+        "object": "list",
+        "data": [
+            {"id": alias, "object": "model", "created": 0, "owned_by": "llamacpp"}
+            for alias in aliases
+        ],
+        "models": [
+            {"name": alias, "model": alias, "type": "model"}
+            for alias in aliases
+        ],
+    }
 
 
 def rewrite_logical_model(body: bytes, state: dict[str, Any]) -> bytes:
@@ -379,7 +401,9 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
 
 
 @router.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
-async def proxy_inference(request: Request, path: str) -> StreamingResponse:
+async def proxy_inference(request: Request, path: str) -> Response:
+    if request.method == "GET" and path.strip("/") == "models":
+        return JSONResponse(logical_models_payload(_worker_state()))
     finalize: Callable[[], Awaitable[None]] | None = None
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=120.0, pool=5.0),
