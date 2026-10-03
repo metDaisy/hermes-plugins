@@ -1,5 +1,5 @@
 name: llamacpp
-version: 0.2.75
+version: 0.2.78
 description: Unified llama.cpp manager with official and Prism-ML backends.
 kind: standalone
 provides_hooks:

@@ -157,74 +157,111 @@ function formatRate(value) {
   return value != null && Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} tok/s` : '—'
 }
 
-function MetricChart({ samples, series, label, fixedMaximum }) {
+function niceMaximum(value, fixedMaximum) {
+  if (fixedMaximum) return Number(fixedMaximum)
+  const raw = Math.max(1, Number(value) || 0)
+  const magnitude = 10 ** Math.floor(Math.log10(raw))
+  const normalized = raw / magnitude
+  const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10
+  return step * magnitude
+}
+
+function formatAxisTick(value, unit) {
+  if (unit === '%') return `${Math.round(value)}%`
+  if (unit === '요청') return String(Math.round(value))
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
+  if (value >= 100) return String(Math.round(value))
+  return Number(value).toFixed(value > 0 && value < 10 ? 1 : 0)
+}
+
+function MetricChart({ samples, series, label, leftAxis, rightAxis }) {
   const rows = samples || []
-  const values = rows.flatMap(sample => series.map(item => Math.max(0, Number(sample?.[item.field]) || 0)))
-  const maximum = Math.max(1, Number(fixedMaximum) || 0, ...values)
-  const denominator = Math.max(1, rows.length - 1)
-  return jsx('svg', { className: 'h-14 w-full', viewBox: '0 0 100 44', preserveAspectRatio: 'none', role: 'img', 'aria-label': label, children: [
-    jsx('line', { x1: 0, y1: 41, x2: 100, y2: 41, stroke: 'var(--ui-stroke-secondary)', strokeWidth: 1 }),
-    jsx('line', { x1: 0, y1: 21, x2: 100, y2: 21, stroke: 'var(--ui-stroke-secondary)', strokeWidth: 0.6, strokeDasharray: '2 3' }),
+  const plot = { left: 58, right: 582, top: 20, bottom: 150 }
+  const ticks = [0, 0.25, 0.5, 0.75, 1]
+  const latestAt = rows.length ? Math.max(...rows.map(row => Number(row.at) || 0)) : 0
+  const earliestAt = latestAt - 60
+  const axisValues = axis => rows.flatMap(sample => series.filter(item => item.axis === axis).map(item => Math.max(0, Number(sample?.[item.field]) || 0)))
+  const leftMaximum = niceMaximum(Math.max(Number(leftAxis?.minimumMaximum) || 0, ...axisValues('left')), leftAxis?.maximum)
+  const rightMaximum = rightAxis ? niceMaximum(Math.max(Number(rightAxis.minimumMaximum) || 0, ...axisValues('right')), rightAxis.maximum) : leftMaximum
+  const xFor = (sample, index) => {
+    const at = Number(sample?.at) || 0
+    if (latestAt && at) return plot.left + Math.max(0, Math.min(1, (at - earliestAt) / 60)) * (plot.right - plot.left)
+    return plot.left + (index / Math.max(1, rows.length - 1)) * (plot.right - plot.left)
+  }
+  const yFor = (value, maximum) => plot.bottom - (Math.max(0, Number(value) || 0) / maximum) * (plot.bottom - plot.top)
+  return jsx('svg', { className: 'mt-1 h-44 w-full', viewBox: '0 0 640 184', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': label, children: [
+    ...ticks.map(ratio => {
+      const y = plot.bottom - ratio * (plot.bottom - plot.top)
+      return jsxs('g', { children: [
+        jsx('line', { x1: plot.left, y1: y, x2: plot.right, y2: y, stroke: 'var(--ui-stroke-secondary)', strokeWidth: ratio === 0 ? 1 : 0.6, strokeDasharray: ratio === 0 ? undefined : '3 4' }),
+        jsx('text', { x: plot.left - 7, y: y + 3, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(leftMaximum * ratio, leftAxis?.unit) }),
+        rightAxis ? jsx('text', { x: plot.right + 7, y: y + 3, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(rightMaximum * ratio, rightAxis.unit) }) : null
+      ] }, `tick-${ratio}`)
+    }),
+    jsx('text', { x: plot.left, y: 10, textAnchor: 'start', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: leftAxis?.label }),
+    rightAxis ? jsx('text', { x: plot.right, y: 10, textAnchor: 'end', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: rightAxis.label }) : null,
+    jsx('text', { x: plot.left, y: 173, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '60초 전' }),
+    jsx('text', { x: (plot.left + plot.right) / 2, y: 173, textAnchor: 'middle', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '30초 전' }),
+    jsx('text', { x: plot.right, y: 173, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '현재' }),
     ...series.map(item => {
-      const points = rows.map((sample, index) => `${(index / denominator) * 100},${41 - (Math.max(0, Number(sample?.[item.field]) || 0) / maximum) * 38}`).join(' ')
-      return rows.length > 1 ? jsx('polyline', { points, fill: 'none', stroke: item.stroke, strokeWidth: 1.5, strokeDasharray: item.dash || undefined, vectorEffect: 'non-scaling-stroke' }, item.field) : null
+      const maximum = item.axis === 'right' ? rightMaximum : leftMaximum
+      const points = rows.map((sample, index) => `${xFor(sample, index)},${yFor(sample?.[item.field], maximum)}`).join(' ')
+      return rows.length > 1 ? jsx('polyline', { points, fill: 'none', stroke: item.stroke, strokeWidth: 2, strokeDasharray: item.dash || undefined, vectorEffect: 'non-scaling-stroke' }, item.field) : null
     })
   ] })
 }
 
 function ChartLegend({ items }) {
-  return jsxs('div', { className: 'flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-(--ui-text-tertiary)', children: items.map(item => jsxs('span', { className: 'inline-flex items-center gap-1', children: [
-    jsx('span', { className: 'inline-block h-px w-3', style: { backgroundColor: item.stroke } }),
+  return jsxs('div', { className: 'flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-(--ui-text-tertiary)', children: items.map(item => jsxs('span', { className: 'inline-flex items-center gap-1.5', children: [
+    jsx('svg', { width: 18, height: 6, viewBox: '0 0 18 6', 'aria-hidden': true, children: jsx('line', { x1: 0, y1: 3, x2: 18, y2: 3, stroke: item.stroke, strokeWidth: 2, strokeDasharray: item.dash || undefined }) }),
     item.label
   ] }, item.label)) })
 }
 
+const MAIN_COLOR = 'var(--ui-accent)'
+const AUX_COLOR = 'var(--ui-cyan)'
 const TOKEN_SERIES = [
-  { field: 'prompt', label: 'Prompt', stroke: 'var(--ui-accent)' },
-  { field: 'generation', label: 'Generation', stroke: 'var(--ui-text-secondary)', dash: '3 2' }
+  { field: 'mainPrompt', label: 'Main · Prompt (왼쪽 축)', stroke: MAIN_COLOR, axis: 'left' },
+  { field: 'mainGeneration', label: 'Main · Generation (오른쪽 축)', stroke: MAIN_COLOR, axis: 'right', dash: '6 4' },
+  { field: 'auxPrompt', label: 'Aux · Prompt (왼쪽 축)', stroke: AUX_COLOR, axis: 'left' },
+  { field: 'auxGeneration', label: 'Aux · Generation (오른쪽 축)', stroke: AUX_COLOR, axis: 'right', dash: '6 4' }
 ]
-const CONTEXT_SERIES = [{ field: 'contextPercent', label: 'Context', stroke: 'var(--ui-accent)' }]
+const CONTEXT_SERIES = [
+  { field: 'mainContextPercent', label: 'Main context', stroke: MAIN_COLOR, axis: 'left' },
+  { field: 'auxContextPercent', label: 'Aux context', stroke: AUX_COLOR, axis: 'left', dash: '6 4' }
+]
 const REQUEST_SERIES = [
-  { field: 'active', label: 'Active', stroke: 'var(--ui-accent)' },
-  { field: 'queued', label: 'Queued', stroke: 'var(--ui-text-secondary)', dash: '3 2' }
+  { field: 'active', label: 'Active', stroke: MAIN_COLOR, axis: 'left' },
+  { field: 'queued', label: 'Queued', stroke: 'var(--ui-text-secondary)', axis: 'left', dash: '6 4' }
 ]
 
-function RoleMetricCard({ title, metric, samples }) {
-  const contextTokens = Number(metric?.context_tokens) || 0
-  const contextLimit = Number(metric?.context_limit) || 0
-  const contextPercent = contextLimit ? Math.min(100, contextTokens / contextLimit * 100) : 0
-  const contextText = contextLimit ? `${contextTokens.toLocaleString()} / ${contextLimit.toLocaleString()} (${contextPercent.toFixed(1)}%)` : contextTokens ? contextTokens.toLocaleString() : '—'
-  return jsxs('article', { className: 'min-w-0 border-t border-(--ui-stroke-secondary) px-3 py-3', children: [
+function contextSummary(metric) {
+  const tokens = Number(metric?.context_tokens) || 0
+  const limit = Number(metric?.context_limit) || 0
+  const percent = limit ? Math.min(100, tokens / limit * 100) : 0
+  return limit ? `${tokens.toLocaleString()} / ${limit.toLocaleString()} (${percent.toFixed(1)}%)` : tokens ? tokens.toLocaleString() : '—'
+}
+
+function RoleMetricSummary({ title, metric, color }) {
+  return jsxs('article', { className: 'min-w-0 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) p-3', children: [
     jsxs('div', { className: 'flex min-w-0 items-start justify-between gap-3', children: [
       jsxs('div', { className: 'min-w-0', children: [
-        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: title }),
+        jsxs('h3', { className: 'flex items-center gap-2 text-xs font-medium text-(--ui-text-primary)', children: [jsx('span', { className: 'h-2 w-2 shrink-0 rounded-full', style: { backgroundColor: color }, 'aria-hidden': true }), title] }),
         jsx('p', { className: 'mt-0.5 truncate font-mono text-[10px] text-(--ui-text-tertiary)', title: metric?.model_id || '', children: metric?.model_id || '모델 미지정' })
       ] }),
       metric?.active ? jsx('span', { className: 'shrink-0 rounded border border-(--ui-accent) px-1.5 py-0.5 text-[9px] font-medium text-(--ui-accent)', children: 'ACTIVE' }) : null
     ] }),
-    jsxs('dl', { className: 'mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]', children: [
+    jsxs('dl', { className: 'mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]', children: [
       jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Prompt' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.prompt_tokens_per_second) }),
       jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Generation' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.generation_tokens_per_second) }),
       jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Tokens/min' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: Number(metric?.tokens_per_minute || 0).toLocaleString() }),
-      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Context' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: contextText })
-    ] }),
-    jsxs('div', { className: 'mt-3 grid gap-3 sm:grid-cols-2', children: [
-      jsxs('section', { 'aria-label': `${title} token 처리량`, children: [
-        jsx('h4', { className: 'text-[10px] font-medium text-(--ui-text-secondary)', children: 'Token 처리량' }),
-        jsx(MetricChart, { samples, series: TOKEN_SERIES, label: `${title} prompt 및 generation token 처리량` }),
-        jsx(ChartLegend, { items: TOKEN_SERIES })
-      ] }),
-      jsxs('section', { 'aria-label': `${title} context 사용량`, children: [
-        jsx('h4', { className: 'text-[10px] font-medium text-(--ui-text-secondary)', children: 'Context 사용량' }),
-        jsx(MetricChart, { samples, series: CONTEXT_SERIES, label: `${title} context 사용률`, fixedMaximum: 100 }),
-        jsx(ChartLegend, { items: CONTEXT_SERIES })
-      ] })
+      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Context' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: contextSummary(metric) })
     ] })
   ] })
 }
 
 function ResourceMetricsPanel({ status, pushConnected }) {
-  const [roleHistory, setRoleHistory] = useState({ main: [], compression: [] })
+  const [metricHistory, setMetricHistory] = useState([])
   const [workerHistory, setWorkerHistory] = useState([])
   const metricsQuery = useQuery({
     queryKey: [ID, 'resource-metrics'],
@@ -235,25 +272,24 @@ function ResourceMetricsPanel({ status, pushConnected }) {
   const snapshot = metricsQuery.data
   useEffect(() => {
     if (!snapshot?.sampled_at) return
-    setRoleHistory(previous => {
-      const next = { ...previous }
-      for (const role of ['main', 'compression']) {
-        const metric = snapshot.roles?.[role]
-        const contextLimit = Number(metric?.context_limit) || 0
-        next[role] = [...(previous[role] || []), {
-          at: snapshot.sampled_at,
-          prompt: Number(metric?.prompt_tokens_per_second) || 0,
-          generation: Number(metric?.generation_tokens_per_second) || 0,
-          contextPercent: contextLimit ? Math.min(100, (Number(metric?.context_tokens) || 0) / contextLimit * 100) : 0
-        }].slice(-24)
-      }
-      return next
-    })
+    const main = snapshot.roles?.main || {}
+    const auxiliary = snapshot.roles?.compression || {}
+    const mainLimit = Number(main.context_limit) || 0
+    const auxiliaryLimit = Number(auxiliary.context_limit) || 0
+    setMetricHistory(previous => [...previous, {
+      at: snapshot.sampled_at,
+      mainPrompt: Number(main.prompt_tokens_per_second) || 0,
+      mainGeneration: Number(main.generation_tokens_per_second) || 0,
+      mainContextPercent: mainLimit ? Math.min(100, (Number(main.context_tokens) || 0) / mainLimit * 100) : 0,
+      auxPrompt: Number(auxiliary.prompt_tokens_per_second) || 0,
+      auxGeneration: Number(auxiliary.generation_tokens_per_second) || 0,
+      auxContextPercent: auxiliaryLimit ? Math.min(100, (Number(auxiliary.context_tokens) || 0) / auxiliaryLimit * 100) : 0
+    }].filter(row => Number(row.at) >= Number(snapshot.sampled_at) - 60).slice(-60))
     setWorkerHistory(previous => [...previous, {
       at: snapshot.sampled_at,
       active: Number(snapshot.worker?.active_requests) || 0,
       queued: Number(snapshot.worker?.queued_requests) || 0
-    }].slice(-24))
+    }].filter(row => Number(row.at) >= Number(snapshot.sampled_at) - 60).slice(-60))
   }, [snapshot?.sampled_at])
   const profiles = Object.entries(snapshot?.profiles || {}).sort(([left], [right]) => left.localeCompare(right))
   const worker = snapshot?.worker || {}
@@ -265,22 +301,40 @@ function ResourceMetricsPanel({ status, pushConnected }) {
     ] }),
     metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
     !metricsQuery.error && !profiles.length ? jsx('p', { className: 'px-3 py-4 text-xs text-(--ui-text-secondary)', role: 'status', children: '새 요청부터 Profile별 처리량을 수집합니다.' }) : null,
-    jsx(RoleMetricCard, { title: 'Main model', metric: roles.main, samples: roleHistory.main }),
-    jsx(RoleMetricCard, { title: 'Aux model', metric: roles.compression, samples: roleHistory.compression }),
-    jsxs('section', { className: 'grid gap-3 border-t border-(--ui-stroke-secondary) px-3 py-3 md:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)]', 'aria-label': 'Worker 요청 부하', children: [
+    jsxs('section', { className: 'grid gap-3 border-t border-(--ui-stroke-secondary) px-3 py-3 sm:grid-cols-2', 'aria-label': 'Main 및 Aux 현재 지표', children: [
+      jsx(RoleMetricSummary, { title: 'Main model', metric: roles.main, color: MAIN_COLOR }),
+      jsx(RoleMetricSummary, { title: 'Aux model', metric: roles.compression, color: AUX_COLOR })
+    ] }),
+    jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux token 처리량 공용 그래프', children: [
+      jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Token 처리량 · Main/Aux 공용 timeline' }),
+      jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '실선은 Prompt, 점선은 Generation입니다. 두 처리량은 서로 다른 Y축을 사용합니다.' }),
+      jsx(MetricChart, { samples: metricHistory, series: TOKEN_SERIES, label: 'Main 및 Aux prompt와 generation token 처리량', leftAxis: { label: 'Prompt tok/s', unit: 'tok/s' }, rightAxis: { label: 'Generation tok/s', unit: 'tok/s' } }),
+      jsx(ChartLegend, { items: TOKEN_SERIES })
+    ] }),
+    jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux context 사용량 공용 그래프', children: [
+      jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Context 사용량 · Main/Aux 공용 timeline' }),
+      jsx(MetricChart, { samples: metricHistory, series: CONTEXT_SERIES, label: 'Main 및 Aux context 사용률', leftAxis: { label: 'Context 사용률', unit: '%', maximum: 100 } }),
+      jsx(ChartLegend, { items: CONTEXT_SERIES })
+    ] }),
+    jsxs('section', { className: 'grid gap-4 border-t border-(--ui-stroke-secondary) px-3 py-3 md:grid-cols-[minmax(18rem,1.4fr)_minmax(12rem,0.8fr)]', 'aria-label': 'Worker 요청 부하', children: [
       jsxs('div', { children: [
         jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '요청 부하' }),
-        jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: 'Worker 전체 active/queued 요청' }),
-        jsx(MetricChart, { samples: workerHistory, series: REQUEST_SERIES, label: 'Worker active 및 queued 요청' }),
+        jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: 'Worker 전체 active/queued 요청 수' }),
+        jsx(MetricChart, { samples: workerHistory, series: REQUEST_SERIES, label: 'Worker active 및 queued 요청 수', leftAxis: { label: '요청 수', unit: '요청', minimumMaximum: 4 } }),
         jsx(ChartLegend, { items: REQUEST_SERIES })
       ] }),
       jsxs('div', { children: [
         jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Profile 최근 활동' }),
-        jsx('div', { className: 'mt-2 grid gap-1.5', children: profiles.length ? profiles.map(([name, metric]) => jsxs('div', { className: 'grid grid-cols-[minmax(6rem,1fr)_auto_auto] items-center gap-2 text-[10px]', children: [
-          jsx('span', { className: 'truncate text-(--ui-text-secondary)', children: name }),
-          jsx('span', { className: 'tabular-nums text-(--ui-text-tertiary)', children: formatRate(metric.prompt_tokens_per_second) }),
-          jsx('span', { className: 'tabular-nums text-(--ui-text-tertiary)', children: formatRate(metric.generation_tokens_per_second) })
-        ] }, name)) : jsx('p', { className: 'text-[10px] text-(--ui-text-tertiary)', children: '최근 활동 없음' }) })
+        jsxs('div', { className: 'mt-2 grid grid-cols-[minmax(6rem,1fr)_auto_auto] gap-x-2 gap-y-1.5 text-[10px]', children: [
+          jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'Profile' }),
+          jsx('span', { className: 'text-right text-(--ui-text-tertiary)', children: 'Prompt' }),
+          jsx('span', { className: 'text-right text-(--ui-text-tertiary)', children: 'Generation' }),
+          ...(profiles.length ? profiles.flatMap(([name, metric]) => [
+            jsx('span', { className: 'truncate text-(--ui-text-secondary)', children: name }, `${name}-name`),
+            jsx('span', { className: 'text-right tabular-nums text-(--ui-text-tertiary)', children: formatRate(metric.prompt_tokens_per_second) }, `${name}-prompt`),
+            jsx('span', { className: 'text-right tabular-nums text-(--ui-text-tertiary)', children: formatRate(metric.generation_tokens_per_second) }, `${name}-generation`)
+          ]) : [jsx('span', { className: 'col-span-3 text-(--ui-text-tertiary)', children: '최근 활동 없음' }, 'empty')])
+        ] })
       ] })
     ] }),
     jsxs('div', { className: 'flex flex-wrap gap-x-4 gap-y-1 border-t border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-3 py-2 text-[11px] text-(--ui-text-tertiary)', children: [

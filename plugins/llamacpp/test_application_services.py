@@ -603,6 +603,7 @@ class CoordinatorEventBusTests(unittest.TestCase):
                 Process(), log_path,
                 lambda event_type, refresh: observed.append((event_type, refresh)),
             )
+            self.assertTrue(thread.daemon)
             thread.join(timeout=2)
 
             self.assertFalse(thread.is_alive())
