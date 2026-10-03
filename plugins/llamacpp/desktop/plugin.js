@@ -39,7 +39,8 @@ function useCoordinatorPush() {
       status: [ID, 'status'],
       jobs: [ID, 'jobs'],
       logs: [ID, 'activity-log'],
-      metrics: [ID, 'resource-metrics']
+      metrics: [ID, 'resource-metrics'],
+      inventory: [ID, 'hf-models']
     }
     const schedule = name => {
       const key = keys[name]
@@ -855,7 +856,7 @@ function Page() {
   const [wizard, setWizard] = useState(null)
   const [tab, setTab] = useState('runtime')
   const pushConnected = useCoordinatorPush()
-  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.coordinator?.stopped ? false : query.state.data?.coordinator?.ok === false ? false : pushConnected ? 30000 : query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: query => query.state.data?.coordinator?.ok !== false })
+  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.coordinator?.stopped ? false : query.state.data?.coordinator?.ok === false ? false : pushConnected ? false : query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: query => query.state.data?.coordinator?.ok !== false })
   const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
   const hfModels = useQuery({ queryKey: [ID, 'hf-models'], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
   const data = status.data; const models = data?.models || []; const localModels = hfModels.data?.models || []; const runtimeJobs = jobs.data?.jobs || []

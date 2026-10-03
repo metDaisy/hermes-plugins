@@ -18,6 +18,7 @@ class ModelRouteContext:
     launch: Callable[[dict[str, Any], Callable[[], None], str], None]
     finish: Callable[[dict[str, Any], str], None]
     begin_download: Callable[[dict[str, Any], str], None]
+    publish: Callable[[str, list[str]], Any] = lambda _event_type, _refresh: None
 
 
 def create_router(context: ModelRouteContext) -> APIRouter:
@@ -34,19 +35,25 @@ def create_router(context: ModelRouteContext) -> APIRouter:
 
     @router.post("/eject")
     def eject(body: dict[str, Any]) -> dict[str, Any]:
-        return context.lifecycle().eject(str(body.get("model_id") or ""))
+        result = context.lifecycle().eject(str(body.get("model_id") or ""))
+        context.publish("model_ejected", ["status", "inventory"])
+        return result
 
     @router.delete("/models/{model_id}")
     def delete(model_id: str) -> dict[str, Any]:
         try:
-            return context.lifecycle().delete(model_id)
+            result = context.lifecycle().delete(model_id)
+            context.publish("model_deleted", ["status", "inventory"])
+            return result
         except RuntimeError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.delete("/models/{model_id}/registration")
     def unregister(model_id: str) -> dict[str, Any]:
         try:
-            return context.lifecycle().unregister(model_id)
+            result = context.lifecycle().unregister(model_id)
+            context.publish("model_unregistered", ["status", "inventory"])
+            return result
         except RuntimeError as exc:
             status_code = 409 if "stop llama-server" in str(exc) else 404
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
@@ -88,7 +95,9 @@ def create_router(context: ModelRouteContext) -> APIRouter:
     def register(body: dict[str, Any]) -> dict[str, Any]:
         repo_id, paths = _selection(body)
         try:
-            return context.workflow().register(repo_id, paths, alias=str(body.get("alias") or ""))
+            result = context.workflow().register(repo_id, paths, alias=str(body.get("alias") or ""))
+            context.publish("model_registered", ["status", "inventory"])
+            return result
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -111,7 +120,9 @@ def create_router(context: ModelRouteContext) -> APIRouter:
         if not repo_id or repo_id != repo_id.strip():
             raise HTTPException(status_code=422, detail="repo_id is required")
         try:
-            return context.workflow().remove_cached_repository(repo_id)
+            result = context.workflow().remove_cached_repository(repo_id)
+            context.publish("model_cache_deleted", ["inventory"])
+            return result
         except RuntimeError as exc:
             message = str(exc)
             status_code = 409 if message.startswith("등록된 모델") else 503 if "CLI was not found" in message else 502
@@ -120,7 +131,9 @@ def create_router(context: ModelRouteContext) -> APIRouter:
     @router.post("/sideload")
     def sideload(body: dict[str, Any]) -> dict[str, Any]:
         try:
-            return context.lifecycle().sideload(Path(str(body.get("path") or "")))
+            result = context.lifecycle().sideload(Path(str(body.get("path") or "")))
+            context.publish("model_registered", ["status", "inventory"])
+            return result
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

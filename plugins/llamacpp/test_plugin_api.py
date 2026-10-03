@@ -102,6 +102,25 @@ class LlamaCppManagerTests(unittest.TestCase):
         normalized = manifest.replace(chr(13) + chr(10), chr(10))
         self.assertIn("provides_hooks:\n  - pre_api_request\n  - pre_auxiliary_call", normalized)
 
+
+    def test_stopped_backend_serves_model_inventory_and_presets_without_coordinator(self) -> None:
+        class Backend:
+            @staticmethod
+            def _local_hf_models():
+                return {"models": [{"repo_id": "owner/repo"}]}
+
+            @staticmethod
+            def presets(model_id=""):
+                return {"presets": [{"id": "preset-1"}], "model_id": model_id}
+
+        query = {"model_id": "registered-model"}
+        with patch.object(profile_proxy, "_read_only_backend", return_value=Backend()):
+            inventory = profile_proxy._stopped_payload("hf-models", {})
+            presets = profile_proxy._stopped_payload("presets", query)
+
+        self.assertEqual(inventory, {"models": [{"repo_id": "owner/repo"}]})
+        self.assertEqual(presets, {"presets": [{"id": "preset-1"}], "model_id": "registered-model"})
+
     def test_hf_cache_removal_uses_typed_repository_id(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch.object(api.shutil, "which", return_value="hf"), \
@@ -1532,6 +1551,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("query.state.data?.coordinator?.ok === false ? false", source)
         self.assertIn("query.state.data?.coordinator?.stopped ? false", source)
         self.assertIn("pluginCtx.socket('/events'", source)
+        self.assertIn("inventory: [ID, 'hf-models']", source)
         self.assertIn("pushConnected ? false", source)
         self.assertNotIn("push 연결", source)
         self.assertIn("Auxiliary", source)

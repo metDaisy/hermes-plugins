@@ -1469,6 +1469,36 @@ class HuggingFaceModelWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HF cache"):
             workflow.register("owner/repo", ["missing.gguf"])
 
+    def test_register_route_publishes_inventory_refresh_event(self) -> None:
+        from dashboard.routes.model_routes import ModelRouteContext, create_router
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI
+
+        events: list[tuple[str, list[str]]] = []
+
+        class Workflow:
+            @staticmethod
+            def register(repo_id, paths, alias=""):
+                return {"model_id": alias or repo_id, "paths": paths}
+
+        context = ModelRouteContext(
+            lifecycle=lambda: object(), workflow=lambda: Workflow(),
+            create_job=lambda kind, detail: {"kind": kind, "detail": detail, "job_id": "job"},
+            launch=lambda *_args: None, finish=lambda *_args: None,
+            begin_download=lambda *_args: None,
+            publish=lambda event_type, refresh: events.append((event_type, list(refresh))),
+        )
+        app = FastAPI()
+        app.include_router(create_router(context))
+
+        response = TestClient(app).post(
+            "/register",
+            json={"repo": "owner/repo", "paths": ["model.gguf"], "alias": "local-model"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(events, [("model_registered", ["status", "inventory"])])
+
     def test_register_uses_model_runtime_instead_of_selected_dashboard_runtime(self) -> None:
         from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
 

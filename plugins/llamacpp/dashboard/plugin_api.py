@@ -32,7 +32,7 @@ _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.81"
+COORDINATOR_BUILD = "0.2.82"
 
 
 def _health_payload() -> dict[str, object] | None:
@@ -259,6 +259,10 @@ def _stopped_payload(path: str, query: object) -> dict[str, object] | None:
         return backend.resource_metrics(int(getter("window") or 60))
     if normalized == "jobs":
         return {"jobs": []}
+    if normalized == "hf-models":
+        return backend._local_hf_models()
+    if normalized == "presets":
+        return backend.presets(str(getter("model_id") or ""))
     return None
 
 

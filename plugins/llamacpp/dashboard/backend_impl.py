@@ -1324,6 +1324,7 @@ def _option_list() -> list[dict[str, Any]]:
 router.include_router(create_model_router(ModelRouteContext(
     lifecycle=_model_lifecycle, workflow=_hf_workflow, create_job=_job,
     launch=_spawn, finish=_finish, begin_download=_download_progress.begin,
+    publish=lambda event_type, refresh: publish_event(event_type, refresh=refresh),
 )))
 router.include_router(create_server_router(ServerRouteContext(
     state=_state, stop=_stop_server, start=_start_server, create_job=_job, launch=_spawn,
