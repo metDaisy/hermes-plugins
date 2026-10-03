@@ -63,7 +63,7 @@ class ResourceHistoryStore:
 
     def read(self, window_seconds: int, *, now: float | None = None, max_points: int = 360) -> list[dict[str, Any]]:
         current = float(now if now is not None else time.time())
-        cutoff = current - max(60, min(int(window_seconds), 24 * 3600))
+        cutoff = current - max(5, min(int(window_seconds), 24 * 3600))
         with self._lock:
             rows = [row for row in self._rows() if float(row.get("at") or 0) >= cutoff]
         rows.sort(key=lambda row: float(row.get("at") or 0))

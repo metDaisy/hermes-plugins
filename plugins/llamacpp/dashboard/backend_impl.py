@@ -854,8 +854,8 @@ def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]
 
 def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dict[str, Any]:
     requested = int(window)
-    if requested < 60 or requested > 86400:
-        raise ValueError("window must be between 60 and 86400 seconds")
+    if requested < 5 or requested > 86400:
+        raise ValueError("window must be between 5 and 86400 seconds")
     projected = _server_log_tail(500)
     result = aggregate_profile_metrics(
         list(projected.get("events") or []), window_seconds=min(requested, 300),

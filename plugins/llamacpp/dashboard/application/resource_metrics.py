@@ -8,7 +8,7 @@ from typing import Any
 def aggregate_profile_metrics(events: list[dict[str, Any]], *, now: float | None = None,
                               window_seconds: int = 60) -> dict[str, Any]:
     current = float(now if now is not None else time.time())
-    window = max(10, min(int(window_seconds), 300))
+    window = max(5, min(int(window_seconds), 300))
     requests: dict[str, dict[str, Any]] = {}
     for event in events:
         observed_at = float(event.get("observed_at") or 0)

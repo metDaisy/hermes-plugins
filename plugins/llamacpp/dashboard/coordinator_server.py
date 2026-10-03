@@ -37,7 +37,7 @@ LIFETIME_LOCK = RUNTIME_ROOT / ("coordinator.lock" if COORDINATOR_PORT == 18380 
 COORDINATOR_STOP_MARKER = RUNTIME_ROOT / "coordinator-stopped"
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.83"
+COORDINATOR_BUILD = "0.2.84"
 DESKTOP_LEASE_TIMEOUT_SECONDS = 8.0
 _desktop_leases = DesktopLeaseRegistry(DESKTOP_LEASE_TIMEOUT_SECONDS)
 
@@ -135,7 +135,7 @@ if __name__ == "__main__":
 
         watchdog = threading.Thread(target=stop_after_last_desktop, daemon=True, name="llamacpp-desktop-lease")
         watchdog.start()
-        telemetry_stop, _telemetry_thread = start_resource_sampler(record_resource_sample, interval_seconds=10.0)
+        telemetry_stop, _telemetry_thread = start_resource_sampler(record_resource_sample, interval_seconds=2.0)
         server.run()
     finally:
         if "telemetry_stop" in locals():

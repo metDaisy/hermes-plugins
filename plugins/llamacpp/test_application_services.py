@@ -616,6 +616,20 @@ class CoordinatorEventBusTests(unittest.TestCase):
 
 
 class ResourceHistoryTests(unittest.TestCase):
+    def test_supports_five_second_metric_windows_for_two_second_samples(self) -> None:
+        import tempfile
+
+        from dashboard.application.resource_history import ResourceHistoryStore
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            store = ResourceHistoryStore(Path(raw_root) / "resource-history.jsonl")
+            for at in (94.0, 96.0, 98.0, 100.0):
+                store.append({"at": at, "workerRssBytes": int(at)})
+
+            recent = store.read(window_seconds=5, now=100.0, max_points=10)
+
+        self.assertEqual([row["at"] for row in recent], [96.0, 98.0, 100.0])
+
     def test_reuses_parsed_history_when_switching_metric_windows(self) -> None:
         import tempfile
         from unittest.mock import patch

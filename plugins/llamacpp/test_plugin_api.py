@@ -1543,11 +1543,15 @@ class LlamaCppManagerTests(unittest.TestCase):
     def test_operations_ui_displays_singleton_proxy_and_cancellation_contract(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn("Singleton proxy", source)
-        self.assertIn("응답 중단 시 upstream 요청도 종료", source)
+        self.assertIn("coordinator.stopped ? 'stopped' : 'unavailable'", source)
+        self.assertIn("cancel propagation on", source)
         self.assertIn("Exclusive swap", source)
+        self.assertIn("Official ${status?.runtime_options?.official?.version || '미설치'}", source)
+        self.assertIn("Prism-ML ${status?.runtime_options?.prism_ml?.version || '미설치'}", source)
         self.assertIn("Main", source)
         self.assertIn("서버와 Singleton proxy를 중지했습니다.", source)
         self.assertIn("queryClient.setQueryData([ID, 'status']", source)
+        self.assertIn("stopped: true", source)
         self.assertIn("query.state.data?.coordinator?.ok === false ? false", source)
         self.assertIn("query.state.data?.coordinator?.stopped ? false", source)
         self.assertIn("pluginCtx.socket('/events'", source)
@@ -1593,8 +1597,13 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("'aria-controls': 'llamacpp-resource-details'", source)
         self.assertIn("id: 'llamacpp-resource-details'", source)
         self.assertIn("const METRIC_WINDOWS", source)
-        self.assertIn("label: '30분'", source)
-        self.assertIn("label: '24시간'", source)
+        for label in ('5초', '15초', '30초', '1분', '5분', '15분', '30분', '1시간', '3시간', '6시간', '12시간', '24시간'):
+            self.assertIn(f"label: '{label}'", source)
+        self.assertIn("'aria-label': '리소스 그래프 시간 범위'", source)
+        metric_range = source[source.rindex("jsx('select'", 0, source.index("'aria-label': '리소스 그래프 시간 범위'")):source.index("!serverStopped && !metricsQuery.error")]
+        self.assertIn("jsx('select'", metric_range)
+        self.assertNotIn("role: 'group'", metric_range)
+        self.assertIn("children: '데이터 없음'", source)
         self.assertIn("children: 'RAM 사용량'", source)
         self.assertIn("workerRssGiB", source)
         self.assertIn("workerPrivateGiB", source)
@@ -2109,10 +2118,10 @@ class LlamaCppManagerTests(unittest.TestCase):
         coordinator_source = (Path(__file__).parent / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8")
 
         self.assertIn("ResourceHistoryStore", backend_source)
-        self.assertIn("window must be between 60 and 86400 seconds", backend_source)
+        self.assertIn("window must be between 5 and 86400 seconds", backend_source)
         self.assertIn('result["series"] = RESOURCE_HISTORY.read', backend_source)
         self.assertIn("worker_memory_sample", backend_source)
-        self.assertIn("start_resource_sampler(record_resource_sample", coordinator_source)
+        self.assertIn("start_resource_sampler(record_resource_sample, interval_seconds=2.0)", coordinator_source)
         self.assertIn("telemetry_stop.set()", coordinator_source)
 
     def test_worker_spawn_is_bound_to_coordinator_lifetime(self) -> None:

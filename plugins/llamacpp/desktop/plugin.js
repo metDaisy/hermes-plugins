@@ -163,6 +163,7 @@ function formatGiB(value) {
 }
 
 function formatWindowOffset(seconds) {
+  if (seconds < 60) return `${seconds}초 전`
   if (seconds >= 3600) return `${seconds / 3600}시간 전`
   return `${Math.round(seconds / 60)}분 전`
 }
@@ -207,6 +208,9 @@ function MetricChart({ samples, series, label, leftAxis, rightAxis, windowSecond
   const latestAt = Number(requestedLatestAt) || (rows.length ? Math.max(...rows.map(row => Number(row.at) || 0)) : Date.now() / 1000)
   const earliestAt = latestAt - windowSeconds
   const axisValues = axis => rows.flatMap(sample => series.filter(item => item.axis === axis && sample?.[item.field] != null).map(item => Math.max(0, Number(sample[item.field]) || 0)))
+  const hasLeftData = axisValues('left').length > 0
+  const hasRightData = rightAxis ? axisValues('right').length > 0 : false
+  const hasData = hasLeftData || hasRightData
   const leftMaximum = niceMaximum(Math.max(Number(leftAxis?.minimumMaximum) || 0, ...axisValues('left')), leftAxis?.maximum)
   const rightMaximum = rightAxis ? niceMaximum(Math.max(Number(rightAxis.minimumMaximum) || 0, ...axisValues('right')), rightAxis.maximum) : leftMaximum
   const xFor = sample => plot.left + Math.max(0, Math.min(1, ((Number(sample?.at) || earliestAt) - earliestAt) / windowSeconds)) * (plot.right - plot.left)
@@ -241,8 +245,8 @@ function MetricChart({ samples, series, label, leftAxis, rightAxis, windowSecond
         const y = plot.bottom - ratio * (plot.bottom - plot.top)
         return jsxs('g', { children: [
           jsx('line', { x1: plot.left, y1: y, x2: plot.right, y2: y, stroke: 'var(--ui-stroke-secondary)', strokeWidth: ratio === 0 ? 1 : 0.6, strokeDasharray: ratio === 0 ? undefined : '3 4' }),
-          jsx('text', { x: plot.left - 7, y: y + 3, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(leftMaximum * ratio, leftAxis?.unit) }),
-          rightAxis ? jsx('text', { x: plot.right + 7, y: y + 3, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(rightMaximum * ratio, rightAxis.unit) }) : null
+          ratio === 0 || hasLeftData ? jsx('text', { x: plot.left - 7, y: y + 3, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(leftMaximum * ratio, leftAxis?.unit) }) : null,
+          rightAxis && (ratio === 0 || hasRightData) ? jsx('text', { x: plot.right + 7, y: y + 3, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(rightMaximum * ratio, rightAxis.unit) }) : null
         ] }, `tick-${ratio}`)
       }),
       jsx('text', { x: plot.left, y: 10, textAnchor: 'start', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: leftAxis?.label }),
@@ -250,6 +254,7 @@ function MetricChart({ samples, series, label, leftAxis, rightAxis, windowSecond
       jsx('text', { x: plot.left, y: 173, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatWindowOffset(windowSeconds) }),
       jsx('text', { x: (plot.left + plot.right) / 2, y: 173, textAnchor: 'middle', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatWindowOffset(windowSeconds / 2) }),
       jsx('text', { x: plot.right, y: 173, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '현재' }),
+      !hasData ? jsx('text', { x: (plot.left + plot.right) / 2, y: (plot.top + plot.bottom) / 2, textAnchor: 'middle', fill: 'var(--ui-text-tertiary)', fontSize: 11, children: '데이터 없음' }) : null,
       ...series.flatMap(item => segmentsFor(item).map((points, index) => points.length > 1 ? jsx('polyline', { points: points.join(' '), fill: 'none', stroke: item.stroke, strokeWidth: 2, strokeDasharray: item.dash || undefined, vectorEffect: 'non-scaling-stroke' }, `${item.field}-${index}`) : jsx('circle', { cx: Number(points[0].split(',')[0]), cy: Number(points[0].split(',')[1]), r: 2, fill: item.stroke }, `${item.field}-${index}`))),
       hoverX != null ? jsx('line', { x1: hoverX, y1: plot.top, x2: hoverX, y2: plot.bottom, stroke: 'var(--ui-text-primary)', strokeWidth: 1, strokeDasharray: '2 3', pointerEvents: 'none' }) : null,
       jsx('rect', { x: plot.left, y: plot.top, width: plot.right - plot.left, height: plot.bottom - plot.top, fill: 'transparent' })
@@ -268,10 +273,17 @@ function ChartLegend({ items }) {
 const MAIN_COLOR = 'var(--ui-accent)'
 const AUX_COLOR = 'var(--ui-cyan)'
 const METRIC_WINDOWS = [
+  { seconds: 5, label: '5초' },
+  { seconds: 15, label: '15초' },
+  { seconds: 30, label: '30초' },
+  { seconds: 60, label: '1분' },
   { seconds: 300, label: '5분' },
+  { seconds: 900, label: '15분' },
   { seconds: 1800, label: '30분' },
   { seconds: 3600, label: '1시간' },
+  { seconds: 10800, label: '3시간' },
   { seconds: 21600, label: '6시간' },
+  { seconds: 43200, label: '12시간' },
   { seconds: 86400, label: '24시간' }
 ]
 const MEMORY_SERIES = [
@@ -367,11 +379,11 @@ function ResourceMetricsPanel({ status, pushConnected }) {
       jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2 bg-(--ui-bg-tertiary) px-3 py-2', children: [
         jsxs('div', { children: [
           jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: `${selectedWindowLabel} 추이` }),
-          jsx('p', { className: 'mt-0.5 text-[10px] text-(--ui-text-tertiary)', children: '10초 간격 수집 · 최대 360개 점으로 자동 축약' })
+          jsx('p', { className: 'mt-0.5 text-[10px] text-(--ui-text-tertiary)', children: '2초 간격 수집 · 최대 360개 점으로 자동 축약' })
         ] }),
-        jsx('div', { className: 'flex overflow-hidden rounded-md border border-(--ui-stroke-secondary)', role: 'group', 'aria-label': '리소스 그래프 시간 범위', children: METRIC_WINDOWS.map(item => jsx('button', { className: `px-2 py-1 text-[10px] ${windowSeconds === item.seconds ? 'bg-(--ui-accent) text-(--ui-accent-foreground)' : 'bg-(--ui-bg-primary) text-(--ui-text-secondary) hover:bg-(--ui-bg-secondary)'}`, type: 'button', 'aria-pressed': windowSeconds === item.seconds, onClick: () => setWindowSeconds(item.seconds), children: item.label }, item.seconds)) })
+        jsx('select', { className: compactInput, style: { ...themedSelect(), width: '7rem', maxWidth: '7rem', flex: '0 0 7rem' }, value: String(windowSeconds), 'aria-label': '리소스 그래프 시간 범위', onChange: event => setWindowSeconds(Number(event.target.value)), children: METRIC_WINDOWS.map(item => jsx('option', { style: themedOption, value: String(item.seconds), children: item.label }, item.seconds)) })
       ] }),
-      !serverStopped && !metricsQuery.error && !metricHistory.length ? jsx('p', { className: 'px-3 py-4 text-xs text-(--ui-text-secondary)', role: 'status', children: 'worker가 실행되면 RAM과 처리량 추이를 10초 간격으로 수집합니다.' }) : null,
+      !serverStopped && !metricsQuery.error && !metricHistory.length ? jsx('p', { className: 'px-3 py-4 text-xs text-(--ui-text-secondary)', role: 'status', children: 'worker가 실행되면 RAM과 처리량 추이를 2초 간격으로 수집합니다.' }) : null,
       jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux token 처리량 공용 그래프', children: [
         jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Token 처리량 · Main/Aux 공용 timeline' }),
         jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '실선은 Prompt, 점선은 Generation입니다. 요청이 있었던 시점만 연결하며 두 처리량은 서로 다른 Y축을 사용합니다.' }),
@@ -500,7 +512,7 @@ function ExecutionProfilesPanel({ status, onRefresh }) {
     setStarting(true); setMessage('')
     try {
       await api('/server', { method: 'POST', body: { action: 'stop' } })
-      queryClient.setQueryData([ID, 'status'], previous => previous ? { ...previous, server_running: false, coordinator: { ...(previous.coordinator || {}), ok: false, pid: null, desktop_clients: 0 } } : previous)
+      queryClient.setQueryData([ID, 'status'], previous => previous ? { ...previous, server_running: false, coordinator: { ...(previous.coordinator || {}), ok: false, stopped: true, pid: null, desktop_clients: 0 } } : previous)
       setMessage('서버와 Singleton proxy를 중지했습니다.')
     }
     catch (cause) { setMessage(`서버 중지 실패: ${cause?.message || String(cause)}`) } finally { setStarting(false) }
@@ -517,18 +529,18 @@ function ExecutionProfilesPanel({ status, onRefresh }) {
 
 function CoordinatorStatusPanel({ status }) {
   const coordinator = status?.coordinator || {}
-  return jsxs('section', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) p-3', 'aria-labelledby': 'llamacpp-coordinator-title', children: [
-    jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2', children: [
-      jsx('h2', { id: 'llamacpp-coordinator-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Singleton proxy' }),
-      jsx(Badge, { tone: coordinator.ok ? 'good' : 'warn', children: coordinator.ok ? 'running' : 'unavailable' })
-    ] }),
-    jsxs('dl', { className: 'mt-3 grid gap-3 text-xs sm:grid-cols-4', children: [
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Coordinator' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: coordinator.pid ? `PID ${coordinator.pid} · :${coordinator.port}` : `:${coordinator.port || 18380}` })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'VRAM 정책' }), jsx('dd', { className: 'mt-1 text-(--ui-text-secondary)', children: status?.execution_mode === 'exclusive_swap' ? 'Exclusive swap' : status?.execution_mode || 'Exclusive swap' })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '전환 상태' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: `${status?.execution?.active_role || '-'} · ${status?.execution?.transition_phase || 'IDLE'}` })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '요청 취소' }), jsx('dd', { className: 'mt-1 text-(--ui-text-secondary)', children: coordinator.cancellation_propagation ? '응답 중단 시 upstream 요청도 종료' : '확인되지 않음' })] })
-    ] }),
-    jsx('p', { className: 'mt-3 text-xs text-(--ui-text-tertiary)', children: `여러 Hermes Desktop이 coordinator 하나를 공유합니다. 마지막 Desktop 종료 후 ${status?.coordinator?.desktop_clients ?? 0}개 lease가 만료되면 worker와 coordinator도 종료됩니다.` })
+  const proxyState = coordinator.ok ? 'running' : coordinator.stopped ? 'stopped' : 'unavailable'
+  const identity = coordinator.pid ? `PID ${coordinator.pid} · :${coordinator.port}` : `:${coordinator.port || 18380}`
+  const transition = `${status?.execution?.active_role || '-'} · ${status?.execution?.transition_phase || 'IDLE'}`
+  return jsxs('section', { className: 'mt-4 flex flex-wrap items-center gap-2 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) px-3 py-2 text-xs', 'aria-labelledby': 'llamacpp-coordinator-title', children: [
+    jsx('h2', { id: 'llamacpp-coordinator-title', className: 'mr-1 text-sm font-medium text-(--ui-text-primary)', children: 'Singleton proxy' }),
+    jsx(Badge, { tone: coordinator.ok ? 'good' : 'warn', children: proxyState }),
+    jsx('span', { className: 'font-mono text-(--ui-text-secondary)', children: identity }),
+    jsx('span', { className: 'text-(--ui-text-tertiary)', 'aria-hidden': true, children: '·' }),
+    jsx('span', { className: 'text-(--ui-text-secondary)', children: status?.execution_mode === 'exclusive_swap' ? 'Exclusive swap' : status?.execution_mode || 'Exclusive swap' }),
+    jsx('span', { className: 'font-mono text-(--ui-text-secondary)', children: transition }),
+    jsx('span', { className: 'text-(--ui-text-secondary)', children: coordinator.cancellation_propagation ? 'cancel propagation on' : 'cancel propagation unknown' }),
+    jsx('span', { className: 'ml-auto text-(--ui-text-tertiary)', children: `${coordinator.desktop_clients ?? 0} client${Number(coordinator.desktop_clients) === 1 ? '' : 's'}` })
   ] })
 }
 
@@ -550,7 +562,7 @@ function RuntimeCard({ status, jobs, onRefresh, pushConnected }) {
   const changeRuntime = async event => { const kind = event.target.value; setRequestedKind(kind); if (kind === activeKind) return; const candidate = status?.runtime_options?.[kind] || {}; if (!candidate.installed) { setMessage('먼저 선택한 runtime을 다운로드하세요.'); return } await useRuntime(kind) }
 
   return jsxs('section', { className: `${card} p-4 sm:p-5`, children: [
-    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsx('div', { className: 'text-right', children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: activeKind === 'prism_ml' ? 'Prism-ML runtime' : 'official runtime' }), jsx('p', { className: 'font-mono text-sm text-(--ui-text-primary)', children: status?.runtime_version || '미설치' })] })] }),
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsxs('div', { className: 'flex flex-wrap justify-end gap-2', 'aria-label': '설치된 runtime', children: [jsx(Badge, { tone: status?.runtime_options?.official?.installed ? 'good' : 'warn', children: `Official ${status?.runtime_options?.official?.version || '미설치'}` }), jsx(Badge, { tone: status?.runtime_options?.prism_ml?.installed ? 'good' : 'warn', children: `Prism-ML ${status?.runtime_options?.prism_ml?.version || '미설치'}` })] })] }),
     jsxs('div', { className: 'mt-4 flex items-center gap-2', children: [jsx('select', { className: `${input} shrink-0`, style: { ...themedSelect(), width: '11rem', maxWidth: '11rem', flex: '0 0 11rem' }, value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: changeRuntime, children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), requestedKind === activeKind ? null : jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || !available.installed, onClick: () => useRuntime(requestedKind), children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || (Boolean(available.version) && !available.update_available), 'aria-label': `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} runtime 업데이트`, title: available.version && available.latest_version ? `현재 ${available.version} · GitHub 최신 ${available.latest_version}` : undefined, onClick: install, children: '업데이트' })] }),
     jsx(ExecutionProfilesPanel, { status, onRefresh }),
     jsx(ServerLogPanel, { status, jobs, pushConnected }),
