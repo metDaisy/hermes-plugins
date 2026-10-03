@@ -6,6 +6,8 @@ import json
 import os
 import re
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -109,6 +111,8 @@ def record_request_context(role: str, profile: str, session: str) -> bool:
         "role": safe_role,
         "profile": safe_profile,
         "session": safe_session,
+        "request_id": uuid.uuid4().hex,
+        "recorded_at": time.time(),
         "activity_offset": ACTIVITY_LOG_PATH.stat().st_size if ACTIVITY_LOG_PATH.exists() else 0,
     }
     REQUEST_CONTEXT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)

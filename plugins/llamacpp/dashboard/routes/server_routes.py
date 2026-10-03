@@ -20,6 +20,8 @@ class ServerRouteContext:
     recent_jobs: Callable[[], list[dict[str, Any]]]
     find_job: Callable[[str], dict[str, Any] | None]
     logs: Callable[[int, str], dict[str, Any]]
+    metrics: Callable[[int], dict[str, Any]]
+    shutdown: Callable[[], None] = lambda: None
 
 
 def create_router(context: ServerRouteContext) -> APIRouter:
@@ -31,6 +33,7 @@ def create_router(context: ServerRouteContext) -> APIRouter:
         action = str(body.get("action") or "")
         if action == "stop":
             context.stop()
+            context.shutdown()
             return {"ok": True, "server_running": False}
         if action == "start":
             if not context.state().get("active_model_id"):
@@ -60,6 +63,13 @@ def create_router(context: ServerRouteContext) -> APIRouter:
     def logs(limit: int = 250, role: str = "server") -> dict[str, Any]:
         try:
             return context.logs(limit, role)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/metrics")
+    def metrics(window: int = 60) -> dict[str, Any]:
+        try:
+            return context.metrics(window)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -1,34 +1,38 @@
 """Machine-scoped llama.cpp plugin backend process."""
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(DASHBOARD_DIR) not in sys.path:
     sys.path.insert(0, str(DASHBOARD_DIR))
 
-from backend_impl import router, shutdown_machine_runtime, update_execution_queue  # noqa: E402
+from backend_impl import router, shutdown_machine_runtime, update_execution_queue, coordinator_shutdown_requested  # noqa: E402
 from inference_proxy import execution_busy, router as inference_router  # noqa: E402
 
 try:  # noqa: E402
     from application.coordinator_lock import MachineFileLock
     from application.desktop_leases import DesktopLeaseRegistry
+    from application.event_bus import EVENT_BUS
 except ImportError:  # pragma: no cover - package import fallback
     from .application.coordinator_lock import MachineFileLock
     from .application.desktop_leases import DesktopLeaseRegistry
+    from .application.event_bus import EVENT_BUS
 
 RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes" / "runtimes" / "llamacpp"
 COORDINATOR_PORT = int(os.environ.get("LLAMACPP_COORDINATOR_PORT") or 18380)
 LIFETIME_LOCK = RUNTIME_ROOT / ("coordinator.lock" if COORDINATOR_PORT == 18380 else f"coordinator-{COORDINATOR_PORT}.lock")
+COORDINATOR_STOP_MARKER = RUNTIME_ROOT / "coordinator-stopped"
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.68"
+COORDINATOR_BUILD = "0.2.75"
 DESKTOP_LEASE_TIMEOUT_SECONDS = 8.0
 _desktop_leases = DesktopLeaseRegistry(DESKTOP_LEASE_TIMEOUT_SECONDS)
 
@@ -63,6 +67,33 @@ def release_desktop_lease(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "desktop_clients": clients}
 
 
+@app.websocket("/events")
+async def coordinator_events(websocket: WebSocket) -> None:
+    await websocket.accept()
+    cursor = EVENT_BUS.latest_id()
+    await websocket.send_json({
+        "id": cursor,
+        "type": "connected",
+        "refresh": ["status", "jobs", "logs", "metrics"],
+    })
+    try:
+        while True:
+            batch = await asyncio.to_thread(EVENT_BUS.wait_after, cursor, 15.0)
+            if batch["gap"]:
+                await websocket.send_json({
+                    "id": batch["cursor"],
+                    "type": "gap",
+                    "refresh": ["status", "jobs", "logs", "metrics"],
+                })
+            for event in batch["events"]:
+                await websocket.send_json(event)
+            cursor = int(batch["cursor"])
+            if not batch["events"]:
+                await websocket.send_json({"id": cursor, "type": "heartbeat", "refresh": []})
+    except WebSocketDisconnect:
+        return
+
+
 app.include_router(inference_router)
 app.include_router(router)
 
@@ -70,6 +101,8 @@ app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
 
+    if COORDINATOR_STOP_MARKER.exists():
+        raise SystemExit(0)
     lifetime = MachineFileLock(LIFETIME_LOCK)
     if not lifetime.acquire():
         raise SystemExit(0)
@@ -81,6 +114,12 @@ if __name__ == "__main__":
 
         def stop_after_last_desktop() -> None:
             while not watchdog_stop.wait(0.5):
+                if coordinator_shutdown_requested():
+                    try:
+                        shutdown_machine_runtime()
+                    finally:
+                        server.should_exit = True
+                    return
                 if not _desktop_leases.should_shutdown(execution_busy()):
                     continue
                 try:

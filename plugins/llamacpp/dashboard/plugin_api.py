@@ -13,7 +13,8 @@ from pathlib import Path
 
 import httpx
 import anyio
-from fastapi import APIRouter, HTTPException, Request
+import websockets
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -22,14 +23,16 @@ router = APIRouter()
 RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes" / "runtimes" / "llamacpp"
 COORDINATOR_PORT = 18380
 COORDINATOR_URL = f"http://127.0.0.1:{COORDINATOR_PORT}"
+COORDINATOR_WS_URL = f"ws://127.0.0.1:{COORDINATOR_PORT}/events"
 COORDINATOR_SCRIPT = Path(__file__).with_name("coordinator_server.py")
 START_LOCK = RUNTIME_ROOT / "backend-start.lock"
+COORDINATOR_STOP_MARKER = RUNTIME_ROOT / "coordinator-stopped"
 COORDINATOR_LOG = RUNTIME_ROOT / "logs" / "activity.log"
 _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.68"
+COORDINATOR_BUILD = "0.2.75"
 
 
 def _health_payload() -> dict[str, object] | None:
@@ -185,8 +188,17 @@ def _try_start_coordinator() -> bool:
             os.close(lock_fd)
 
 
-def _ensure_coordinator() -> None:
-    if _healthy():
+def _ensure_coordinator(*, allow_start: bool = False) -> None:
+    restarting_after_stop = allow_start and COORDINATOR_STOP_MARKER.exists()
+    if allow_start:
+        COORDINATOR_STOP_MARKER.unlink(missing_ok=True)
+    elif COORDINATOR_STOP_MARKER.exists():
+        raise RuntimeError("shared llama.cpp backend was intentionally stopped")
+    if restarting_after_stop:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and _healthy():
+            time.sleep(0.1)
+    elif _healthy():
         return
     _stop_incompatible_coordinator()
     started = _try_start_coordinator()
@@ -201,6 +213,53 @@ def _ensure_coordinator() -> None:
         if started:
             _release_start_lock()
     raise RuntimeError("shared llama.cpp backend did not become healthy")
+
+
+def _coordinator_start_requested(method: str, path: str, body: bytes) -> bool:
+    normalized = path.strip("/")
+    if method != "POST" or normalized not in {"server", "profiles/start"}:
+        return False
+    if normalized == "profiles/start":
+        return True
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return str(payload.get("action") or "") == "start"
+
+
+def _ws_upgrade_authorized(websocket: WebSocket) -> bool:
+    """Use the dashboard's canonical token/ticket gate when loaded by Hermes."""
+    try:
+        from hermes_cli import web_server_chat as websocket_auth
+    except Exception:
+        return True
+    return bool(websocket_auth._ws_auth_ok(websocket))
+
+
+@router.websocket("/events")
+async def proxy_events(websocket: WebSocket) -> None:
+    if not _ws_upgrade_authorized(websocket):
+        await websocket.close(code=4401)
+        return
+    try:
+        await asyncio.to_thread(_ensure_coordinator)
+    except Exception:
+        await websocket.close(code=1013)
+        return
+    await websocket.accept()
+    try:
+        async with websockets.connect(
+            COORDINATOR_WS_URL,
+            open_timeout=5,
+            close_timeout=2,
+            ping_interval=20,
+            max_size=1 << 20,
+        ) as upstream:
+            async for message in upstream:
+                await websocket.send_text(str(message))
+    except (WebSocketDisconnect, websockets.ConnectionClosed):
+        return
 
 
 def _filtered_headers(headers: object) -> dict[str, str]:
@@ -268,8 +327,11 @@ async def proxy(request: Request, path: str) -> StreamingResponse:
         follow_redirects=False,
     )
     try:
-        await asyncio.to_thread(_ensure_coordinator)
         body = await request.body()
+        await asyncio.to_thread(
+            _ensure_coordinator,
+            allow_start=_coordinator_start_requested(request.method, path, body),
+        )
         target = COORDINATOR_URL + "/" + path.lstrip("/")
         if request.url.query:
             target += "?" + request.url.query

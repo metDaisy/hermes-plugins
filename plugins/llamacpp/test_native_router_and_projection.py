@@ -62,6 +62,27 @@ class NativeRouterPlanTests(unittest.TestCase):
 
 
 class ActivityLogProjectionTests(unittest.TestCase):
+    def test_truncates_long_session_display_but_preserves_full_event_identity(self) -> None:
+        import json
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        session = "project-manager-session-with-a-very-long-readable-name"
+        result = project_activity_lines([
+            json.dumps({
+                "type": "hermes_request_context",
+                "role": "main",
+                "profile": "project-manager",
+                "session": session,
+            }),
+            "slot total time = 1000.00 ms / 100 tokens",
+        ])
+
+        self.assertEqual(
+            result["lines"],
+            ["[Main][project-manager][project-manager-session-...] 요청 완료 · 100 tok · 1.00초"],
+        )
+        self.assertEqual(result["events"][0]["session"], session)
+
     def test_merges_separate_request_context_journal_at_activity_offset(self) -> None:
         import json
         import tempfile
@@ -145,6 +166,7 @@ class ActivityLogProjectionTests(unittest.TestCase):
             '{"type":"log","level":"info","msg":"srv spawning server instance with name=main-local on port 19001\\n"}',
             '[19001] slot prompt processing, n_tokens = 4096, progress = 0.33, 1200.0 tokens per second',
             '[19001] slot n_gen = 128, tg = 73.4 t/s, tg_3s = 71.0 t/s',
+            '[19001] slot eval time = 1200.00 ms / 64 tokens (18.75 ms per token, 53.3 tokens per second)',
             'request: {"prompt":"PRIVATE PROMPT CONTENT"}',
             'W srv evicting idle LRU name=main-local for a queued request',
             'I srv spawning server instance with name=compression-local on port 19002',
@@ -157,12 +179,112 @@ class ActivityLogProjectionTests(unittest.TestCase):
         self.assertIn('[Server] 서버 준비 완료 · :18434', result["lines"])
         self.assertIn('[Main] prompt 처리 33% · 4096 tok · 1200.0 tok/s', result["lines"])
         self.assertIn('[Main] 생성 128 tok · 73.4 tok/s', result["lines"])
+        self.assertIn('[Main] 생성 64 tok · 53.3 tok/s', result["lines"])
         self.assertIn('[Main] 모델 언로드 중', result["lines"])
         self.assertIn('[Compress] 모델 로딩 중', result["lines"])
         self.assertIn('[Compress] prompt 처리 완료 · 2048 tok · 1.00초', result["lines"])
         self.assertIn('[Compress] 요청 완료 · 2176 tok · 2.39초', result["lines"])
         self.assertNotIn('PRIVATE PROMPT CONTENT', "\n".join(result["lines"]))
         self.assertTrue(any(event["event"] == "prompt_progress" for event in result["events"]))
+
+    def test_suppresses_cross_origin_banner_but_keeps_other_warnings(self) -> None:
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        result = project_activity_lines([
+            "W srv llama_server: -----------------",
+            "W srv llama_server: this can be a security risk (cross-origin attacks)",
+            "W srv llama_server: more info: http://example.invalid/path",
+            "W srv llama_server: useful warning",
+        ])
+
+        self.assertEqual(result["lines"], ["[Server] W srv llama_server: useful warning"])
+
+    def test_projects_hidden_context_usage_with_request_metadata(self) -> None:
+        import json
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        result = project_activity_lines([
+            json.dumps({
+                "type": "hermes_request_context", "role": "main", "profile": "project-manager",
+                "session": "session-1", "request_id": "request-1", "recorded_at": 1000.0,
+            }),
+            "slot stop processing: n_tokens = 8192",
+        ])
+
+        self.assertEqual(result["lines"], [])
+        self.assertEqual(result["events"][0]["event"], "context_usage")
+        self.assertEqual(result["events"][0]["context_tokens"], 8192)
+        self.assertEqual(result["events"][0]["request_id"], "request-1")
+        self.assertEqual(result["events"][0]["observed_at"], 1000.0)
+
+
+class ResourceMetricsTests(unittest.TestCase):
+    def test_aggregates_profile_rates_and_context_in_rolling_window(self) -> None:
+        from dashboard.application.resource_metrics import aggregate_profile_metrics
+
+        common = {"profile": "project-manager", "session": "session-1", "request_id": "request-1", "observed_at": 1000.0}
+        result = aggregate_profile_metrics([
+            {**common, "event": "prompt_completed", "prompt_tokens": 1000, "prompt_eval_ms": 500.0},
+            {**common, "event": "generation_progress", "generated_tokens": 100, "generation_tokens_per_second": 50.0},
+            {**common, "event": "context_usage", "context_tokens": 1100},
+            {**common, "event": "prompt_completed", "observed_at": 900.0, "prompt_tokens": 9999, "prompt_eval_ms": 1.0},
+        ], now=1020.0, window_seconds=60)
+
+        metric = result["profiles"]["project-manager"]
+        self.assertEqual(metric["prompt_tokens_per_second"], 2000.0)
+        self.assertEqual(metric["generation_tokens_per_second"], 50.0)
+        self.assertEqual(metric["tokens_per_minute"], 1100)
+        self.assertEqual(metric["context_tokens"], 1100)
+
+    def test_aggregates_main_and_auxiliary_roles_independently(self) -> None:
+        from dashboard.application.resource_metrics import aggregate_profile_metrics
+
+        main = {"profile": "main", "session": "main-session", "request_id": "main-request",
+                "role": "main", "observed_at": 1000.0}
+        auxiliary = {"profile": "main", "session": "aux-session", "request_id": "aux-request",
+                     "role": "compression", "observed_at": 1001.0}
+        result = aggregate_profile_metrics([
+            {**main, "event": "prompt_completed", "prompt_tokens": 1000, "prompt_eval_ms": 500.0},
+            {**main, "event": "generation_progress", "generated_tokens": 100,
+             "generation_tokens_per_second": 50.0},
+            {**auxiliary, "event": "prompt_completed", "prompt_tokens": 300, "prompt_eval_ms": 600.0},
+            {**auxiliary, "event": "generation_progress", "generated_tokens": 60,
+             "generation_tokens_per_second": 20.0},
+            {**auxiliary, "event": "context_usage", "context_tokens": 4096},
+        ], now=1020.0, window_seconds=60)
+
+        self.assertEqual(result["roles"]["main"]["prompt_tokens_per_second"], 2000.0)
+        self.assertEqual(result["roles"]["main"]["generation_tokens_per_second"], 50.0)
+        self.assertEqual(result["roles"]["compression"]["prompt_tokens_per_second"], 500.0)
+        self.assertEqual(result["roles"]["compression"]["generation_tokens_per_second"], 20.0)
+        self.assertEqual(result["roles"]["compression"]["context_tokens"], 4096)
+
+    def test_backend_projects_configured_main_and_auxiliary_models_without_recent_activity(self) -> None:
+        from dashboard import backend_impl
+
+        state = {
+            "active_role": "main",
+            "active_model_id": "main-model",
+            "execution_profiles": {
+                "main": {"model_id": "main-model"},
+                "compression": {"model_id": "aux-model"},
+            },
+            "model_settings": {
+                "main-model": {"ctx-size": "131072"},
+                "aux-model": {"ctx-size": "32768"},
+            },
+        }
+        with patch.object(backend_impl, "_server_log_tail", return_value={"events": []}), \
+                patch.object(backend_impl, "_state", return_value=state), \
+                patch.object(backend_impl, "_is_server_running", return_value=True):
+            result = backend_impl._resource_metrics(60)
+
+        self.assertEqual(result["roles"]["main"]["model_id"], "main-model")
+        self.assertEqual(result["roles"]["main"]["context_limit"], 131072)
+        self.assertTrue(result["roles"]["main"]["active"])
+        self.assertEqual(result["roles"]["compression"]["model_id"], "aux-model")
+        self.assertEqual(result["roles"]["compression"]["context_limit"], 32768)
+        self.assertFalse(result["roles"]["compression"]["active"])
 
 
 class ProfileModelRoutingTests(unittest.TestCase):

@@ -44,6 +44,8 @@ try:
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
     from .application.activity_log_projection import contextual_activity_tail, project_activity_lines
+    from .application.resource_metrics import aggregate_profile_metrics
+    from .application.event_bus import publish_event, start_activity_pump
     from .application.profile_model_routing import sync_profile_models
     from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from .application.prism_runtime import PrismRuntimeInstaller
@@ -91,6 +93,8 @@ except ImportError:
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
     from application.activity_log_projection import contextual_activity_tail, project_activity_lines
+    from application.resource_metrics import aggregate_profile_metrics
+    from application.event_bus import publish_event, start_activity_pump
     from application.profile_model_routing import sync_profile_models
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
@@ -121,6 +125,7 @@ PLUGIN_DIR = Path(__file__).resolve().parents[1]
 PROFILE_ROOT = PLUGIN_DIR.parent.parent
 MACHINE_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes"
 RUNTIME_ROOT = MACHINE_ROOT / "runtimes" / "llamacpp"
+COORDINATOR_STOP_MARKER = RUNTIME_ROOT / "coordinator-stopped"
 PRISM_RUNTIME_ROOT = MACHINE_ROOT / "runtimes" / "prism-ml"
 HF_HOME = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 MODELS_ROOT = HF_HOME
@@ -137,6 +142,7 @@ SERVER_LOG_PATH = ACTIVITY_LOG_PATH
 MAIN_LOG_PATH = ACTIVITY_LOG_PATH
 COMPRESSION_LOG_PATH = ACTIVITY_LOG_PATH
 COORDINATOR_LOG_PATH = ACTIVITY_LOG_PATH
+_COORDINATOR_SHUTDOWN_REQUESTED = threading.Event()
 TRANSITION_LOG_PATH = ACTIVITY_LOG_PATH
 CUSTOM_ENDPOINT_KEY = "llamacpp-local"
 COORDINATOR_PORT = 18380
@@ -410,25 +416,39 @@ def _runtime_kind(state: dict[str, Any] | None = None) -> str:
     return get_backend(raw).key
 
 
+def _active_runtime_kind(state: dict[str, Any] | None = None) -> str:
+    current = state or _state()
+    raw = current.get("active_runtime_kind") or current.get("runtime_kind") or current.get("runtime_mode") or "official"
+    return get_backend(raw).key
+
+
 def _resolve_server_executable_from_path(raw_path: Path | str) -> Path:
     """Resolve a user-selected llama-server path through the active adapter."""
     return get_backend(_runtime_kind()).resolve_executable(raw_path)
+
+
+def _server_executable_for_runtime(runtime_kind: str) -> Path | None:
+    state = _state()
+    normalized = get_backend(runtime_kind).key
+    if normalized != "official":
+        try:
+            adapter = get_backend(normalized)
+            selected_path = state.get("runtime_path") or state.get("custom_runtime_path")
+            raw_path = selected_path if _runtime_kind(state) == normalized and selected_path else adapter.managed_root(MACHINE_ROOT)
+            return adapter.resolve_executable(raw_path)
+        except RuntimeError:
+            return None
+    target = _installed_target()
+    if target is None:
+        return None
+    return _server_executable_in(RUNTIME_ROOT / target[0] / target[1])
 
 
 def _server_executable(tag: str | None = None, backend: str | None = None) -> Path | None:
     if tag and backend:
         target = (tag, backend)
     else:
-        state = _state()
-        runtime_kind = _runtime_kind(state)
-        if runtime_kind != "official":
-            try:
-                adapter = get_backend(runtime_kind)
-                raw_path = state.get("runtime_path") or state.get("custom_runtime_path")
-                return adapter.resolve_executable(raw_path or adapter.managed_root(MACHINE_ROOT))
-            except RuntimeError:
-                return None
-        target = _installed_target()
+        return _server_executable_for_runtime(_runtime_kind())
     if target is None:
         return None
     return _server_executable_in(RUNTIME_ROOT / target[0] / target[1])
@@ -788,14 +808,25 @@ def _native_router_plan(state: dict[str, Any], executable: Path) -> NativeRouter
     )
 
 
-def _server_startup(log_path: Path | None = None) -> ServerStartupService:
+def _server_startup(log_path: Path | None = None, runtime_kind: str | None = None) -> ServerStartupService:
+    selected_runtime = get_backend(runtime_kind).key if runtime_kind else None
+
+    def executable() -> Path | None:
+        return _server_executable_for_runtime(selected_runtime) if selected_runtime else _server_executable()
+
+    def active_runtime(state: dict[str, Any]) -> str:
+        return selected_runtime or _runtime_kind(state)
+
     def spawn(command: list[str], log: Any, executable: Path) -> subprocess.Popen[Any]:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                   cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                   cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                                   bufsize=0)
         bind_child_to_owner_lifetime(process)
+        start_activity_pump(process, Path(getattr(log, "name", log_path or SERVER_LOG_PATH)))
+        publish_event("worker_starting", refresh=["status", "metrics", "logs"])
         return process
-    return ServerStartupService(_state, _save_state, _server_executable, _stop_server, _active_path, _load_options,
-                                _runtime_kind, get_backend, _serving_model_name, _option_cli_args, _watch_server_process, _health,
+    return ServerStartupService(_state, _save_state, executable, _stop_server, _active_path, _load_options,
+                                active_runtime, get_backend, _serving_model_name, _option_cli_args, _watch_server_process, _health,
                                 _register_custom_endpoint, _server_log_tail, log_path or SERVER_LOG_PATH, spawn, time.time, time.sleep,
                                 _mutate_state, _native_router_plan, ROUTER_PRESET_PATH, _router_model_ready)
 
@@ -815,6 +846,59 @@ def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]
         "lines": projected["lines"],
         "events": projected["events"],
     }
+
+
+def _resource_metrics(window: int = 60) -> dict[str, Any]:
+    requested = int(window)
+    if requested < 10 or requested > 300:
+        raise ValueError("window must be between 10 and 300 seconds")
+    projected = _server_log_tail(500)
+    result = aggregate_profile_metrics(
+        list(projected.get("events") or []), window_seconds=requested,
+    )
+    state = _state()
+    profiles = state.get("execution_profiles") if isinstance(state.get("execution_profiles"), dict) else {}
+    active_role = str(state.get("active_role") or "")
+    active_profile = profiles.get(active_role) if isinstance(profiles, dict) else None
+    model_id = (
+        str(active_profile.get("model_id") or state.get("active_model_id") or "")
+        if isinstance(active_profile, dict) else str(state.get("active_model_id") or "")
+    )
+    all_settings = state.get("model_settings") if isinstance(state.get("model_settings"), dict) else {}
+    settings = all_settings.get(model_id) if isinstance(all_settings.get(model_id), dict) else {}
+    role_metrics = result.setdefault("roles", {})
+    for role in ("main", "compression"):
+        execution_profile = profiles.get(role) if isinstance(profiles, dict) else None
+        role_model_id = str(execution_profile.get("model_id") or "") if isinstance(execution_profile, dict) else ""
+        role_settings = all_settings.get(role_model_id) if isinstance(all_settings.get(role_model_id), dict) else {}
+        role_metric = role_metrics.setdefault(role, {
+            "role": role,
+            "prompt_tokens": 0,
+            "generated_tokens": 0,
+            "tokens_per_minute": 0,
+            "prompt_tokens_per_second": None,
+            "generation_tokens_per_second": None,
+            "context_tokens": 0,
+            "session": "",
+            "last_activity_at": 0.0,
+        })
+        role_metric.update({
+            "model_id": role_model_id,
+            "context_limit": int(role_settings.get("ctx-size") or 0),
+            "active": role == active_role and _is_server_running(),
+        })
+    result["worker"] = {
+        "running": _is_server_running(),
+        "model_id": model_id,
+        "active_role": active_role or None,
+        "active_requests": int(state.get("active_main_requests") or 0),
+        "queued_requests": int(state.get("queued_main_requests") or 0),
+        "context_limit": int(settings.get("ctx-size") or 0),
+        "kv_cache_k": str(settings.get("cache-type-k") or "auto"),
+        "kv_cache_v": str(settings.get("cache-type-v") or "auto"),
+        "kv_cache_bytes": None,
+    }
+    return result
 
 
 def _server_rows() -> list[dict[str, Any]]:
@@ -944,6 +1028,7 @@ def _transition_log(event: str, **details: Any) -> None:
     row = {"timestamp": time.time(), "event": event, **details}
     with TRANSITION_LOG_PATH.open("a", encoding="utf-8") as stream:
         stream.write("[transition] " + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    publish_event("transition", refresh=["status", "metrics", "logs"], event=event)
 
 
 def update_execution_queue(queued_main: int, active_main: int) -> None:
@@ -952,6 +1037,7 @@ def update_execution_queue(queued_main: int, active_main: int) -> None:
         current["active_main_requests"] = max(0, int(active_main))
 
     _mutate_state(update)
+    publish_event("request_counts", refresh=["status", "metrics"])
 
 
 def ensure_execution_role(role: str) -> dict[str, Any]:
@@ -966,6 +1052,7 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
     if state.get("execution_mode") == "native_router" and _is_server_running():
         def route(current: dict[str, Any]) -> None:
             current["active_model_id"] = model_id
+            current["active_runtime_kind"] = runtime_kind
             current["active_role"] = role
             current["transition_phase"] = "ROUTER_READY"
             current["transition_error"] = None
@@ -974,7 +1061,7 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
         _transition_log("router-role-selected", role=role, model_id=model_id, runtime_kind=runtime_kind)
         return {"role": role, "model_id": model_id, "already_running": True, "router_managed": True}
     if (state.get("active_role") == role and state.get("active_model_id") == model_id
-            and _runtime_kind(state) == runtime_kind and _is_server_running()):
+            and _active_runtime_kind(state) == runtime_kind and _is_server_running()):
         return {"role": role, "model_id": model_id, "already_running": True}
 
     if role == "main":
@@ -986,7 +1073,7 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
 
     def select(current: dict[str, Any]) -> None:
         current["active_model_id"] = model_id
-        current["runtime_kind"] = runtime_kind
+        current["active_runtime_kind"] = runtime_kind
         current["active_role"] = role
         current["transition_phase"] = "LOADING_COMPRESSION" if role == "compression" else "RESTORING_MAIN"
         preset_id = str(profile.get("preset_id") or "")
@@ -1002,7 +1089,7 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
     _mutate_state(select)
     log_path = ACTIVITY_LOG_PATH
     try:
-        _server_startup(log_path).start()
+        _server_startup(log_path, runtime_kind).start()
     except Exception as exc:
         def fail(current: dict[str, Any]) -> None:
             current["transition_phase"] = "FAILED"
@@ -1037,6 +1124,17 @@ def abort_execution_transition(role: str, error: str) -> None:
 
     _mutate_state(fail)
     _transition_log("transition-aborted", role=role, error=str(error))
+
+
+def request_coordinator_shutdown() -> None:
+    COORDINATOR_STOP_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    COORDINATOR_STOP_MARKER.write_text("stopped\n", encoding="utf-8")
+    publish_event("coordinator_stopping", refresh=["status", "metrics", "logs"])
+    _COORDINATOR_SHUTDOWN_REQUESTED.set()
+
+
+def coordinator_shutdown_requested() -> bool:
+    return _COORDINATOR_SHUTDOWN_REQUESTED.is_set()
 
 
 def _status() -> dict[str, Any]:
@@ -1178,7 +1276,7 @@ router.include_router(create_model_router(ModelRouteContext(
 router.include_router(create_server_router(ServerRouteContext(
     state=_state, stop=_stop_server, start=_start_server, create_job=_job, launch=_spawn,
     finish=_finish, recent_jobs=_jobs, find_job=lambda job_id: _job_manager().find(job_id),
-    logs=_server_log_tail,
+    logs=_server_log_tail, metrics=_resource_metrics, shutdown=request_coordinator_shutdown,
 )))
 router.include_router(create_execution_profile_router(ExecutionProfileRouteContext(
     snapshot=execution_profiles, save=save_execution_profile, start=ensure_execution_role,

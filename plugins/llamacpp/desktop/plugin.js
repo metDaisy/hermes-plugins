@@ -30,6 +30,51 @@ const themedSelect = () => ({ colorScheme: themeColorScheme(), backgroundColor: 
 const themedOption = { backgroundColor: 'var(--ui-bg-elevated)', color: 'var(--ui-text-primary)' }
 const api = (path, options) => pluginCtx.rest(path, options)
 
+function useCoordinatorPush() {
+  const [pushConnected, setPushConnected] = useState(false)
+  useEffect(() => {
+    const timers = new Map()
+    let lastFrameAt = 0
+    const keys = {
+      status: [ID, 'status'],
+      jobs: [ID, 'jobs'],
+      logs: [ID, 'activity-log'],
+      metrics: [ID, 'resource-metrics']
+    }
+    const schedule = name => {
+      const key = keys[name]
+      if (!key) return
+      const current = timers.get(name)
+      if (current) window.clearTimeout(current)
+      timers.set(name, window.setTimeout(() => {
+        timers.delete(name)
+        queryClient.invalidateQueries({ queryKey: key })
+      }, 200))
+    }
+    let disposeSocket = () => {}
+    try {
+      disposeSocket = pluginCtx.socket('/events', frame => {
+        if (!frame || typeof frame !== 'object') return
+        lastFrameAt = Date.now()
+        setPushConnected(true)
+        for (const name of Array.isArray(frame.refresh) ? frame.refresh : []) schedule(name)
+      })
+    } catch {
+      setPushConnected(false)
+    }
+    const stopHealthCheck = pluginCtx.setInterval(() => {
+      if (lastFrameAt && Date.now() - lastFrameAt > 25000) setPushConnected(false)
+    }, 5000)
+    return () => {
+      disposeSocket()
+      stopHealthCheck()
+      for (const timer of timers.values()) window.clearTimeout(timer)
+      timers.clear()
+    }
+  }, [])
+  return pushConnected
+}
+
 function startDesktopLease(ctx) {
   const clientId = globalThis.crypto?.randomUUID?.() || `desktop-${Date.now()}-${Math.random().toString(16).slice(2)}`
   let stopped = false
@@ -108,22 +153,160 @@ function PrismOnlyHint({ model }) {
   return jsx('span', { className: 'inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-full border border-(--ui-stroke-secondary) text-[11px] font-semibold text-(--ui-text-secondary)', title: 'Prism-ML 전용', 'aria-label': 'Prism-ML 전용 모델 안내', tabIndex: 0, children: '?' })
 }
 
-function ServerLogPanel({ status, jobs }) {
+function formatRate(value) {
+  return value != null && Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} tok/s` : '—'
+}
+
+function MetricChart({ samples, series, label, fixedMaximum }) {
+  const rows = samples || []
+  const values = rows.flatMap(sample => series.map(item => Math.max(0, Number(sample?.[item.field]) || 0)))
+  const maximum = Math.max(1, Number(fixedMaximum) || 0, ...values)
+  const denominator = Math.max(1, rows.length - 1)
+  return jsx('svg', { className: 'h-14 w-full', viewBox: '0 0 100 44', preserveAspectRatio: 'none', role: 'img', 'aria-label': label, children: [
+    jsx('line', { x1: 0, y1: 41, x2: 100, y2: 41, stroke: 'var(--ui-stroke-secondary)', strokeWidth: 1 }),
+    jsx('line', { x1: 0, y1: 21, x2: 100, y2: 21, stroke: 'var(--ui-stroke-secondary)', strokeWidth: 0.6, strokeDasharray: '2 3' }),
+    ...series.map(item => {
+      const points = rows.map((sample, index) => `${(index / denominator) * 100},${41 - (Math.max(0, Number(sample?.[item.field]) || 0) / maximum) * 38}`).join(' ')
+      return rows.length > 1 ? jsx('polyline', { points, fill: 'none', stroke: item.stroke, strokeWidth: 1.5, strokeDasharray: item.dash || undefined, vectorEffect: 'non-scaling-stroke' }, item.field) : null
+    })
+  ] })
+}
+
+function ChartLegend({ items }) {
+  return jsxs('div', { className: 'flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-(--ui-text-tertiary)', children: items.map(item => jsxs('span', { className: 'inline-flex items-center gap-1', children: [
+    jsx('span', { className: 'inline-block h-px w-3', style: { backgroundColor: item.stroke } }),
+    item.label
+  ] }, item.label)) })
+}
+
+const TOKEN_SERIES = [
+  { field: 'prompt', label: 'Prompt', stroke: 'var(--ui-accent)' },
+  { field: 'generation', label: 'Generation', stroke: 'var(--ui-text-secondary)', dash: '3 2' }
+]
+const CONTEXT_SERIES = [{ field: 'contextPercent', label: 'Context', stroke: 'var(--ui-accent)' }]
+const REQUEST_SERIES = [
+  { field: 'active', label: 'Active', stroke: 'var(--ui-accent)' },
+  { field: 'queued', label: 'Queued', stroke: 'var(--ui-text-secondary)', dash: '3 2' }
+]
+
+function RoleMetricCard({ title, metric, samples }) {
+  const contextTokens = Number(metric?.context_tokens) || 0
+  const contextLimit = Number(metric?.context_limit) || 0
+  const contextPercent = contextLimit ? Math.min(100, contextTokens / contextLimit * 100) : 0
+  const contextText = contextLimit ? `${contextTokens.toLocaleString()} / ${contextLimit.toLocaleString()} (${contextPercent.toFixed(1)}%)` : contextTokens ? contextTokens.toLocaleString() : '—'
+  return jsxs('article', { className: 'min-w-0 border-t border-(--ui-stroke-secondary) px-3 py-3', children: [
+    jsxs('div', { className: 'flex min-w-0 items-start justify-between gap-3', children: [
+      jsxs('div', { className: 'min-w-0', children: [
+        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: title }),
+        jsx('p', { className: 'mt-0.5 truncate font-mono text-[10px] text-(--ui-text-tertiary)', title: metric?.model_id || '', children: metric?.model_id || '모델 미지정' })
+      ] }),
+      metric?.active ? jsx('span', { className: 'shrink-0 rounded border border-(--ui-accent) px-1.5 py-0.5 text-[9px] font-medium text-(--ui-accent)', children: 'ACTIVE' }) : null
+    ] }),
+    jsxs('dl', { className: 'mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]', children: [
+      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Prompt' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.prompt_tokens_per_second) }),
+      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Generation' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.generation_tokens_per_second) }),
+      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Tokens/min' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: Number(metric?.tokens_per_minute || 0).toLocaleString() }),
+      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Context' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: contextText })
+    ] }),
+    jsxs('div', { className: 'mt-3 grid gap-3 sm:grid-cols-2', children: [
+      jsxs('section', { 'aria-label': `${title} token 처리량`, children: [
+        jsx('h4', { className: 'text-[10px] font-medium text-(--ui-text-secondary)', children: 'Token 처리량' }),
+        jsx(MetricChart, { samples, series: TOKEN_SERIES, label: `${title} prompt 및 generation token 처리량` }),
+        jsx(ChartLegend, { items: TOKEN_SERIES })
+      ] }),
+      jsxs('section', { 'aria-label': `${title} context 사용량`, children: [
+        jsx('h4', { className: 'text-[10px] font-medium text-(--ui-text-secondary)', children: 'Context 사용량' }),
+        jsx(MetricChart, { samples, series: CONTEXT_SERIES, label: `${title} context 사용률`, fixedMaximum: 100 }),
+        jsx(ChartLegend, { items: CONTEXT_SERIES })
+      ] })
+    ] })
+  ] })
+}
+
+function ResourceMetricsPanel({ status, pushConnected }) {
+  const [roleHistory, setRoleHistory] = useState({ main: [], compression: [] })
+  const [workerHistory, setWorkerHistory] = useState([])
+  const metricsQuery = useQuery({
+    queryKey: [ID, 'resource-metrics'],
+    queryFn: () => api('/metrics?window=60'),
+    refetchInterval: pushConnected ? false : status?.server_running ? 2500 : false,
+    refetchOnWindowFocus: false
+  })
+  const snapshot = metricsQuery.data
+  useEffect(() => {
+    if (!snapshot?.sampled_at) return
+    setRoleHistory(previous => {
+      const next = { ...previous }
+      for (const role of ['main', 'compression']) {
+        const metric = snapshot.roles?.[role]
+        const contextLimit = Number(metric?.context_limit) || 0
+        next[role] = [...(previous[role] || []), {
+          at: snapshot.sampled_at,
+          prompt: Number(metric?.prompt_tokens_per_second) || 0,
+          generation: Number(metric?.generation_tokens_per_second) || 0,
+          contextPercent: contextLimit ? Math.min(100, (Number(metric?.context_tokens) || 0) / contextLimit * 100) : 0
+        }].slice(-24)
+      }
+      return next
+    })
+    setWorkerHistory(previous => [...previous, {
+      at: snapshot.sampled_at,
+      active: Number(snapshot.worker?.active_requests) || 0,
+      queued: Number(snapshot.worker?.queued_requests) || 0
+    }].slice(-24))
+  }, [snapshot?.sampled_at])
+  const profiles = Object.entries(snapshot?.profiles || {}).sort(([left], [right]) => left.localeCompare(right))
+  const worker = snapshot?.worker || {}
+  const roles = snapshot?.roles || {}
+  return jsxs('section', { className: 'mt-3 overflow-hidden rounded-md border border-(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 실시간 리소스', children: [
+    jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2 bg-(--ui-bg-tertiary) px-3 py-2', children: [
+      jsx('h2', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '최근 60초 리소스' }),
+      jsx('span', { className: 'text-[11px] text-(--ui-text-tertiary)', children: metricsQuery.isFetching ? '갱신 중…' : `${pushConnected ? 'push 연결 · event 기반' : 'fallback polling · 2.5초'} · ${worker.running ? 'worker 실행 중' : 'worker 중지'}` })
+    ] }),
+    metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
+    !metricsQuery.error && !profiles.length ? jsx('p', { className: 'px-3 py-4 text-xs text-(--ui-text-secondary)', role: 'status', children: '새 요청부터 Profile별 처리량을 수집합니다.' }) : null,
+    jsx(RoleMetricCard, { title: 'Main model', metric: roles.main, samples: roleHistory.main }),
+    jsx(RoleMetricCard, { title: 'Aux model', metric: roles.compression, samples: roleHistory.compression }),
+    jsxs('section', { className: 'grid gap-3 border-t border-(--ui-stroke-secondary) px-3 py-3 md:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)]', 'aria-label': 'Worker 요청 부하', children: [
+      jsxs('div', { children: [
+        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '요청 부하' }),
+        jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: 'Worker 전체 active/queued 요청' }),
+        jsx(MetricChart, { samples: workerHistory, series: REQUEST_SERIES, label: 'Worker active 및 queued 요청' }),
+        jsx(ChartLegend, { items: REQUEST_SERIES })
+      ] }),
+      jsxs('div', { children: [
+        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Profile 최근 활동' }),
+        jsx('div', { className: 'mt-2 grid gap-1.5', children: profiles.length ? profiles.map(([name, metric]) => jsxs('div', { className: 'grid grid-cols-[minmax(6rem,1fr)_auto_auto] items-center gap-2 text-[10px]', children: [
+          jsx('span', { className: 'truncate text-(--ui-text-secondary)', children: name }),
+          jsx('span', { className: 'tabular-nums text-(--ui-text-tertiary)', children: formatRate(metric.prompt_tokens_per_second) }),
+          jsx('span', { className: 'tabular-nums text-(--ui-text-tertiary)', children: formatRate(metric.generation_tokens_per_second) })
+        ] }, name)) : jsx('p', { className: 'text-[10px] text-(--ui-text-tertiary)', children: '최근 활동 없음' }) })
+      ] })
+    ] }),
+    jsxs('div', { className: 'flex flex-wrap gap-x-4 gap-y-1 border-t border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-3 py-2 text-[11px] text-(--ui-text-tertiary)', children: [
+      jsx('span', { children: `Model ${worker.model_id || '—'}` }),
+      jsx('span', { children: `요청 ${Number(worker.active_requests || 0)} active · ${Number(worker.queued_requests || 0)} queued` }),
+      jsx('span', { children: `KV K:${worker.kv_cache_k || 'auto'} · V:${worker.kv_cache_v || 'auto'} · 크기 확인 불가` })
+    ] })
+  ] })
+}
+
+function ServerLogPanel({ status, jobs, pushConnected }) {
   const [open, setOpen] = useState(true)
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
   const logQuery = useQuery({
     queryKey: [ID, 'activity-log'],
     queryFn: () => api('/logs?limit=250'),
-    enabled: open,
-    refetchInterval: query => status?.server_running || serverJob?.status === 'running' ? 2500 : false,
+    enabled: open && status?.coordinator?.ok !== false,
+    refetchInterval: query => pushConnected ? false : status?.server_running || serverJob?.status === 'running' ? 2500 : false,
     refetchOnWindowFocus: false
   })
   useEffect(() => {
     if (open && serverJob && serverJob.status !== 'running') logQuery.refetch()
   }, [open, serverJob?.job_id, serverJob?.status])
   useEffect(() => {
-    if (open && status?.server_running === false) logQuery.refetch()
-  }, [open, status?.server_running])
+    if (open && status?.server_running === false && status?.coordinator?.ok !== false) logQuery.refetch()
+  }, [open, status?.server_running, status?.coordinator?.ok])
   const lines = logQuery.data?.lines || []
   const logRef = useRef(null)
   // lines / error / open 이 바뀔 때마다 (렌더링된 DOM 뒤에) 하단으로 스크롤 — 자동 폴링 시에도 최신 로그가 항상 하단에 유지
@@ -202,7 +385,11 @@ function ExecutionProfilesPanel({ status, onRefresh }) {
   }
   const stop = async () => {
     setStarting(true); setMessage('')
-    try { await api('/server', { method: 'POST', body: { action: 'stop' } }); await onRefresh(); setMessage('서버를 중지했습니다.') }
+    try {
+      await api('/server', { method: 'POST', body: { action: 'stop' } })
+      queryClient.setQueryData([ID, 'status'], previous => previous ? { ...previous, server_running: false, coordinator: { ...(previous.coordinator || {}), ok: false, pid: null, desktop_clients: 0 } } : previous)
+      setMessage('서버와 Singleton proxy를 중지했습니다.')
+    }
     catch (cause) { setMessage(`서버 중지 실패: ${cause?.message || String(cause)}`) } finally { setStarting(false) }
   }
   return jsxs('section', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) p-3', 'aria-labelledby': 'llamacpp-profiles-title', children: [
@@ -233,7 +420,7 @@ function CoordinatorStatusPanel({ status }) {
   ] })
 }
 
-function RuntimeCard({ status, jobs, onRefresh }) {
+function RuntimeCard({ status, jobs, onRefresh, pushConnected }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [requestedKind, setRequestedKind] = useState(status?.runtime_kind || 'official')
@@ -254,7 +441,8 @@ function RuntimeCard({ status, jobs, onRefresh }) {
     jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsx('div', { className: 'text-right', children: [jsx('p', { className: 'text-xs text-(--ui-text-tertiary)', children: activeKind === 'prism_ml' ? 'Prism-ML runtime' : 'official runtime' }), jsx('p', { className: 'font-mono text-sm text-(--ui-text-primary)', children: status?.runtime_version || '미설치' })] })] }),
     jsxs('div', { className: 'mt-4 flex items-center gap-2', children: [jsx('select', { className: `${input} shrink-0`, style: { ...themedSelect(), width: '11rem', maxWidth: '11rem', flex: '0 0 11rem' }, value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: changeRuntime, children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), requestedKind === activeKind ? null : jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || !available.installed, onClick: () => useRuntime(requestedKind), children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || (Boolean(available.version) && !available.update_available), 'aria-label': `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} runtime 업데이트`, title: available.version && available.latest_version ? `현재 ${available.version} · GitHub 최신 ${available.latest_version}` : undefined, onClick: install, children: '업데이트' })] }),
     jsx(ExecutionProfilesPanel, { status, onRefresh }),
-    jsx(ServerLogPanel, { status, jobs }),
+    jsx(ServerLogPanel, { status, jobs, pushConnected }),
+    jsx(ResourceMetricsPanel, { status, pushConnected }),
     message ? jsx('p', { className: `mt-3 text-xs ${message.includes('실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null,
     jsx(JobProgress, { job: runtimeJob }), jsx(JobProgress, { job: serverJob }), jsx(UnexpectedExitPanel, { diagnostic: status?.last_unexpected_exit }), jsx(CoordinatorStatusPanel, { status })
   ] })
@@ -555,7 +743,8 @@ function TabBar({ active, setActive }) {
 function Page() {
   const [wizard, setWizard] = useState(null)
   const [tab, setTab] = useState('runtime')
-  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: true })
+  const pushConnected = useCoordinatorPush()
+  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.coordinator?.ok === false ? false : pushConnected ? 30000 : query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: query => query.state.data?.coordinator?.ok !== false })
   const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
   const hfModels = useQuery({ queryKey: [ID, 'hf-models'], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
   const data = status.data; const models = data?.models || []; const localModels = hfModels.data?.models || []; const runtimeJobs = jobs.data?.jobs || []
@@ -567,7 +756,7 @@ function Page() {
   const openRegister = repo => setWizard({ mode: 'register', repo })
   const deleteDownloaded = async repoId => { if (!window.confirm(`'${repoId}' HF cache를 삭제할까요?`)) return; try { await api('/hf-models/delete', { method: 'POST', body: { repo_id: repoId } }); await hfModels.refetch() } catch (cause) { window.alert(`모델 삭제 실패: ${cause?.message || String(cause)}`) } }
   const activeModel = models.find(model => model.id === data?.active_model_id)
-  return jsxs('main', { className: 'mx-auto max-w-5xl p-4 sm:p-6', children: [jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus }) : null,
+  return jsxs('main', { className: 'mx-auto max-w-5xl p-4 sm:p-6', children: [jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus, pushConnected }) : null,
     tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '등록 모델과 다운받은 HF cache 모델을 runtime 종류와 관계없이 모두 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode }) : null, jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
     tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: '파라미터와 preset' }), jsx('p', { className: `mt-1 ${muted}`, children: '모델을 선택한 뒤 parameter를 검색·추가하고 현재 설정을 preset으로 저장합니다.' }), activeModel ? jsx(ModelSettingsEditor, { modelId: activeModel.id, appliedPresetId: data?.model_presets?.[activeModel.id] || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '먼저 모델 탭에서 사용할 모델을 선택하세요.' })] }) : null
   ] })

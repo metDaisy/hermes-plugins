@@ -532,14 +532,86 @@ class ServerRouteAdapterTests(unittest.TestCase):
             state=lambda: {"active_model_id": None}, stop=lambda: None, start=lambda: None,
             create_job=lambda kind, detail: {"kind": kind, "detail": detail, "job_id": "job"},
             launch=lambda _job, _work, _name: None, finish=lambda _job, _detail: None,
-            recent_jobs=lambda: [], find_job=lambda _job_id: None, logs=lambda _limit: {},
+            recent_jobs=lambda: [], find_job=lambda _job_id: None, logs=lambda _limit, _role: {},
+            metrics=lambda _window: {},
         )
         routes = {route.path: route.endpoint for route in create_router(context).routes}
 
-        self.assertTrue({"/server", "/jobs", "/jobs/{job_id}", "/logs"}.issubset(routes))
+        self.assertTrue({"/server", "/jobs", "/jobs/{job_id}", "/logs", "/metrics"}.issubset(routes))
         with self.assertRaises(HTTPException) as raised:
             routes["/server"]({"action": "start"})
         self.assertEqual(raised.exception.status_code, 400)
+
+    def test_stop_requests_worker_and_coordinator_shutdown(self) -> None:
+        from dashboard.routes.server_routes import ServerRouteContext, create_router
+
+        events: list[str] = []
+        context = ServerRouteContext(
+            state=lambda: {"active_model_id": "model"}, stop=lambda: events.append("worker"), start=lambda: None,
+            create_job=lambda kind, detail: {"kind": kind, "detail": detail, "job_id": "job"},
+            launch=lambda _job, _work, _name: None, finish=lambda _job, _detail: None,
+            recent_jobs=lambda: [], find_job=lambda _job_id: None, logs=lambda _limit, _role: {},
+            metrics=lambda _window: {}, shutdown=lambda: events.append("coordinator"),
+        )
+        routes = {route.path: route.endpoint for route in create_router(context).routes}
+
+        self.assertEqual(routes["/server"]({"action": "stop"}), {"ok": True, "server_running": False})
+        self.assertEqual(events, ["worker", "coordinator"])
+
+
+class CoordinatorEventBusTests(unittest.TestCase):
+    def test_bounded_bus_reports_a_gap_and_keeps_newest_events(self) -> None:
+        from dashboard.application.event_bus import CoordinatorEventBus
+
+        bus = CoordinatorEventBus(max_events=2)
+        bus.publish("log", refresh=["logs"])
+        second = bus.publish("metrics", refresh=["metrics"])
+        third = bus.publish("worker", refresh=["status", "metrics"])
+
+        batch = bus.events_after(0)
+
+        self.assertTrue(batch["gap"])
+        self.assertEqual([event["id"] for event in batch["events"]], [second["id"], third["id"]])
+        self.assertEqual(batch["cursor"], third["id"])
+
+    def test_activity_classification_limits_resource_refresh_to_metric_lines(self) -> None:
+        from dashboard.application.event_bus import classify_activity_line
+
+        self.assertEqual(classify_activity_line("ordinary llama.cpp info"), ("log", ["logs"]))
+        self.assertEqual(
+            classify_activity_line("prompt eval time = 100 ms / 10 tokens"),
+            ("prompt_completed", ["logs", "metrics"]),
+        )
+        self.assertEqual(
+            classify_activity_line("llama_server: model loaded"),
+            ("worker_state", ["logs", "status", "metrics"]),
+        )
+
+    def test_activity_pump_persists_stdout_and_publishes_invalidation_events(self) -> None:
+        import io
+        import tempfile
+        from pathlib import Path
+        from dashboard.application.event_bus import start_activity_pump
+
+        class Process:
+            stdout = io.BytesIO(b"ordinary info\nprompt eval time = 20 ms / 4 tokens\n")
+
+        observed: list[tuple[str, list[str]]] = []
+        with tempfile.TemporaryDirectory() as raw_root:
+            log_path = Path(raw_root) / "activity.log"
+            thread = start_activity_pump(
+                Process(), log_path,
+                lambda event_type, refresh: observed.append((event_type, refresh)),
+            )
+            thread.join(timeout=2)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(log_path.read_text(encoding="utf-8"), "ordinary info\nprompt eval time = 20 ms / 4 tokens\n")
+            self.assertEqual(observed, [
+                ("log", ["logs"]),
+                ("prompt_completed", ["logs", "metrics"]),
+                ("worker_output_closed", ["logs", "status", "metrics"]),
+            ])
 
 
 class ModelRouteAdapterTests(unittest.TestCase):

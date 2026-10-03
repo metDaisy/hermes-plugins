@@ -9,6 +9,11 @@ from typing import Any
 
 _ROLE_LABELS = {"main": "Main", "compression": "Compress", "server": "Server"}
 _MODEL_ROLES = {"main-local": "main", "compression-local": "compression"}
+_SESSION_DISPLAY_LIMIT = 24
+
+
+def _display_session(session: str) -> str:
+    return session if len(session) <= _SESSION_DISPLAY_LIMIT else session[:_SESSION_DISPLAY_LIMIT] + "..."
 
 
 def _unwrap(line: str) -> tuple[str, str]:
@@ -29,18 +34,26 @@ def _role_for_model(model: str) -> str:
 
 
 def _emit(events: list[dict[str, Any]], lines: list[str], role: str, event: str,
-          message: str, level: str = "info", contexts: dict[str, tuple[str, str]] | None = None,
-          **fields: Any) -> None:
+          message: str, level: str = "info", contexts: dict[str, dict[str, Any]] | None = None,
+          visible: bool = True, **fields: Any) -> None:
     label = _ROLE_LABELS.get(role, "Server")
-    profile, session = (contexts or {}).get(role, ("", ""))
-    identity = f"[{profile}][{session}]" if profile and session else ""
-    lines.append(f"[{label}]{identity} {message}")
+    context = (contexts or {}).get(role, {})
+    profile = str(context.get("profile") or "")
+    session = str(context.get("session") or "")
+    identity = f"[{profile}][{_display_session(session)}]" if profile and session else ""
+    if visible:
+        lines.append(f"[{label}]{identity} {message}")
     events.append({
         "role": role,
         "level": level,
         "event": event,
         "message": message,
-        **({"profile": profile, "session": session} if identity else {}),
+        **({
+            "profile": profile,
+            "session": session,
+            "request_id": str(context.get("request_id") or ""),
+            "observed_at": float(context.get("recorded_at") or 0),
+        } if identity else {}),
         **fields,
     })
 
@@ -105,7 +118,7 @@ def project_activity_lines(raw_lines: list[str]) -> dict[str, Any]:
     lines: list[str] = []
     current_role = "server"
     port_roles: dict[str, str] = {}
-    contexts: dict[str, tuple[str, str]] = {}
+    contexts: dict[str, dict[str, Any]] = {}
 
     for raw in raw_lines:
         try:
@@ -117,7 +130,12 @@ def project_activity_lines(raw_lines: list[str]) -> dict[str, Any]:
             profile = str(context.get("profile") or "")
             session = str(context.get("session") or "")
             if context_role in {"main", "compression"} and profile and session:
-                contexts[context_role] = (profile, session)
+                contexts[context_role] = {
+                    "profile": profile,
+                    "session": session,
+                    "request_id": str(context.get("request_id") or ""),
+                    "recorded_at": float(context.get("recorded_at") or 0),
+                }
                 current_role = context_role
             continue
 
@@ -181,6 +199,16 @@ def project_activity_lines(raw_lines: list[str]) -> dict[str, Any]:
                   contexts=contexts, generated_tokens=tokens, generation_tokens_per_second=rate)
             continue
 
+        generation_done = re.search(
+            r"(?<!prompt )eval time\s*=\s*([0-9.]+) ms\s*/\s*(\d+) tokens.*?([0-9.]+) tokens per second",
+            text,
+        )
+        if generation_done:
+            tokens, rate = int(generation_done.group(2)), float(generation_done.group(3))
+            _emit(events, lines, role, "generation_progress", f"생성 {tokens} tok · {rate:.1f} tok/s",
+                  contexts=contexts, generated_tokens=tokens, generation_tokens_per_second=rate)
+            continue
+
         prompt_done = re.search(r"prompt eval time\s*=\s*([0-9.]+) ms\s*/\s*(\d+) tokens", text)
         if prompt_done:
             elapsed_ms, tokens = float(prompt_done.group(1)), int(prompt_done.group(2))
@@ -193,6 +221,17 @@ def project_activity_lines(raw_lines: list[str]) -> dict[str, Any]:
             elapsed_ms, tokens = float(total.group(1)), int(total.group(2))
             _emit(events, lines, role, "inference_completed", f"요청 완료 · {tokens} tok · {elapsed_ms / 1000:.2f}초",
                   contexts=contexts, total_tokens=tokens, total_ms=elapsed_ms)
+            continue
+
+        context_usage = re.search(r"stop processing:\s*n_tokens\s*=\s*(\d+)", text)
+        if context_usage:
+            _emit(events, lines, role, "context_usage", "", contexts=contexts, visible=False,
+                  context_tokens=int(context_usage.group(1)))
+            continue
+
+        if (re.search(r"llama_server:\s*-{3,}\s*$", text)
+                or "this can be a security risk (cross-origin attacks)" in text.lower()
+                or re.search(r"llama_server:\s*more info:\s*http", text, re.IGNORECASE)):
             continue
 
         if level in {"warning", "warn", "error"} and not any(secret in text.lower() for secret in ("prompt", "authorization", "api key", "token")):

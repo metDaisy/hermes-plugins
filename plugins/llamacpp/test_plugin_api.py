@@ -993,30 +993,83 @@ class LlamaCppManagerTests(unittest.TestCase):
                     "compression": {"runtime_kind": "prism_ml", "model_id": "Ternary-Bonsai-small", "preset_id": ""},
                 },
             }), encoding="utf-8")
-            started_logs: list[Path] = []
+            started: list[tuple[Path, str | None]] = []
 
             class Startup:
-                def __init__(self, path: Path) -> None:
+                def __init__(self, path: Path, runtime_kind: str | None) -> None:
                     self.path = path
+                    self.runtime_kind = runtime_kind
 
                 def start(self) -> None:
-                    started_logs.append(self.path)
+                    started.append((self.path, self.runtime_kind))
 
             with patch.object(api, "STATE_PATH", state_path), \
                     patch.object(api, "TRANSITION_LOG_PATH", activity_path), \
                     patch.object(api, "ACTIVITY_LOG_PATH", activity_path), \
                     patch.object(api, "_is_server_running", return_value=False), \
-                    patch.object(api, "_server_startup", side_effect=lambda path=None: Startup(path)):
+                    patch.object(api, "_server_startup", side_effect=lambda path=None, runtime_kind=None: Startup(path, runtime_kind)):
                 result = api.ensure_execution_role("compression")
                 state = api._state()
 
             self.assertEqual(result["role"], "compression")
             self.assertEqual(state["active_model_id"], "Ternary-Bonsai-small")
-            self.assertEqual(state["runtime_kind"], "prism_ml")
+            self.assertEqual(state["runtime_kind"], "official")
+            self.assertEqual(state["active_runtime_kind"], "prism_ml")
             self.assertEqual(state["active_role"], "compression")
             self.assertEqual(state["transition_phase"], "COMPRESSING")
-            self.assertEqual(started_logs, [activity_path])
+            self.assertEqual(started, [(activity_path, "prism_ml")])
             self.assertIn('[transition] {"event": "transition-ready"', activity_path.read_text(encoding="utf-8"))
+
+    def test_intentionally_stopped_coordinator_is_not_restarted_by_passive_requests(self) -> None:
+        from dashboard import plugin_api as profile_proxy
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            marker = Path(raw_root) / "coordinator-stopped"
+            marker.write_text("stopped", encoding="utf-8")
+            with patch.object(profile_proxy, "COORDINATOR_STOP_MARKER", marker), \
+                    patch.object(profile_proxy, "_healthy", return_value=False), \
+                    patch.object(profile_proxy, "_try_start_coordinator") as start:
+                with self.assertRaisesRegex(RuntimeError, "intentionally stopped"):
+                    profile_proxy._ensure_coordinator()
+
+            start.assert_not_called()
+
+    def test_stop_marker_blocks_passive_requests_even_if_a_stale_coordinator_is_healthy(self) -> None:
+        from dashboard import plugin_api as profile_proxy
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            marker = Path(raw_root) / "coordinator-stopped"
+            marker.write_text("stopped", encoding="utf-8")
+            with patch.object(profile_proxy, "COORDINATOR_STOP_MARKER", marker), \
+                    patch.object(profile_proxy, "_healthy", return_value=True), \
+                    patch.object(profile_proxy, "_try_start_coordinator") as start:
+                with self.assertRaisesRegex(RuntimeError, "intentionally stopped"):
+                    profile_proxy._ensure_coordinator()
+
+            start.assert_not_called()
+
+    def test_explicit_server_start_clears_stop_marker_before_starting_coordinator(self) -> None:
+        from dashboard import plugin_api as profile_proxy
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            marker = Path(raw_root) / "coordinator-stopped"
+            marker.write_text("stopped", encoding="utf-8")
+            health = iter([False, True])
+            with patch.object(profile_proxy, "COORDINATOR_STOP_MARKER", marker), \
+                    patch.object(profile_proxy, "_healthy", side_effect=lambda: next(health, True)), \
+                    patch.object(profile_proxy, "_stop_incompatible_coordinator"), \
+                    patch.object(profile_proxy, "_try_start_coordinator", return_value=True):
+                profile_proxy._ensure_coordinator(allow_start=True)
+
+            self.assertFalse(marker.exists())
+
+    def test_only_explicit_start_requests_wake_an_intentionally_stopped_coordinator(self) -> None:
+        from dashboard import plugin_api as profile_proxy
+
+        self.assertTrue(profile_proxy._coordinator_start_requested("POST", "profiles/start", b"{}"))
+        self.assertTrue(profile_proxy._coordinator_start_requested("POST", "server", b'{"action":"start"}'))
+        self.assertFalse(profile_proxy._coordinator_start_requested("POST", "server", b'{"action":"stop"}'))
+        self.assertFalse(profile_proxy._coordinator_start_requested("GET", "status", b""))
 
     def test_main_role_change_waits_for_active_main_request_to_finish(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -1385,13 +1438,13 @@ class LlamaCppManagerTests(unittest.TestCase):
 
             event = json.loads(context_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(event, {
-            "type": "hermes_request_context",
-            "role": "main",
-            "profile": "project-manager",
-            "session": "20261003_164117_5bf794",
-            "activity_offset": expected_offset,
-        })
+        self.assertEqual(event["type"], "hermes_request_context")
+        self.assertEqual(event["role"], "main")
+        self.assertEqual(event["profile"], "project-manager")
+        self.assertEqual(event["session"], "20261003_164117_5bf794")
+        self.assertEqual(event["activity_offset"], expected_offset)
+        self.assertRegex(event["request_id"], r"^[0-9a-f]{32}$")
+        self.assertGreater(event["recorded_at"], 0)
 
     def test_proxy_rewrites_inactive_compression_profile_for_coordinated_swap(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
@@ -1434,6 +1487,12 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("응답 중단 시 upstream 요청도 종료", source)
         self.assertIn("Exclusive swap", source)
         self.assertIn("Main", source)
+        self.assertIn("서버와 Singleton proxy를 중지했습니다.", source)
+        self.assertIn("queryClient.setQueryData([ID, 'status']", source)
+        self.assertIn("query.state.data?.coordinator?.ok === false ? false", source)
+        self.assertIn("pluginCtx.socket('/events'", source)
+        self.assertIn("pushConnected ? false", source)
+        self.assertIn("push 연결", source)
         self.assertIn("Auxiliary", source)
         self.assertIn("Main이 선택되어 있으면 Main을 우선 로드합니다", source)
         self.assertIn("value: 'compress'", source)
@@ -1456,6 +1515,14 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("통합 로그", log_panel)
         self.assertIn("'aria-label': 'llama.cpp 로그'", log_panel)
         self.assertIn("api('/logs?limit=250')", source)
+        self.assertIn("api('/metrics?window=60')", source)
+        self.assertIn("function ResourceMetricsPanel", source)
+        self.assertIn("children: '최근 60초 리소스'", source)
+        self.assertIn("title: 'Main model'", source)
+        self.assertIn("title: 'Aux model'", source)
+        self.assertIn("children: 'Token 처리량'", source)
+        self.assertIn("children: 'Context 사용량'", source)
+        self.assertIn("children: '요청 부하'", source)
         self.assertNotIn("분리 로그", source)
         self.assertIn("/lifecycle/lease", source)
         self.assertIn("pagehide", source)
@@ -1735,7 +1802,26 @@ class LlamaCppManagerTests(unittest.TestCase):
         proxy_path = Path(__file__).parent / "dashboard" / "plugin_api.py"
         coordinator_path = Path(__file__).parent / "dashboard" / "coordinator_server.py"
         self.assertIn("Profile-local proxy", proxy_path.read_text(encoding="utf-8"))
-        self.assertIn("from backend_impl import router", coordinator_path.read_text(encoding="utf-8"))
+        coordinator_source = coordinator_path.read_text(encoding="utf-8")
+        self.assertIn("from backend_impl import router", coordinator_source)
+        self.assertIn("if COORDINATOR_STOP_MARKER.exists():", coordinator_source)
+        from dashboard import coordinator_server, plugin_api as profile_proxy
+        self.assertIn("/events", {getattr(route, "path", None) for route in coordinator_server.app.routes})
+        self.assertIn("/events", {getattr(route, "path", None) for route in profile_proxy.router.routes})
+
+    def test_coordinator_event_socket_pushes_bounded_bus_events(self) -> None:
+        from fastapi.testclient import TestClient
+        from dashboard import coordinator_server
+
+        client = TestClient(coordinator_server.app)
+        with client.websocket_connect("/events") as websocket:
+            connected = websocket.receive_json()
+            coordinator_server.EVENT_BUS.publish("probe", refresh=["metrics"])
+            event = websocket.receive_json()
+
+        self.assertEqual(connected["type"], "connected")
+        self.assertEqual(event["type"], "probe")
+        self.assertEqual(event["refresh"], ["metrics"])
 
     def test_custom_endpoint_routes_through_coordinator(self) -> None:
         with patch.object(api, "_profile_config_paths", return_value=[]), patch.object(api, "_load_options", return_value={}):
