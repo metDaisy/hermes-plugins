@@ -307,7 +307,7 @@ function contextSummary(metric) {
   return limit ? `${tokens.toLocaleString()} / ${limit.toLocaleString()} (${percent.toFixed(1)}%)` : tokens ? tokens.toLocaleString() : '—'
 }
 
-function RoleMetricsSummary({ roles }) {
+function RoleMetricsSummary({ roles, serverRunning }) {
   const rows = [
     { key: 'main', label: 'Main', metric: roles?.main, color: MAIN_COLOR },
     { key: 'compression', label: 'Aux', metric: roles?.compression, color: AUX_COLOR }
@@ -324,7 +324,7 @@ function RoleMetricsSummary({ roles }) {
       jsx('th', { className: 'py-2 pr-3 text-left font-normal', scope: 'row', children: jsxs('div', { className: 'flex min-w-0 items-center gap-2', children: [
         jsx('span', { className: 'h-2 w-2 shrink-0 rounded-full', style: { backgroundColor: color }, 'aria-hidden': true }),
         jsxs('div', { className: 'min-w-0', children: [
-          jsxs('p', { className: 'flex items-center gap-2 text-(--ui-text-primary)', children: [label, metric?.active ? jsx('span', { className: 'rounded border border-(--ui-accent) px-1 py-0.5 text-[8px] font-medium text-(--ui-accent)', children: 'ACTIVE' }) : null] }),
+          jsxs('p', { className: 'flex items-center gap-2 text-(--ui-text-primary)', children: [label, metric?.active && serverRunning ? jsx('span', { className: 'rounded border border-(--ui-accent) px-1 py-0.5 text-[8px] font-medium text-(--ui-accent)', children: 'ACTIVE' }) : null] }),
           jsx('p', { className: 'truncate font-mono text-[10px] text-(--ui-text-tertiary)', title: metric?.model_id || '', children: metric?.model_id || '모델 미지정' })
         ] })
       ] }) }),
@@ -369,7 +369,7 @@ function ResourceMetricsPanel({ status, pushConnected }) {
       jsx('button', { className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-2.5 py-1 text-[11px] text-(--ui-text-secondary) hover:bg-(--ui-bg-secondary) hover:text-(--ui-text-primary)', type: 'button', onClick: () => setShowDetails(current => !current), 'aria-expanded': showDetails, 'aria-controls': 'llamacpp-resource-details', children: showDetails ? '간단히 보기' : '상세 보기' })
     ] }),
     !serverStopped && metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
-    jsx(RoleMetricsSummary, { roles }),
+    jsx(RoleMetricsSummary, { roles, serverRunning: !serverStopped }),
     jsxs('div', { className: 'flex flex-wrap gap-x-4 gap-y-1 border-t border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-3 py-2 text-[11px] text-(--ui-text-tertiary)', children: [
       jsx('span', { children: `Model ${worker.model_id || '—'}` }),
       jsx('span', { children: `RAM RSS ${worker.workerRssBytes == null ? '—' : formatGiB(Number(worker.workerRssBytes) / (1024 ** 3))} · Private ${worker.workerPrivateBytes == null ? '—' : formatGiB(Number(worker.workerPrivateBytes) / (1024 ** 3))}` }),

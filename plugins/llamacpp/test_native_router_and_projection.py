@@ -604,24 +604,30 @@ class ProductionIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            pm = root / "project-manager" / "config.yaml"
-            other = root / "main" / "config.yaml"
-            for path in (pm, other):
+            workers = [root / name / "config.yaml" for name in ("project-manager", "coder", "reviewer")]
+            others = [root / name / "config.yaml" for name in ("main", "comfy-master")]
+            for path in (*workers, *others):
                 path.parent.mkdir(parents=True)
                 path.write_text(ProfileModelRoutingTests.BASE, encoding="utf-8")
 
-            with patch.object(api, "_profile_config_paths", return_value=[pm, other]), \
+            with patch.object(api, "_profile_config_paths", return_value=[*workers, *others]), \
                     patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768, "compression-local": 8192,
                     }):
                 api._sync_execution_profile_endpoint()
 
-            pm_text = pm.read_text(encoding="utf-8")
-            other_text = other.read_text(encoding="utf-8")
-            self.assertIn("  default: main-local", pm_text)
-            self.assertIn("    model: compression-local", pm_text)
-            self.assertIn("  default: gpt-5.6-luna", other_text)
-            self.assertIn("# BEGIN llamacpp endpoint (managed)", other_text)
+            for path in workers:
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("  default: main-local", text, path.parent.name)
+                self.assertIn("    model: compression-local", text, path.parent.name)
+                self.assertIn('default_model: "main-local"', text, path.parent.name)
+                self.assertIn('"main-local":', text, path.parent.name)
+            for path in others:
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("  default: gpt-5.6-luna", text, path.parent.name)
+                self.assertIn("# BEGIN llamacpp endpoint (managed)", text, path.parent.name)
+                self.assertIn('default_model: "main-local"', text, path.parent.name)
+                self.assertIn('"main-local":', text, path.parent.name)
 
     def test_endpoint_removal_restores_worker_profiles_to_remote_policy(self) -> None:
         import tempfile
