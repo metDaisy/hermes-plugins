@@ -45,6 +45,7 @@ try:
     from .application.preset_store import PresetStore
     from .application.activity_log_projection import contextual_activity_tail, project_activity_lines
     from .application.resource_metrics import aggregate_profile_metrics
+    from .application.resource_history import ResourceHistoryStore, worker_memory_sample
     from .application.event_bus import publish_event, start_activity_pump
     from .application.profile_model_routing import sync_profile_models
     from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
@@ -94,6 +95,7 @@ except ImportError:
     from application.preset_store import PresetStore
     from application.activity_log_projection import contextual_activity_tail, project_activity_lines
     from application.resource_metrics import aggregate_profile_metrics
+    from application.resource_history import ResourceHistoryStore, worker_memory_sample
     from application.event_bus import publish_event, start_activity_pump
     from application.profile_model_routing import sync_profile_models
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
@@ -137,6 +139,7 @@ OPTION_METADATA_CACHE_PATH = RUNTIME_ROOT / "parameter-metadata-cache.json"
 ROUTER_PRESET_PATH = RUNTIME_ROOT / "router-models.ini"
 ACTIVITY_LOG_PATH = RUNTIME_ROOT / "logs" / "activity.log"
 REQUEST_CONTEXT_LOG_PATH = RUNTIME_ROOT / "logs" / "request-context.jsonl"
+RESOURCE_HISTORY_PATH = RUNTIME_ROOT / "logs" / "resource-history.jsonl"
 # Compatibility aliases for older callers. All runtime events now share one ordered log.
 SERVER_LOG_PATH = ACTIVITY_LOG_PATH
 MAIN_LOG_PATH = ACTIVITY_LOG_PATH
@@ -167,6 +170,7 @@ _official_runtime_root: Path | None = None
 _prism_runtime_service: PrismRuntimeInstaller | None = None
 _prism_runtime_root: Path | None = None
 _endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BEGIN, CUSTOM_ENDPOINT_END)
+RESOURCE_HISTORY = ResourceHistoryStore(RESOURCE_HISTORY_PATH)
 
 
 def _default_state() -> dict[str, Any]:
@@ -848,14 +852,15 @@ def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]
     }
 
 
-def _resource_metrics(window: int = 60) -> dict[str, Any]:
+def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dict[str, Any]:
     requested = int(window)
-    if requested < 10 or requested > 300:
-        raise ValueError("window must be between 10 and 300 seconds")
+    if requested < 60 or requested > 86400:
+        raise ValueError("window must be between 60 and 86400 seconds")
     projected = _server_log_tail(500)
     result = aggregate_profile_metrics(
-        list(projected.get("events") or []), window_seconds=requested,
+        list(projected.get("events") or []), window_seconds=min(requested, 300),
     )
+    result["window_seconds"] = requested
     state = _state()
     profiles = state.get("execution_profiles") if isinstance(state.get("execution_profiles"), dict) else {}
     active_role = str(state.get("active_role") or "")
@@ -867,6 +872,7 @@ def _resource_metrics(window: int = 60) -> dict[str, Any]:
     all_settings = state.get("model_settings") if isinstance(state.get("model_settings"), dict) else {}
     settings = all_settings.get(model_id) if isinstance(all_settings.get(model_id), dict) else {}
     role_metrics = result.setdefault("roles", {})
+    running = _is_server_running()
     for role in ("main", "compression"):
         execution_profile = profiles.get(role) if isinstance(profiles, dict) else None
         role_model_id = str(execution_profile.get("model_id") or "") if isinstance(execution_profile, dict) else ""
@@ -885,10 +891,12 @@ def _resource_metrics(window: int = 60) -> dict[str, Any]:
         role_metric.update({
             "model_id": role_model_id,
             "context_limit": int(role_settings.get("ctx-size") or 0),
-            "active": role == active_role and _is_server_running(),
+            "active": role == active_role and running,
         })
+    worker_pid = int(state.get("pid") or 0) if running else 0
     result["worker"] = {
-        "running": _is_server_running(),
+        "running": running,
+        "pid": worker_pid or None,
         "model_id": model_id,
         "active_role": active_role or None,
         "active_requests": int(state.get("active_main_requests") or 0),
@@ -897,8 +905,52 @@ def _resource_metrics(window: int = 60) -> dict[str, Any]:
         "kv_cache_k": str(settings.get("cache-type-k") or "auto"),
         "kv_cache_v": str(settings.get("cache-type-v") or "auto"),
         "kv_cache_bytes": None,
+        **worker_memory_sample(worker_pid),
     }
+    if include_series:
+        result["series"] = RESOURCE_HISTORY.read(requested, now=float(result["sampled_at"]), max_points=360)
     return result
+
+
+def record_resource_sample() -> dict[str, Any] | None:
+    """Persist one low-frequency worker/RAM/throughput sample for long-range charts."""
+    snapshot = _resource_metrics(60, include_series=False)
+    worker = snapshot.get("worker") if isinstance(snapshot.get("worker"), dict) else {}
+    if not worker.get("running") or not worker.get("workerRssBytes"):
+        return None
+    sampled_at = float(snapshot.get("sampled_at") or time.time())
+    roles = snapshot.get("roles") if isinstance(snapshot.get("roles"), dict) else {}
+
+    def recent_rate(role: str, field: str) -> float | None:
+        metric = roles.get(role) if isinstance(roles.get(role), dict) else {}
+        last_activity = float(metric.get("last_activity_at") or 0)
+        value = metric.get(field)
+        return float(value) if value is not None and sampled_at - last_activity <= 20 else None
+
+    def context_percent(role: str) -> float | None:
+        metric = roles.get(role) if isinstance(roles.get(role), dict) else {}
+        limit = int(metric.get("context_limit") or 0)
+        return min(100.0, int(metric.get("context_tokens") or 0) / limit * 100.0) if limit else None
+
+    sample = {
+        "at": sampled_at,
+        "workerPid": worker.get("workerPid"),
+        "workerRssBytes": worker.get("workerRssBytes"),
+        "workerPrivateBytes": worker.get("workerPrivateBytes"),
+        "modelId": worker.get("model_id"),
+        "activeRole": worker.get("active_role"),
+        "active": worker.get("active_requests"),
+        "queued": worker.get("queued_requests"),
+        "mainPrompt": recent_rate("main", "prompt_tokens_per_second"),
+        "mainGeneration": recent_rate("main", "generation_tokens_per_second"),
+        "mainContextPercent": context_percent("main"),
+        "auxPrompt": recent_rate("compression", "prompt_tokens_per_second"),
+        "auxGeneration": recent_rate("compression", "generation_tokens_per_second"),
+        "auxContextPercent": context_percent("compression"),
+    }
+    RESOURCE_HISTORY.append(sample)
+    publish_event("resource_sample", refresh=["metrics"])
+    return sample
 
 
 def _server_rows() -> list[dict[str, Any]]:
@@ -1284,6 +1336,16 @@ router.include_router(create_execution_profile_router(ExecutionProfileRouteConte
 )))
 def status() -> dict[str, Any]:
     return _status()
+
+
+def activity_logs(limit: int = 250) -> dict[str, Any]:
+    """Return the read-only activity projection without starting a coordinator."""
+    return _server_log_tail(limit)
+
+
+def resource_metrics(window: int = 1800) -> dict[str, Any]:
+    """Return the read-only resource snapshot without starting a coordinator."""
+    return _resource_metrics(window)
 
 
 def registered_models() -> dict[str, Any]:

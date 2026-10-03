@@ -15,7 +15,7 @@ import httpx
 import anyio
 import websockets
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 router = APIRouter()
@@ -32,7 +32,7 @@ _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.75"
+COORDINATOR_BUILD = "0.2.81"
 
 
 def _health_payload() -> dict[str, object] | None:
@@ -228,6 +228,40 @@ def _coordinator_start_requested(method: str, path: str, body: bytes) -> bool:
     return str(payload.get("action") or "") == "start"
 
 
+def _read_only_backend():
+    try:
+        from dashboard import backend_impl
+    except ImportError:  # pragma: no cover - standalone plugin loader fallback
+        import backend_impl  # type: ignore[no-redef]
+    return backend_impl
+
+
+def _stopped_payload(path: str, query: object) -> dict[str, object] | None:
+    """Serve safe read-only snapshots while intentional stop blocks the coordinator."""
+    normalized = path.strip("/")
+    backend = _read_only_backend()
+    if normalized == "status":
+        payload = backend.status()
+        payload["server_running"] = False
+        payload["coordinator"] = {
+            "ok": False,
+            "stopped": True,
+            "port": COORDINATOR_PORT,
+            "singleton": True,
+            "inference_base_url": f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
+            "cancellation_propagation": True,
+        }
+        return payload
+    getter = getattr(query, "get", lambda *_args: None)
+    if normalized == "logs":
+        return backend.activity_logs(max(1, min(int(getter("limit") or 250), 1000)))
+    if normalized == "metrics":
+        return backend.resource_metrics(int(getter("window") or 60))
+    if normalized == "jobs":
+        return {"jobs": []}
+    return None
+
+
 def _ws_upgrade_authorized(websocket: WebSocket) -> bool:
     """Use the dashboard's canonical token/ticket gate when loaded by Hermes."""
     try:
@@ -321,6 +355,10 @@ def _streaming_response(client: httpx.AsyncClient, upstream: httpx.Response) -> 
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
 async def proxy(request: Request, path: str) -> StreamingResponse:
+    if request.method == "GET" and COORDINATOR_STOP_MARKER.exists():
+        stopped_payload = await asyncio.to_thread(_stopped_payload, path, request.query_params)
+        if stopped_payload is not None:
+            return JSONResponse(stopped_payload)
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=120.0, pool=5.0),
         trust_env=False,

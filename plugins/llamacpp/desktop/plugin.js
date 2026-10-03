@@ -157,6 +157,20 @@ function formatRate(value) {
   return value != null && Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} tok/s` : '—'
 }
 
+function formatGiB(value) {
+  return value != null && Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} GiB` : '—'
+}
+
+function formatWindowOffset(seconds) {
+  if (seconds >= 3600) return `${seconds / 3600}시간 전`
+  return `${Math.round(seconds / 60)}분 전`
+}
+
+function formatSampleTime(value) {
+  if (!value) return '—'
+  return new Date(Number(value) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
 function niceMaximum(value, fixedMaximum) {
   if (fixedMaximum) return Number(fixedMaximum)
   const raw = Math.max(1, Number(value) || 0)
@@ -169,45 +183,77 @@ function niceMaximum(value, fixedMaximum) {
 function formatAxisTick(value, unit) {
   if (unit === '%') return `${Math.round(value)}%`
   if (unit === '요청') return String(Math.round(value))
+  if (unit === 'GiB') return `${Number(value).toFixed(value < 10 ? 1 : 0)}`
   if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
   if (value >= 100) return String(Math.round(value))
   return Number(value).toFixed(value > 0 && value < 10 ? 1 : 0)
 }
 
-function MetricChart({ samples, series, label, leftAxis, rightAxis }) {
+function chartValue(value, unit) {
+  if (value == null || !Number.isFinite(Number(value))) return '—'
+  if (unit === 'GiB') return formatGiB(value)
+  if (unit === '%') return `${Number(value).toFixed(1)}%`
+  if (unit === '요청') return String(Math.round(Number(value)))
+  return `${Number(value).toFixed(1)} ${unit || ''}`.trim()
+}
+
+function MetricChart({ samples, series, label, leftAxis, rightAxis, windowSeconds, latestAt: requestedLatestAt }) {
   const rows = samples || []
+  const [hoveredSample, setHoveredSample] = useState(null)
+  const svgRef = useRef(null)
   const plot = { left: 58, right: 582, top: 20, bottom: 150 }
   const ticks = [0, 0.25, 0.5, 0.75, 1]
-  const latestAt = rows.length ? Math.max(...rows.map(row => Number(row.at) || 0)) : 0
-  const earliestAt = latestAt - 60
-  const axisValues = axis => rows.flatMap(sample => series.filter(item => item.axis === axis).map(item => Math.max(0, Number(sample?.[item.field]) || 0)))
+  const latestAt = Number(requestedLatestAt) || (rows.length ? Math.max(...rows.map(row => Number(row.at) || 0)) : Date.now() / 1000)
+  const earliestAt = latestAt - windowSeconds
+  const axisValues = axis => rows.flatMap(sample => series.filter(item => item.axis === axis && sample?.[item.field] != null).map(item => Math.max(0, Number(sample[item.field]) || 0)))
   const leftMaximum = niceMaximum(Math.max(Number(leftAxis?.minimumMaximum) || 0, ...axisValues('left')), leftAxis?.maximum)
   const rightMaximum = rightAxis ? niceMaximum(Math.max(Number(rightAxis.minimumMaximum) || 0, ...axisValues('right')), rightAxis.maximum) : leftMaximum
-  const xFor = (sample, index) => {
-    const at = Number(sample?.at) || 0
-    if (latestAt && at) return plot.left + Math.max(0, Math.min(1, (at - earliestAt) / 60)) * (plot.right - plot.left)
-    return plot.left + (index / Math.max(1, rows.length - 1)) * (plot.right - plot.left)
-  }
+  const xFor = sample => plot.left + Math.max(0, Math.min(1, ((Number(sample?.at) || earliestAt) - earliestAt) / windowSeconds)) * (plot.right - plot.left)
   const yFor = (value, maximum) => plot.bottom - (Math.max(0, Number(value) || 0) / maximum) * (plot.bottom - plot.top)
-  return jsx('svg', { className: 'mt-1 h-44 w-full', viewBox: '0 0 640 184', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': label, children: [
-    ...ticks.map(ratio => {
-      const y = plot.bottom - ratio * (plot.bottom - plot.top)
-      return jsxs('g', { children: [
-        jsx('line', { x1: plot.left, y1: y, x2: plot.right, y2: y, stroke: 'var(--ui-stroke-secondary)', strokeWidth: ratio === 0 ? 1 : 0.6, strokeDasharray: ratio === 0 ? undefined : '3 4' }),
-        jsx('text', { x: plot.left - 7, y: y + 3, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(leftMaximum * ratio, leftAxis?.unit) }),
-        rightAxis ? jsx('text', { x: plot.right + 7, y: y + 3, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(rightMaximum * ratio, rightAxis.unit) }) : null
-      ] }, `tick-${ratio}`)
-    }),
-    jsx('text', { x: plot.left, y: 10, textAnchor: 'start', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: leftAxis?.label }),
-    rightAxis ? jsx('text', { x: plot.right, y: 10, textAnchor: 'end', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: rightAxis.label }) : null,
-    jsx('text', { x: plot.left, y: 173, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '60초 전' }),
-    jsx('text', { x: (plot.left + plot.right) / 2, y: 173, textAnchor: 'middle', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '30초 전' }),
-    jsx('text', { x: plot.right, y: 173, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '현재' }),
-    ...series.map(item => {
-      const maximum = item.axis === 'right' ? rightMaximum : leftMaximum
-      const points = rows.map((sample, index) => `${xFor(sample, index)},${yFor(sample?.[item.field], maximum)}`).join(' ')
-      return rows.length > 1 ? jsx('polyline', { points, fill: 'none', stroke: item.stroke, strokeWidth: 2, strokeDasharray: item.dash || undefined, vectorEffect: 'non-scaling-stroke' }, item.field) : null
-    })
+  const segmentsFor = item => {
+    const maximum = item.axis === 'right' ? rightMaximum : leftMaximum
+    const segments = []
+    let current = []
+    for (const sample of rows) {
+      if (sample?.[item.field] == null) {
+        if (current.length) segments.push(current)
+        current = []
+        continue
+      }
+      current.push(`${xFor(sample)},${yFor(sample[item.field], maximum)}`)
+    }
+    if (current.length) segments.push(current)
+    return segments
+  }
+  const onPointerMove = event => {
+    if (!rows.length || !svgRef.current) return
+    const bounds = svgRef.current.getBoundingClientRect()
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)))
+    const target = earliestAt + ratio * windowSeconds
+    setHoveredSample(rows.reduce((best, row) => Math.abs(Number(row.at) - target) < Math.abs(Number(best.at) - target) ? row : best, rows[0]))
+  }
+  const hoverX = hoveredSample ? xFor(hoveredSample) : null
+  const hoverDetails = hoveredSample ? [formatSampleTime(hoveredSample.at), ...series.map(item => `${item.label}: ${chartValue(hoveredSample[item.field], item.axis === 'right' ? rightAxis?.unit : leftAxis?.unit)}`)].join(' · ') : '그래프 위에 마우스를 올리면 시점별 값을 확인할 수 있습니다.'
+  return jsxs('div', { children: [
+    jsx('svg', { ref: svgRef, className: 'mt-1 h-44 w-full touch-none', viewBox: '0 0 640 184', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': label, onPointerMove, onPointerLeave: () => setHoveredSample(null), children: [
+      ...ticks.map(ratio => {
+        const y = plot.bottom - ratio * (plot.bottom - plot.top)
+        return jsxs('g', { children: [
+          jsx('line', { x1: plot.left, y1: y, x2: plot.right, y2: y, stroke: 'var(--ui-stroke-secondary)', strokeWidth: ratio === 0 ? 1 : 0.6, strokeDasharray: ratio === 0 ? undefined : '3 4' }),
+          jsx('text', { x: plot.left - 7, y: y + 3, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(leftMaximum * ratio, leftAxis?.unit) }),
+          rightAxis ? jsx('text', { x: plot.right + 7, y: y + 3, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatAxisTick(rightMaximum * ratio, rightAxis.unit) }) : null
+        ] }, `tick-${ratio}`)
+      }),
+      jsx('text', { x: plot.left, y: 10, textAnchor: 'start', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: leftAxis?.label }),
+      rightAxis ? jsx('text', { x: plot.right, y: 10, textAnchor: 'end', fill: 'var(--ui-text-secondary)', fontSize: 9, fontWeight: 600, children: rightAxis.label }) : null,
+      jsx('text', { x: plot.left, y: 173, textAnchor: 'start', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatWindowOffset(windowSeconds) }),
+      jsx('text', { x: (plot.left + plot.right) / 2, y: 173, textAnchor: 'middle', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: formatWindowOffset(windowSeconds / 2) }),
+      jsx('text', { x: plot.right, y: 173, textAnchor: 'end', fill: 'var(--ui-text-tertiary)', fontSize: 9, children: '현재' }),
+      ...series.flatMap(item => segmentsFor(item).map((points, index) => points.length > 1 ? jsx('polyline', { points: points.join(' '), fill: 'none', stroke: item.stroke, strokeWidth: 2, strokeDasharray: item.dash || undefined, vectorEffect: 'non-scaling-stroke' }, `${item.field}-${index}`) : jsx('circle', { cx: Number(points[0].split(',')[0]), cy: Number(points[0].split(',')[1]), r: 2, fill: item.stroke }, `${item.field}-${index}`))),
+      hoverX != null ? jsx('line', { x1: hoverX, y1: plot.top, x2: hoverX, y2: plot.bottom, stroke: 'var(--ui-text-primary)', strokeWidth: 1, strokeDasharray: '2 3', pointerEvents: 'none' }) : null,
+      jsx('rect', { x: plot.left, y: plot.top, width: plot.right - plot.left, height: plot.bottom - plot.top, fill: 'transparent' })
+    ] }),
+    jsx('p', { className: 'min-h-4 truncate text-[10px] tabular-nums text-(--ui-text-tertiary)', role: 'status', children: hoverDetails })
   ] })
 }
 
@@ -220,6 +266,17 @@ function ChartLegend({ items }) {
 
 const MAIN_COLOR = 'var(--ui-accent)'
 const AUX_COLOR = 'var(--ui-cyan)'
+const METRIC_WINDOWS = [
+  { seconds: 300, label: '5분' },
+  { seconds: 1800, label: '30분' },
+  { seconds: 3600, label: '1시간' },
+  { seconds: 21600, label: '6시간' },
+  { seconds: 86400, label: '24시간' }
+]
+const MEMORY_SERIES = [
+  { field: 'workerRssGiB', label: 'Working set (RSS)', stroke: MAIN_COLOR, axis: 'left' },
+  { field: 'workerPrivateGiB', label: 'Private bytes', stroke: AUX_COLOR, axis: 'left', dash: '6 4' }
+]
 const TOKEN_SERIES = [
   { field: 'mainPrompt', label: 'Main · Prompt (왼쪽 축)', stroke: MAIN_COLOR, axis: 'left' },
   { field: 'mainGeneration', label: 'Main · Generation (오른쪽 축)', stroke: MAIN_COLOR, axis: 'right', dash: '6 4' },
@@ -230,11 +287,6 @@ const CONTEXT_SERIES = [
   { field: 'mainContextPercent', label: 'Main context', stroke: MAIN_COLOR, axis: 'left' },
   { field: 'auxContextPercent', label: 'Aux context', stroke: AUX_COLOR, axis: 'left', dash: '6 4' }
 ]
-const REQUEST_SERIES = [
-  { field: 'active', label: 'Active', stroke: MAIN_COLOR, axis: 'left' },
-  { field: 'queued', label: 'Queued', stroke: 'var(--ui-text-secondary)', axis: 'left', dash: '6 4' }
-]
-
 function contextSummary(metric) {
   const tokens = Number(metric?.context_tokens) || 0
   const limit = Number(metric?.context_limit) || 0
@@ -242,88 +294,101 @@ function contextSummary(metric) {
   return limit ? `${tokens.toLocaleString()} / ${limit.toLocaleString()} (${percent.toFixed(1)}%)` : tokens ? tokens.toLocaleString() : '—'
 }
 
-function RoleMetricSummary({ title, metric, color }) {
-  return jsxs('article', { className: 'min-w-0 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) p-3', children: [
-    jsxs('div', { className: 'flex min-w-0 items-start justify-between gap-3', children: [
-      jsxs('div', { className: 'min-w-0', children: [
-        jsxs('h3', { className: 'flex items-center gap-2 text-xs font-medium text-(--ui-text-primary)', children: [jsx('span', { className: 'h-2 w-2 shrink-0 rounded-full', style: { backgroundColor: color }, 'aria-hidden': true }), title] }),
-        jsx('p', { className: 'mt-0.5 truncate font-mono text-[10px] text-(--ui-text-tertiary)', title: metric?.model_id || '', children: metric?.model_id || '모델 미지정' })
-      ] }),
-      metric?.active ? jsx('span', { className: 'shrink-0 rounded border border-(--ui-accent) px-1.5 py-0.5 text-[9px] font-medium text-(--ui-accent)', children: 'ACTIVE' }) : null
-    ] }),
-    jsxs('dl', { className: 'mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]', children: [
-      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Prompt' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.prompt_tokens_per_second) }),
-      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Generation' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.generation_tokens_per_second) }),
-      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Tokens/min' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: Number(metric?.tokens_per_minute || 0).toLocaleString() }),
-      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Context' }), jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: contextSummary(metric) })
-    ] })
-  ] })
+function RoleMetricsSummary({ roles }) {
+  const rows = [
+    { key: 'main', label: 'Main', metric: roles?.main, color: MAIN_COLOR },
+    { key: 'compression', label: 'Aux', metric: roles?.compression, color: AUX_COLOR }
+  ]
+  return jsx('section', { className: 'overflow-x-auto border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux 통합 지표', children: jsxs('table', { className: 'w-full min-w-[38rem] table-fixed text-[11px]', children: [
+    jsx('thead', { children: jsxs('tr', { className: 'text-left text-(--ui-text-tertiary)', children: [
+      jsx('th', { className: 'w-[34%] pb-2 font-medium', scope: 'col', children: 'Role / model' }),
+      jsx('th', { className: 'pb-2 text-right font-medium', scope: 'col', children: 'Prompt' }),
+      jsx('th', { className: 'pb-2 text-right font-medium', scope: 'col', children: 'Generation' }),
+      jsx('th', { className: 'pb-2 text-right font-medium', scope: 'col', children: 'Tokens/min' }),
+      jsx('th', { className: 'pb-2 text-right font-medium', scope: 'col', children: 'Context' })
+    ] }) }),
+    jsx('tbody', { children: rows.map(({ key, label, metric, color }) => jsxs('tr', { className: 'border-t border-(--ui-stroke-secondary)', children: [
+      jsx('th', { className: 'py-2 pr-3 text-left font-normal', scope: 'row', children: jsxs('div', { className: 'flex min-w-0 items-center gap-2', children: [
+        jsx('span', { className: 'h-2 w-2 shrink-0 rounded-full', style: { backgroundColor: color }, 'aria-hidden': true }),
+        jsxs('div', { className: 'min-w-0', children: [
+          jsxs('p', { className: 'flex items-center gap-2 text-(--ui-text-primary)', children: [label, metric?.active ? jsx('span', { className: 'rounded border border-(--ui-accent) px-1 py-0.5 text-[8px] font-medium text-(--ui-accent)', children: 'ACTIVE' }) : null] }),
+          jsx('p', { className: 'truncate font-mono text-[10px] text-(--ui-text-tertiary)', title: metric?.model_id || '', children: metric?.model_id || '모델 미지정' })
+        ] })
+      ] }) }),
+      jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.prompt_tokens_per_second) }),
+      jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: formatRate(metric?.generation_tokens_per_second) }),
+      jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: Number(metric?.tokens_per_minute || 0).toLocaleString() }),
+      jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: contextSummary(metric) })
+    ] }, key)) })
+  ] }) })
 }
 
 function ResourceMetricsPanel({ status, pushConnected }) {
-  const [metricHistory, setMetricHistory] = useState([])
-  const [workerHistory, setWorkerHistory] = useState([])
+  const [showDetails, setShowDetails] = useState(false)
+  const [windowSeconds, setWindowSeconds] = useState(1800)
+  const serverStopped = status?.server_running === false
   const metricsQuery = useQuery({
-    queryKey: [ID, 'resource-metrics'],
-    queryFn: () => api('/metrics?window=60'),
-    refetchInterval: pushConnected ? false : status?.server_running ? 2500 : false,
-    refetchOnWindowFocus: false
+    queryKey: [ID, 'resource-metrics', showDetails ? windowSeconds : 60],
+    queryFn: () => api(`/metrics?window=${showDetails ? windowSeconds : 60}`),
+    enabled: status?.server_running === true,
+    refetchInterval: pushConnected ? false : status?.server_running ? 10000 : false,
+    refetchOnWindowFocus: false,
+    placeholderData: previousData => previousData,
+    staleTime: 30000
   })
   const snapshot = metricsQuery.data
-  useEffect(() => {
-    if (!snapshot?.sampled_at) return
-    const main = snapshot.roles?.main || {}
-    const auxiliary = snapshot.roles?.compression || {}
-    const mainLimit = Number(main.context_limit) || 0
-    const auxiliaryLimit = Number(auxiliary.context_limit) || 0
-    setMetricHistory(previous => [...previous, {
-      at: snapshot.sampled_at,
-      mainPrompt: Number(main.prompt_tokens_per_second) || 0,
-      mainGeneration: Number(main.generation_tokens_per_second) || 0,
-      mainContextPercent: mainLimit ? Math.min(100, (Number(main.context_tokens) || 0) / mainLimit * 100) : 0,
-      auxPrompt: Number(auxiliary.prompt_tokens_per_second) || 0,
-      auxGeneration: Number(auxiliary.generation_tokens_per_second) || 0,
-      auxContextPercent: auxiliaryLimit ? Math.min(100, (Number(auxiliary.context_tokens) || 0) / auxiliaryLimit * 100) : 0
-    }].filter(row => Number(row.at) >= Number(snapshot.sampled_at) - 60).slice(-60))
-    setWorkerHistory(previous => [...previous, {
-      at: snapshot.sampled_at,
-      active: Number(snapshot.worker?.active_requests) || 0,
-      queued: Number(snapshot.worker?.queued_requests) || 0
-    }].filter(row => Number(row.at) >= Number(snapshot.sampled_at) - 60).slice(-60))
-  }, [snapshot?.sampled_at])
+  const metricHistory = (snapshot?.series || []).map(row => ({
+    ...row,
+    workerRssGiB: row.workerRssBytes == null ? null : Number(row.workerRssBytes) / (1024 ** 3),
+    workerPrivateGiB: row.workerPrivateBytes == null ? null : Number(row.workerPrivateBytes) / (1024 ** 3)
+  }))
   const profiles = Object.entries(snapshot?.profiles || {}).sort(([left], [right]) => left.localeCompare(right))
   const worker = snapshot?.worker || {}
   const roles = snapshot?.roles || {}
+  const selectedWindowLabel = METRIC_WINDOWS.find(item => item.seconds === windowSeconds)?.label || formatWindowOffset(windowSeconds).replace(' 전', '')
+  const latestAt = Number(snapshot?.sampled_at) || Date.now() / 1000
   return jsxs('section', { className: 'mt-3 overflow-hidden rounded-md border border-(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 실시간 리소스', children: [
     jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2 bg-(--ui-bg-tertiary) px-3 py-2', children: [
-      jsx('h2', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '최근 60초 리소스' }),
-      jsx('span', { className: 'text-[11px] text-(--ui-text-tertiary)', children: metricsQuery.isFetching ? '갱신 중…' : `${pushConnected ? 'push 연결 · event 기반' : 'fallback polling · 2.5초'} · ${worker.running ? 'worker 실행 중' : 'worker 중지'}` })
-    ] }),
-    metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
-    !metricsQuery.error && !profiles.length ? jsx('p', { className: 'px-3 py-4 text-xs text-(--ui-text-secondary)', role: 'status', children: '새 요청부터 Profile별 처리량을 수집합니다.' }) : null,
-    jsxs('section', { className: 'grid gap-3 border-t border-(--ui-stroke-secondary) px-3 py-3 sm:grid-cols-2', 'aria-label': 'Main 및 Aux 현재 지표', children: [
-      jsx(RoleMetricSummary, { title: 'Main model', metric: roles.main, color: MAIN_COLOR }),
-      jsx(RoleMetricSummary, { title: 'Aux model', metric: roles.compression, color: AUX_COLOR })
-    ] }),
-    jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux token 처리량 공용 그래프', children: [
-      jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Token 처리량 · Main/Aux 공용 timeline' }),
-      jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '실선은 Prompt, 점선은 Generation입니다. 두 처리량은 서로 다른 Y축을 사용합니다.' }),
-      jsx(MetricChart, { samples: metricHistory, series: TOKEN_SERIES, label: 'Main 및 Aux prompt와 generation token 처리량', leftAxis: { label: 'Prompt tok/s', unit: 'tok/s' }, rightAxis: { label: 'Generation tok/s', unit: 'tok/s' } }),
-      jsx(ChartLegend, { items: TOKEN_SERIES })
-    ] }),
-    jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux context 사용량 공용 그래프', children: [
-      jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Context 사용량 · Main/Aux 공용 timeline' }),
-      jsx(MetricChart, { samples: metricHistory, series: CONTEXT_SERIES, label: 'Main 및 Aux context 사용률', leftAxis: { label: 'Context 사용률', unit: '%', maximum: 100 } }),
-      jsx(ChartLegend, { items: CONTEXT_SERIES })
-    ] }),
-    jsxs('section', { className: 'grid gap-4 border-t border-(--ui-stroke-secondary) px-3 py-3 md:grid-cols-[minmax(18rem,1.4fr)_minmax(12rem,0.8fr)]', 'aria-label': 'Worker 요청 부하', children: [
       jsxs('div', { children: [
-        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '요청 부하' }),
-        jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: 'Worker 전체 active/queued 요청 수' }),
-        jsx(MetricChart, { samples: workerHistory, series: REQUEST_SERIES, label: 'Worker active 및 queued 요청 수', leftAxis: { label: '요청 수', unit: '요청', minimumMaximum: 4 } }),
-        jsx(ChartLegend, { items: REQUEST_SERIES })
+        jsx('h2', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '리소스 통계' }),
+        serverStopped || metricsQuery.isFetching ? jsx('p', { className: 'mt-0.5 text-[10px] text-(--ui-text-tertiary)', children: serverStopped ? 'Server stopped' : '갱신 중…' }) : null
       ] }),
-      jsxs('div', { children: [
+      jsx('button', { className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-2.5 py-1 text-[11px] text-(--ui-text-secondary) hover:bg-(--ui-bg-secondary) hover:text-(--ui-text-primary)', type: 'button', onClick: () => setShowDetails(current => !current), 'aria-expanded': showDetails, 'aria-controls': 'llamacpp-resource-details', children: showDetails ? '간단히 보기' : '상세 보기' })
+    ] }),
+    !serverStopped && metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
+    jsx(RoleMetricsSummary, { roles }),
+    jsxs('div', { className: 'flex flex-wrap gap-x-4 gap-y-1 border-t border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-3 py-2 text-[11px] text-(--ui-text-tertiary)', children: [
+      jsx('span', { children: `Model ${worker.model_id || '—'}` }),
+      jsx('span', { children: `RAM RSS ${worker.workerRssBytes == null ? '—' : formatGiB(Number(worker.workerRssBytes) / (1024 ** 3))} · Private ${worker.workerPrivateBytes == null ? '—' : formatGiB(Number(worker.workerPrivateBytes) / (1024 ** 3))}` }),
+      jsx('span', { children: `KV K:${worker.kv_cache_k || 'auto'} · V:${worker.kv_cache_v || 'auto'} · 크기 확인 불가` })
+    ] }),
+    showDetails ? jsxs('div', { id: 'llamacpp-resource-details', className: 'border-t border-(--ui-stroke-secondary)', children: [
+      jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2 bg-(--ui-bg-tertiary) px-3 py-2', children: [
+        jsxs('div', { children: [
+          jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: `${selectedWindowLabel} 추이` }),
+          jsx('p', { className: 'mt-0.5 text-[10px] text-(--ui-text-tertiary)', children: '10초 간격 수집 · 최대 360개 점으로 자동 축약' })
+        ] }),
+        jsx('div', { className: 'flex overflow-hidden rounded-md border border-(--ui-stroke-secondary)', role: 'group', 'aria-label': '리소스 그래프 시간 범위', children: METRIC_WINDOWS.map(item => jsx('button', { className: `px-2 py-1 text-[10px] ${windowSeconds === item.seconds ? 'bg-(--ui-accent) text-(--ui-accent-foreground)' : 'bg-(--ui-bg-primary) text-(--ui-text-secondary) hover:bg-(--ui-bg-secondary)'}`, type: 'button', 'aria-pressed': windowSeconds === item.seconds, onClick: () => setWindowSeconds(item.seconds), children: item.label }, item.seconds)) })
+      ] }),
+      !serverStopped && !metricsQuery.error && !metricHistory.length ? jsx('p', { className: 'px-3 py-4 text-xs text-(--ui-text-secondary)', role: 'status', children: 'worker가 실행되면 RAM과 처리량 추이를 10초 간격으로 수집합니다.' }) : null,
+      jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux token 처리량 공용 그래프', children: [
+        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Token 처리량 · Main/Aux 공용 timeline' }),
+        jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '실선은 Prompt, 점선은 Generation입니다. 요청이 있었던 시점만 연결하며 두 처리량은 서로 다른 Y축을 사용합니다.' }),
+        jsx(MetricChart, { samples: metricHistory, series: TOKEN_SERIES, label: 'Main 및 Aux prompt와 generation token 처리량', leftAxis: { label: 'Prompt tok/s', unit: 'tok/s' }, rightAxis: { label: 'Generation tok/s', unit: 'tok/s' }, windowSeconds, latestAt }),
+        jsx(ChartLegend, { items: TOKEN_SERIES })
+      ] }),
+      jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Main 및 Aux context 사용량 공용 그래프', children: [
+        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Context 사용량 · Main/Aux 공용 timeline' }),
+        jsx(MetricChart, { samples: metricHistory, series: CONTEXT_SERIES, label: 'Main 및 Aux context 사용률', leftAxis: { label: 'Context 사용률', unit: '%', maximum: 100 }, windowSeconds, latestAt }),
+        jsx(ChartLegend, { items: CONTEXT_SERIES })
+      ] }),
+      jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'llama-server RAM 사용량 그래프', children: [
+        jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'RAM 사용량' }),
+        jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '단위는 GiB입니다. RSS는 OS working set, Private bytes는 다른 process와 공유되지 않는 메모리입니다.' }),
+        jsx(MetricChart, { samples: metricHistory, series: MEMORY_SERIES, label: 'llama-server RAM working set 및 private bytes', leftAxis: { label: 'Process RAM (GiB)', unit: 'GiB' }, windowSeconds, latestAt }),
+        jsx(ChartLegend, { items: MEMORY_SERIES })
+      ] }),
+      jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Profile 최근 활동', children: [
         jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Profile 최근 활동' }),
         jsxs('div', { className: 'mt-2 grid grid-cols-[minmax(6rem,1fr)_auto_auto] gap-x-2 gap-y-1.5 text-[10px]', children: [
           jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'Profile' }),
@@ -336,31 +401,24 @@ function ResourceMetricsPanel({ status, pushConnected }) {
           ]) : [jsx('span', { className: 'col-span-3 text-(--ui-text-tertiary)', children: '최근 활동 없음' }, 'empty')])
         ] })
       ] })
-    ] }),
-    jsxs('div', { className: 'flex flex-wrap gap-x-4 gap-y-1 border-t border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-3 py-2 text-[11px] text-(--ui-text-tertiary)', children: [
-      jsx('span', { children: `Model ${worker.model_id || '—'}` }),
-      jsx('span', { children: `요청 ${Number(worker.active_requests || 0)} active · ${Number(worker.queued_requests || 0)} queued` }),
-      jsx('span', { children: `KV K:${worker.kv_cache_k || 'auto'} · V:${worker.kv_cache_v || 'auto'} · 크기 확인 불가` })
-    ] })
+    ] }) : null
   ] })
 }
 
 function ServerLogPanel({ status, jobs, pushConnected }) {
   const [open, setOpen] = useState(true)
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
+  const serverStopped = status?.server_running === false && serverJob?.status !== 'running'
   const logQuery = useQuery({
     queryKey: [ID, 'activity-log'],
     queryFn: () => api('/logs?limit=250'),
-    enabled: open && status?.coordinator?.ok !== false,
+    enabled: open && (status?.server_running === true || serverJob?.status === 'running'),
     refetchInterval: query => pushConnected ? false : status?.server_running || serverJob?.status === 'running' ? 2500 : false,
     refetchOnWindowFocus: false
   })
   useEffect(() => {
-    if (open && serverJob && serverJob.status !== 'running') logQuery.refetch()
-  }, [open, serverJob?.job_id, serverJob?.status])
-  useEffect(() => {
-    if (open && status?.server_running === false && status?.coordinator?.ok !== false) logQuery.refetch()
-  }, [open, status?.server_running, status?.coordinator?.ok])
+    if (open && status?.server_running === true && serverJob && serverJob.status !== 'running') logQuery.refetch()
+  }, [open, status?.server_running, serverJob?.job_id, serverJob?.status])
   const lines = logQuery.data?.lines || []
   const logRef = useRef(null)
   // lines / error / open 이 바뀔 때마다 (렌더링된 DOM 뒤에) 하단으로 스크롤 — 자동 폴링 시에도 최신 로그가 항상 하단에 유지
@@ -370,8 +428,8 @@ function ServerLogPanel({ status, jobs, pushConnected }) {
     el.scrollTop = el.scrollHeight
   }, [lines, logQuery.error, open])
   return jsxs('section', { className: 'relative mt-3 overflow-hidden rounded-md border border(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 로그', children: [
-    jsx('div', { className: 'flex items-center justify-end bg(--ui-bg-tertiary) px-3 py-2', children: jsxs('div', { className: 'flex items-center gap-2', children: [open ? jsx('button', { className: 'text-xs text(--ui-text-secondary) hover:text(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] }) }),
-    open ? logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama.cpp 로그', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : '로그가 아직 없습니다.' }) : null
+    jsx('div', { className: 'flex items-center justify-end bg(--ui-bg-tertiary) px-3 py-2', children: jsxs('div', { className: 'flex items-center gap-2', children: [open && !serverStopped ? jsx('button', { className: 'text-xs text(--ui-text-secondary) hover:text(--ui-text-primary)', onClick: () => logQuery.refetch(), disabled: logQuery.isFetching, children: logQuery.isFetching ? '갱신 중…' : '새로고침' }) : null, jsx('button', { className: 'text-xs text(--ui-accent) hover:underline', onClick: () => setOpen(current => !current), 'aria-expanded': open, children: open ? '접기' : '보기' })] }) }),
+    open ? serverStopped ? jsx('p', { className: 'px-3 py-3 text-xs text-(--ui-text-secondary)', role: 'status', children: 'Server stopped' }) : logQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text(--dt-destructive)', role: 'alert', children: String(logQuery.error.message || logQuery.error) }) : jsx('pre', { ref: logRef, className: 'max-h-64 select-text cursor-text overflow-auto whitespace-pre-wrap break-all bg(--ui-bg-primary) px-3 py-2 font-mono text-[11px] leading-4 text(--ui-text-secondary)', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, role: 'log', 'aria-label': 'llama.cpp 로그', 'aria-live': 'polite', children: lines.length ? lines.join(LOG_NEWLINE) : '로그가 아직 없습니다.' }) : null
   ] })
 }
 
@@ -463,11 +521,10 @@ function CoordinatorStatusPanel({ status }) {
       jsx('h2', { id: 'llamacpp-coordinator-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Singleton proxy' }),
       jsx(Badge, { tone: coordinator.ok ? 'good' : 'warn', children: coordinator.ok ? 'running' : 'unavailable' })
     ] }),
-    jsxs('dl', { className: 'mt-3 grid gap-3 text-xs sm:grid-cols-5', children: [
+    jsxs('dl', { className: 'mt-3 grid gap-3 text-xs sm:grid-cols-4', children: [
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Coordinator' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: coordinator.pid ? `PID ${coordinator.pid} · :${coordinator.port}` : `:${coordinator.port || 18380}` })] }),
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'VRAM 정책' }), jsx('dd', { className: 'mt-1 text-(--ui-text-secondary)', children: status?.execution_mode === 'exclusive_swap' ? 'Exclusive swap' : status?.execution_mode || 'Exclusive swap' })] }),
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '전환 상태' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: `${status?.execution?.active_role || '-'} · ${status?.execution?.transition_phase || 'IDLE'}` })] }),
-      jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: 'Main queue' }), jsx('dd', { className: 'mt-1 font-mono text-(--ui-text-secondary)', children: `${status?.execution?.queued_main_requests || 0} queued · ${status?.execution?.active_main_requests || 0} active` })] }),
       jsxs('div', { children: [jsx('dt', { className: 'text-(--ui-text-tertiary)', children: '요청 취소' }), jsx('dd', { className: 'mt-1 text-(--ui-text-secondary)', children: coordinator.cancellation_propagation ? '응답 중단 시 upstream 요청도 종료' : '확인되지 않음' })] })
     ] }),
     jsx('p', { className: 'mt-3 text-xs text-(--ui-text-tertiary)', children: `여러 Hermes Desktop이 coordinator 하나를 공유합니다. 마지막 Desktop 종료 후 ${status?.coordinator?.desktop_clients ?? 0}개 lease가 만료되면 worker와 coordinator도 종료됩니다.` })
@@ -798,7 +855,7 @@ function Page() {
   const [wizard, setWizard] = useState(null)
   const [tab, setTab] = useState('runtime')
   const pushConnected = useCoordinatorPush()
-  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.coordinator?.ok === false ? false : pushConnected ? 30000 : query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: query => query.state.data?.coordinator?.ok !== false })
+  const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.coordinator?.stopped ? false : query.state.data?.coordinator?.ok === false ? false : pushConnected ? 30000 : query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: query => query.state.data?.coordinator?.ok !== false })
   const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
   const hfModels = useQuery({ queryKey: [ID, 'hf-models'], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
   const data = status.data; const models = data?.models || []; const localModels = hfModels.data?.models || []; const runtimeJobs = jobs.data?.jobs || []

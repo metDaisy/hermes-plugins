@@ -615,6 +615,65 @@ class CoordinatorEventBusTests(unittest.TestCase):
             ])
 
 
+class ResourceHistoryTests(unittest.TestCase):
+    def test_reuses_parsed_history_when_switching_metric_windows(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        from dashboard.application.resource_history import ResourceHistoryStore
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            store = ResourceHistoryStore(Path(raw_root) / "resource-history.jsonl")
+            for at in range(100, 401, 10):
+                store.append({"at": float(at), "workerRssBytes": at})
+
+            with patch.object(store, "_read_rows", wraps=store._read_rows) as read_rows:
+                store.read(window_seconds=300, now=400.0)
+                store.read(window_seconds=1800, now=400.0)
+                store.read(window_seconds=86400, now=400.0)
+                store.append({"at": 410.0, "workerRssBytes": 410})
+                latest = store.read(window_seconds=300, now=410.0)
+
+            self.assertEqual(read_rows.call_count, 1)
+            self.assertEqual(latest[-1]["at"], 410.0)
+
+    def test_persists_filters_and_downsamples_long_running_metrics(self) -> None:
+        import tempfile
+
+        from dashboard.application.resource_history import ResourceHistoryStore
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            store = ResourceHistoryStore(Path(raw_root) / "resource-history.jsonl", retention_seconds=3600)
+            for at, rss in ((100.0, 100), (200.0, 300), (250.0, 200), (300.0, 250)):
+                store.append({"at": at, "workerRssBytes": rss, "mainGeneration": at / 10})
+
+            recent = store.read(window_seconds=120, now=300.0, max_points=10)
+            compact = store.read(window_seconds=3600, now=300.0, max_points=2)
+
+            self.assertEqual([row["at"] for row in recent], [200.0, 250.0, 300.0])
+            self.assertLessEqual(len(compact), 2)
+            self.assertEqual(max(row["workerRssBytes"] for row in compact), 300)
+
+    def test_reads_worker_rss_and_private_memory_without_guessing(self) -> None:
+        from dashboard.application.resource_history import worker_memory_sample
+
+        class Memory:
+            rss = 12_000
+            private = 8_000
+
+        class Process:
+            def memory_info(self):
+                return Memory()
+
+        result = worker_memory_sample(42, process_factory=lambda _pid: Process())
+
+        self.assertEqual(result, {
+            "workerPid": 42,
+            "workerRssBytes": 12_000,
+            "workerPrivateBytes": 8_000,
+        })
+
+
 class ModelRouteAdapterTests(unittest.TestCase):
     def test_keeps_model_paths_and_maps_workflow_failure_at_http_adapter(self) -> None:
         from dashboard.routes.model_routes import ModelRouteContext, create_router

@@ -26,28 +26,7 @@ def _is_local_request(provider: Any, base_url: Any, model: Any) -> bool:
     )
 
 
-def _attach_request_context(**kwargs: Any) -> dict[str, Any] | None:
-    request = kwargs.get("request")
-    if not isinstance(request, dict) or not _is_local_request(
-        kwargs.get("provider"), kwargs.get("base_url"), kwargs.get("model")
-    ):
-        return None
-    session = str(kwargs.get("session_id") or "").strip()
-    if not session:
-        return None
-    updated = dict(request)
-    headers = dict(updated.get("extra_headers") or {})
-    headers["X-Hermes-Profile"] = _profile_name()
-    headers["X-Hermes-Session"] = session
-    updated["extra_headers"] = headers
-    return {
-        "request": updated,
-        "source": "llamacpp",
-        "reason": "attach Hermes profile/session log context",
-    }
-
-
-def _publish_auxiliary_context(**kwargs: Any) -> None:
+def _publish_request_context(**kwargs: Any) -> None:
     if not _is_local_request(kwargs.get("provider"), kwargs.get("base_url"), kwargs.get("model")):
         return
     session = str(kwargs.get("session_id") or "").strip()
@@ -74,5 +53,5 @@ def _publish_auxiliary_context(**kwargs: Any) -> None:
 
 def register(ctx) -> None:
     """Register request metadata propagation for privacy-safe runtime log attribution."""
-    ctx.register_middleware("llm_request", _attach_request_context)
-    ctx.register_hook("pre_auxiliary_call", _publish_auxiliary_context)
+    ctx.register_hook("pre_api_request", _publish_request_context)
+    ctx.register_hook("pre_auxiliary_call", _publish_request_context)

@@ -38,36 +38,50 @@ class LlamaCppManagerTests(unittest.TestCase):
         inference_proxy._active_main_requests = 0
         inference_proxy._queued_main_requests = 0
 
-    def test_plugin_middleware_attaches_profile_and_session_only_to_local_requests(self) -> None:
+    def test_plugin_hook_publishes_profile_and_session_only_for_local_requests(self) -> None:
         entrypoint = Path(__file__).parent / "__init__.py"
         spec = importlib.util.spec_from_file_location("llamacpp_plugin_entrypoint", entrypoint)
         assert spec and spec.loader
         plugin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(plugin)
 
+        opened = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def open_request(request, timeout):
+            opened.append((request, timeout))
+            return Response()
+
         with patch.dict(os.environ, {
             "HERMES_HOME": "C:/Users/leee/AppData/Local/hermes/profiles/project-manager",
-        }):
-            result = plugin._attach_request_context(
-                request={"messages": []},
+        }), patch.object(plugin, "urlopen", side_effect=open_request):
+            plugin._publish_request_context(
                 provider="custom",
                 base_url="http://127.0.0.1:18380/v1",
                 model="main-local",
                 session_id="20261003_164117_5bf794",
             )
-            remote = plugin._attach_request_context(
-                request={"messages": []},
+            plugin._publish_request_context(
                 provider="openai-codex",
                 base_url="https://chatgpt.com/backend-api/codex",
                 model="gpt-5.6-luna",
                 session_id="20261003_164117_5bf794",
             )
 
-        self.assertEqual(result["request"]["extra_headers"], {
-            "X-Hermes-Profile": "project-manager",
-            "X-Hermes-Session": "20261003_164117_5bf794",
+        self.assertEqual(len(opened), 1)
+        request, timeout = opened[0]
+        self.assertEqual(timeout, 2.0)
+        self.assertEqual(json.loads(request.data), {
+            "model": "main-local",
+            "profile": "project-manager",
+            "session": "20261003_164117_5bf794",
         })
-        self.assertIsNone(remote)
 
     def test_plugin_manifest_versions_match(self) -> None:
         root = Path(__file__).parent
@@ -86,7 +100,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         root = Path(__file__).parent
         manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
         normalized = manifest.replace(chr(13) + chr(10), chr(10))
-        self.assertIn("provides_hooks:\n  - pre_auxiliary_call", normalized)
+        self.assertIn("provides_hooks:\n  - pre_api_request\n  - pre_auxiliary_call", normalized)
 
     def test_hf_cache_removal_uses_typed_repository_id(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
@@ -1071,6 +1085,32 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertFalse(profile_proxy._coordinator_start_requested("POST", "server", b'{"action":"stop"}'))
         self.assertFalse(profile_proxy._coordinator_start_requested("GET", "status", b""))
 
+    def test_intentionally_stopped_coordinator_serves_read_only_snapshots_without_503(self) -> None:
+        from dashboard import plugin_api as profile_proxy
+
+        class Backend:
+            @staticmethod
+            def status() -> dict[str, object]:
+                return {"server_running": True, "models": [{"id": "main"}]}
+
+            @staticmethod
+            def activity_logs(limit: int) -> dict[str, object]:
+                return {"lines": [f"limit={limit}"]}
+
+            @staticmethod
+            def resource_metrics(window: int) -> dict[str, object]:
+                return {"window_seconds": window, "series": []}
+
+        with patch.object(profile_proxy, "_read_only_backend", return_value=Backend):
+            status = profile_proxy._stopped_payload("status", {})
+            logs = profile_proxy._stopped_payload("logs", {"limit": "25"})
+            metrics = profile_proxy._stopped_payload("metrics", {"window": "1800"})
+
+        self.assertFalse(status["server_running"])
+        self.assertTrue(status["coordinator"]["stopped"])
+        self.assertEqual(logs["lines"], ["limit=25"])
+        self.assertEqual(metrics["window_seconds"], 1800)
+
     def test_main_role_change_waits_for_active_main_request_to_finish(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -1490,9 +1530,10 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("서버와 Singleton proxy를 중지했습니다.", source)
         self.assertIn("queryClient.setQueryData([ID, 'status']", source)
         self.assertIn("query.state.data?.coordinator?.ok === false ? false", source)
+        self.assertIn("query.state.data?.coordinator?.stopped ? false", source)
         self.assertIn("pluginCtx.socket('/events'", source)
         self.assertIn("pushConnected ? false", source)
-        self.assertIn("push 연결", source)
+        self.assertNotIn("push 연결", source)
         self.assertIn("Auxiliary", source)
         self.assertIn("Main이 선택되어 있으면 Main을 우선 로드합니다", source)
         self.assertIn("value: 'compress'", source)
@@ -1515,18 +1556,44 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("통합 로그", log_panel)
         self.assertIn("'aria-label': 'llama.cpp 로그'", log_panel)
         self.assertIn("api('/logs?limit=250')", source)
-        self.assertIn("api('/metrics?window=60')", source)
+        self.assertIn("children: 'Server stopped'", log_panel)
+        self.assertIn("enabled: open && (status?.server_running === true || serverJob?.status === 'running')", log_panel)
+        self.assertIn("api(`/metrics?window=${showDetails ? windowSeconds : 60}`)", source)
         self.assertIn("function ResourceMetricsPanel", source)
-        self.assertIn("children: '최근 60초 리소스'", source)
-        self.assertIn("title: 'Main model'", source)
-        self.assertIn("title: 'Aux model'", source)
+        self.assertIn("const serverStopped = status?.server_running === false", source)
+        self.assertIn("enabled: status?.server_running === true", source)
+        self.assertIn("placeholderData: previousData => previousData", source)
+        self.assertIn("staleTime: 30000", source)
+        self.assertNotIn("fallback polling", source)
+        self.assertIn("const [showDetails, setShowDetails] = useState(false)", source)
+        self.assertIn("children: showDetails ? '간단히 보기' : '상세 보기'", source)
+        self.assertIn("'aria-expanded': showDetails", source)
+        self.assertIn("'aria-controls': 'llamacpp-resource-details'", source)
+        self.assertIn("id: 'llamacpp-resource-details'", source)
+        self.assertIn("const METRIC_WINDOWS", source)
+        self.assertIn("label: '30분'", source)
+        self.assertIn("label: '24시간'", source)
+        self.assertIn("children: 'RAM 사용량'", source)
+        self.assertIn("workerRssGiB", source)
+        self.assertIn("workerPrivateGiB", source)
+        self.assertIn("onPointerMove", source)
+        self.assertIn("hoveredSample", source)
+        self.assertIn("function RoleMetricsSummary", source)
+        self.assertNotIn("function RoleMetricSummary", source)
+        self.assertIn("'aria-label': 'Main 및 Aux 통합 지표'", source)
         self.assertIn("label: 'Prompt tok/s'", source)
         self.assertIn("label: 'Generation tok/s'", source)
         self.assertIn("children: 'Token 처리량 · Main/Aux 공용 timeline'", source)
         self.assertIn("children: 'Context 사용량 · Main/Aux 공용 timeline'", source)
-        self.assertIn("children: '요청 부하'", source)
-        self.assertIn("label: '요청 수'", source)
-        self.assertIn("children: '60초 전'", source)
+        details = source[source.index("id: 'llamacpp-resource-details'"):source.index("function ServerLogPanel")]
+        self.assertLess(details.index("children: 'Token 처리량 · Main/Aux 공용 timeline'"), details.index("children: 'Context 사용량 · Main/Aux 공용 timeline'"))
+        self.assertLess(details.index("children: 'Context 사용량 · Main/Aux 공용 timeline'"), details.index("children: 'RAM 사용량'"))
+        self.assertIn("label: 'Process RAM (GiB)'", details)
+        self.assertNotIn("const REQUEST_SERIES", source)
+        self.assertNotIn("children: '요청 부하'", source)
+        self.assertNotIn("Worker 전체 active/queued 요청 수", source)
+        self.assertNotIn("children: 'Main queue'", source)
+        self.assertIn("formatWindowOffset(windowSeconds)", source)
         self.assertIn("children: '현재'", source)
         self.assertIn("const AUX_COLOR = 'var(--ui-cyan)'", source)
         self.assertIn("axis: 'left'", source)
@@ -1812,7 +1879,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         coordinator_path = Path(__file__).parent / "dashboard" / "coordinator_server.py"
         self.assertIn("Profile-local proxy", proxy_path.read_text(encoding="utf-8"))
         coordinator_source = coordinator_path.read_text(encoding="utf-8")
-        self.assertIn("from backend_impl import router", coordinator_source)
+        self.assertIn("from backend_impl import (", coordinator_source)
+        self.assertIn("record_resource_sample, router,", coordinator_source)
         self.assertIn("if COORDINATOR_STOP_MARKER.exists():", coordinator_source)
         from dashboard import coordinator_server, plugin_api as profile_proxy
         self.assertIn("/events", {getattr(route, "path", None) for route in coordinator_server.app.routes})
@@ -2013,6 +2081,17 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("disposeSocket()", desktop_source)
         self.assertIn("stopHealthCheck()", desktop_source)
         self.assertIn("timers.clear()", desktop_source)
+
+    def test_coordinator_persists_bounded_long_running_resource_history(self) -> None:
+        backend_source = (Path(__file__).parent / "dashboard" / "backend_impl.py").read_text(encoding="utf-8")
+        coordinator_source = (Path(__file__).parent / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8")
+
+        self.assertIn("ResourceHistoryStore", backend_source)
+        self.assertIn("window must be between 60 and 86400 seconds", backend_source)
+        self.assertIn('result["series"] = RESOURCE_HISTORY.read', backend_source)
+        self.assertIn("worker_memory_sample", backend_source)
+        self.assertIn("start_resource_sampler(record_resource_sample", coordinator_source)
+        self.assertIn("telemetry_stop.set()", coordinator_source)
 
     def test_worker_spawn_is_bound_to_coordinator_lifetime(self) -> None:
         source = (Path(__file__).parent / "dashboard" / "backend_impl.py").read_text(encoding="utf-8")
