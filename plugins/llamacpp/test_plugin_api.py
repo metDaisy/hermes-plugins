@@ -38,6 +38,37 @@ class LlamaCppManagerTests(unittest.TestCase):
         inference_proxy._active_main_requests = 0
         inference_proxy._queued_main_requests = 0
 
+    def test_plugin_middleware_attaches_profile_and_session_only_to_local_requests(self) -> None:
+        entrypoint = Path(__file__).parent / "__init__.py"
+        spec = importlib.util.spec_from_file_location("llamacpp_plugin_entrypoint", entrypoint)
+        assert spec and spec.loader
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+
+        with patch.dict(os.environ, {
+            "HERMES_HOME": "C:/Users/leee/AppData/Local/hermes/profiles/project-manager",
+        }):
+            result = plugin._attach_request_context(
+                request={"messages": []},
+                provider="custom",
+                base_url="http://127.0.0.1:18380/v1",
+                model="main-local",
+                session_id="20261003_164117_5bf794",
+            )
+            remote = plugin._attach_request_context(
+                request={"messages": []},
+                provider="openai-codex",
+                base_url="https://chatgpt.com/backend-api/codex",
+                model="gpt-5.6-luna",
+                session_id="20261003_164117_5bf794",
+            )
+
+        self.assertEqual(result["request"]["extra_headers"], {
+            "X-Hermes-Profile": "project-manager",
+            "X-Hermes-Session": "20261003_164117_5bf794",
+        })
+        self.assertIsNone(remote)
+
     def test_plugin_manifest_versions_match(self) -> None:
         root = Path(__file__).parent
         plugin_version = next(line.split(":", 1)[1].strip() for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))
@@ -50,6 +81,12 @@ class LlamaCppManagerTests(unittest.TestCase):
         registration = (root / "__init__.py").read_text(encoding="utf-8")
         if "register_tool" not in registration:
             self.assertNotIn("provides_tools:", manifest)
+
+    def test_manifest_declares_registered_auxiliary_hook(self) -> None:
+        root = Path(__file__).parent
+        manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
+        normalized = manifest.replace(chr(13) + chr(10), chr(10))
+        self.assertIn("provides_hooks:\n  - pre_auxiliary_call", normalized)
 
     def test_hf_cache_removal_uses_typed_repository_id(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
@@ -1281,6 +1318,81 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertIn(b'"model":"large"', rewritten)
 
+    def test_proxy_model_reasoning_effort_overrides_hermes_request_value(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        body = b'{"model":"main-local","reasoning_effort":"high","messages":[]}'
+        state = {
+            "active_model_id": "large",
+            "model_settings": {"large": {"reasoning-effort": "medium"}},
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "large"},
+            },
+        }
+
+        rewritten = json.loads(rewrite_logical_model(body, state))
+
+        self.assertEqual(rewritten["model"], "large")
+        self.assertEqual(rewritten["reasoning_effort"], "medium")
+
+    def test_proxy_drops_hermes_reasoning_effort_when_model_has_no_override(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        body = b'{"model":"main-local","reasoning_effort":"high","messages":[]}'
+        state = {
+            "active_model_id": "large",
+            "model_settings": {"large": {}},
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "large"},
+            },
+        }
+
+        rewritten = json.loads(rewrite_logical_model(body, state))
+
+        self.assertNotIn("reasoning_effort", rewritten)
+
+    def test_native_router_preserves_alias_and_applies_model_reasoning_effort(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        body = b'{"model":"main-local","reasoning_effort":"high","messages":[]}'
+        state = {
+            "execution_mode": "native_router",
+            "model_settings": {"large": {"reasoning-effort": "medium"}},
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "large"},
+            },
+        }
+
+        rewritten = json.loads(rewrite_logical_model(body, state))
+
+        self.assertEqual(rewritten["model"], "main-local")
+        self.assertEqual(rewritten["reasoning_effort"], "medium")
+
+    def test_proxy_request_context_is_written_as_privacy_safe_activity_event(self) -> None:
+        import tempfile
+        from dashboard import inference_proxy
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            log_path = Path(raw_root) / "activity.log"
+            context_path = Path(raw_root) / "request-context.jsonl"
+            log_path.write_text("worker output\n", encoding="utf-8")
+            expected_offset = log_path.stat().st_size
+            with patch.object(inference_proxy, "ACTIVITY_LOG_PATH", log_path), \
+                    patch.object(inference_proxy, "REQUEST_CONTEXT_LOG_PATH", context_path):
+                inference_proxy.record_request_context(
+                    "main", "project-manager", "20261003_164117_5bf794"
+                )
+
+            event = json.loads(context_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(event, {
+            "type": "hermes_request_context",
+            "role": "main",
+            "profile": "project-manager",
+            "session": "20261003_164117_5bf794",
+            "activity_offset": expected_offset,
+        })
+
     def test_proxy_rewrites_inactive_compression_profile_for_coordinated_swap(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
 
@@ -1299,7 +1411,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         class Inspector:
             @staticmethod
             def status():
-                return {"server_running": False}
+                return {"server_running": False, "models": [{"id": "large", "label": "large"}]}
 
         with patch.object(api, "_runtime_inspector", return_value=Inspector()), \
                 patch.object(api, "_state", return_value={"models": {"large": {}, "small": {}}}):
@@ -1309,6 +1421,9 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertEqual(status["coordinator"]["port"], 18380)
         self.assertTrue(status["coordinator"]["singleton"])
         self.assertEqual(status["coordinator"]["inference_base_url"], "http://127.0.0.1:18380/v1")
+        self.assertEqual([row["id"] for row in status["models"]], ["large", "small"])
+        self.assertEqual([row["id"] for row in status["main_model_options"]], ["large", "small"])
+        self.assertEqual([row["id"] for row in status["auxiliary_model_options"]], ["large", "small"])
         self.assertEqual([row["id"] for row in status["profile_model_options"]], ["large", "small"])
         self.assertEqual(list(status["logs"]), ["activity"])
         self.assertTrue(status["logs"]["activity"].endswith("activity.log"))
@@ -1326,6 +1441,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("api('/profiles/start'", source)
         self.assertIn("api(`/profiles/${role}`", source)
         self.assertIn("children: '사용 안 함'", source)
+        self.assertIn("role === 'main' ? status?.main_model_options : status?.auxiliary_model_options", source)
         self.assertIn("const serverRunning = Boolean(status?.server_running)", source)
         self.assertIn("disabled: serverRunning || saving", source)
         self.assertIn("'서버 시작'", source)
@@ -1369,6 +1485,29 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("Prism-ML 호환 다운로드 모델이 없습니다.", page)
         self.assertIn("runtime 종류와 관계없이 모두 표시합니다.", page)
 
+    def test_parameter_preset_actions_and_flag_rows_stay_inline(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        editor = source[source.index("function ModelSettingsEditor"):source.index("function RegisterWizard")]
+
+        self.assertIn("jsxs('div', { className: 'flex items-stretch gap-2', 'data-testid': 'preset-actions'", editor)
+        preset_actions = editor[editor.index("'data-testid': 'preset-actions'"):editor.index("'data-testid': 'preset-name-actions'")]
+        self.assertIn("style: { ...themedSelect(), width: 'auto', minWidth: 0, flex: '1 1 auto' }", preset_actions)
+        self.assertLess(preset_actions.index("parameter preset 선택"), preset_actions.index("children: '저장'"))
+        self.assertLess(preset_actions.index("children: '저장'"), preset_actions.index("children: '삭제'"))
+
+        self.assertIn("jsxs('div', { className: 'mt-2 flex items-stretch gap-2', 'data-testid': 'preset-name-actions'", editor)
+        name_actions = editor[editor.index("'data-testid': 'preset-name-actions'"):editor.index("settings.isLoading")]
+        self.assertIn("preset 이름", name_actions)
+        self.assertIn("children: '이름 변경'", name_actions)
+        self.assertIn("새 preset 이름", name_actions)
+        self.assertIn("children: '새 preset 만들기'", name_actions)
+        self.assertLess(name_actions.index("children: '이름 변경'"), name_actions.index("새 preset 이름"))
+
+        control = source[source.index("function ParameterControl"):source.index("function ModelSettingsEditor")]
+        self.assertIn("className: `min-w-0 flex h-8 flex-1", control)
+        self.assertIn("children: 'flag'", control)
+        self.assertNotIn("값 없는 flag", control)
+
     def test_model_cards_use_inline_download_panel_and_unregister_action(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
 
@@ -1407,6 +1546,18 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("children: 'HF 검색'", wizard)
         self.assertIn("children: '선택 항목 다운로드'", wizard)
         self.assertNotIn("children: '취소'", wizard)
+        self.assertEqual(wizard.count("${selected.fit}"), 1)
+        self.assertNotIn("children: '선택 항목 등록'", wizard)
+        self.assertIn("'data-testid': 'registration-actions'", wizard)
+        registration_actions = wizard[wizard.index("'data-testid': 'registration-actions'"):]
+        self.assertIn("'aria-label': '등록 이름(alias)'", registration_actions)
+        self.assertIn("'aria-label': '등록할 GGUF 파일 선택'", registration_actions)
+        self.assertIn("children: '선택'", registration_actions)
+        self.assertLess(registration_actions.index("'aria-label': '등록 이름(alias)'"), registration_actions.index("'aria-label': '등록할 GGUF 파일 선택'"))
+        self.assertLess(registration_actions.index("'aria-label': '등록할 GGUF 파일 선택'"), registration_actions.index("children: '선택'"))
+        self.assertIn("body: { repo, paths: selected.paths, alias }", wizard)
+        self.assertIn("setAlias(cachedFiles.data.suggested_alias)", wizard)
+        self.assertIn("setActionMessage(`등록 실패: ${cause?.message || String(cause)}`)", wizard)
 
         page = source[source.index("function Page"):source.index("export default")]
         models_branch = page[page.index("tab === 'models'"):page.index("tab === 'parameters'")]

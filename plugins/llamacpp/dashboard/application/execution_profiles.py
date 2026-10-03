@@ -40,7 +40,16 @@ class ExecutionProfileService:
             else:
                 persist(state)
                 self.save_state(state)
+        models = state.get("models") if isinstance(state.get("models"), dict) else {}
         normalized = {role: self._normalize(role, profiles.get(role)) for role in ROLES}
+        for profile in normalized.values():
+            model_id = profile["model_id"]
+            entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+            stored_runtime = str(entry.get("runtime_kind") or "")
+            profile["runtime_kind"] = (
+                stored_runtime if stored_runtime in {"official", "prism_ml"}
+                else self._runtime_for_model(model_id)
+            )
         normalized_storage = {
             role: {
                 "runtime_kind": profile["runtime_kind"],
@@ -69,7 +78,6 @@ class ExecutionProfileService:
         if role not in ROLES:
             raise ValueError("role은 main 또는 compression이어야 합니다")
         model_id = str(body.get("model_id") or "").strip()
-        runtime_kind = self._runtime_for_model(model_id)
         state = self.load_state()
         if not model_id:
             def clear(current: dict[str, Any]) -> None:
@@ -91,6 +99,9 @@ class ExecutionProfileService:
         models = state.get("models") if isinstance(state.get("models"), dict) else {}
         if model_id not in models:
             raise ValueError("등록된 model_id를 선택해야 합니다")
+        entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+        stored_runtime = str(entry.get("runtime_kind") or "")
+        runtime_kind = stored_runtime if stored_runtime in {"official", "prism_ml"} else self._runtime_for_model(model_id)
         if not self.accepts(runtime_kind, model_id):
             raise ValueError("선택한 모델은 해당 runtime과 호환되지 않습니다")
         profile = {

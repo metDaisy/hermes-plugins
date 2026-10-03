@@ -62,6 +62,64 @@ class NativeRouterPlanTests(unittest.TestCase):
 
 
 class ActivityLogProjectionTests(unittest.TestCase):
+    def test_merges_separate_request_context_journal_at_activity_offset(self) -> None:
+        import json
+        import tempfile
+        from dashboard.application.activity_log_projection import contextual_activity_tail, project_activity_lines
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            activity = root / "activity.log"
+            context = root / "request-context.jsonl"
+            first = "old output\n"
+            activity.write_text(
+                first + "slot prompt processing, n_tokens = 256, progress = 0.25, 50.0 tokens per second\n",
+                encoding="utf-8",
+            )
+            context.write_text(json.dumps({
+                "type": "hermes_request_context",
+                "role": "main",
+                "profile": "project-manager",
+                "session": "named-session",
+                "activity_offset": len(first.encode("utf-8")),
+            }) + "\n", encoding="utf-8")
+
+            raw = contextual_activity_tail(activity, context)
+            result = project_activity_lines(raw["lines"])
+
+        self.assertIn(
+            "[Main][project-manager][named-session] prompt 처리 25% · 256 tok · 50.0 tok/s",
+            result["lines"],
+        )
+
+    def test_prefixes_role_events_with_hermes_profile_and_session(self) -> None:
+        import json
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        context = json.dumps({
+            "type": "hermes_request_context",
+            "role": "main",
+            "profile": "project-manager",
+            "session": "20261003_164117_5bf794",
+        })
+        result = project_activity_lines([
+            context,
+            'I srv spawning server instance with name=main-local on port 19001',
+            '[19001] slot prompt processing, n_tokens = 256, progress = 0.25, 50.0 tokens per second',
+        ])
+
+        self.assertIn(
+            "[Main][project-manager][20261003_164117_5bf794] 모델 로딩 중",
+            result["lines"],
+        )
+        self.assertIn(
+            "[Main][project-manager][20261003_164117_5bf794] prompt 처리 25% · 256 tok · 50.0 tok/s",
+            result["lines"],
+        )
+        prompt_event = next(event for event in result["events"] if event["event"] == "prompt_progress")
+        self.assertEqual(prompt_event["profile"], "project-manager")
+        self.assertEqual(prompt_event["session"], "20261003_164117_5bf794")
+
     def test_unwraps_router_forwarded_child_jsonl(self) -> None:
         import json
         from dashboard.application.activity_log_projection import project_activity_lines
@@ -399,18 +457,16 @@ class ProductionIntegrationTests(unittest.TestCase):
     def test_server_log_tail_returns_projected_lines_and_keeps_raw_evidence(self) -> None:
         from dashboard import backend_impl as api
 
-        class Lifecycle:
-            def log_tail(self, _limit):
-                return {
-                    "path": "activity.log", "size_bytes": 100,
-                    "lines": [
-                        'I srv spawning server instance with name=main-local on port 19001',
-                        '[19001] slot prompt processing, n_tokens = 100, progress = 0.50, 25.0 tokens per second',
-                        'request prompt=PRIVATE',
-                    ],
-                }
+        raw = {
+            "path": "activity.log", "size_bytes": 100,
+            "lines": [
+                'I srv spawning server instance with name=main-local on port 19001',
+                '[19001] slot prompt processing, n_tokens = 100, progress = 0.50, 25.0 tokens per second',
+                'request prompt=PRIVATE',
+            ],
+        }
 
-        with patch.object(api, "_server_lifecycle", return_value=Lifecycle()):
+        with patch.object(api, "contextual_activity_tail", return_value=raw):
             result = api._server_log_tail(250)
 
         self.assertEqual(result["lines"], [

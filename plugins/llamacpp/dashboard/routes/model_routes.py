@@ -88,7 +88,7 @@ def create_router(context: ModelRouteContext) -> APIRouter:
     def register(body: dict[str, Any]) -> dict[str, Any]:
         repo_id, paths = _selection(body)
         try:
-            return context.workflow().register(repo_id, paths)
+            return context.workflow().register(repo_id, paths, alias=str(body.get("alias") or ""))
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -98,8 +98,12 @@ def create_router(context: ModelRouteContext) -> APIRouter:
 
     @router.get("/hf-models/files")
     def hf_model_files(repo_id: str) -> dict[str, Any]:
-        files, warning = context.workflow().cached_files(repo_id)
-        return {"repo_id": repo_id, "files": files, "warning": warning}
+        workflow = context.workflow()
+        files, warning = workflow.cached_files(repo_id)
+        return {
+            "repo_id": repo_id, "files": files, "warning": warning,
+            "suggested_alias": workflow.suggested_alias(repo_id),
+        }
 
     @router.post("/hf-models/delete")
     def delete_hf_model(body: dict[str, Any]) -> dict[str, Any]:

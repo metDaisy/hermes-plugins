@@ -54,15 +54,19 @@ class RegisteredModelService:
                 row["hf_repo"] = str(entry["hf_repo"])
             if entry.get("hf_file"):
                 row["hf_file"] = str(entry["hf_file"])
+            if entry.get("runtime_kind") in {"official", "prism_ml"}:
+                row["runtime_kind"] = str(entry["runtime_kind"])
             rows.append(row)
         if state_dirty:
             self._save_state(state)
         return sorted(rows, key=lambda item: item["id"].lower())
 
     def register(self, model_id: str, paths: list[Path], owned: bool, hf_repo: str | None = None,
-                 hf_file: str | None = None, size_bytes: int = 0) -> None:
+                 hf_file: str | None = None, size_bytes: int = 0, runtime_kind: str | None = None) -> None:
         state = self._load_state()
         models = state.setdefault("models", {})
+        if model_id in models:
+            raise RuntimeError(f"이미 등록된 모델 이름입니다: {model_id}")
         entry: dict[str, Any] = {"paths": [str(path.resolve()) for path in paths], "owned": owned}
         if size_bytes > 0:
             entry["size_bytes"] = size_bytes
@@ -70,6 +74,8 @@ class RegisteredModelService:
             entry["hf_repo"] = hf_repo
         if hf_file:
             entry["hf_file"] = hf_file
+        if runtime_kind in {"official", "prism_ml"}:
+            entry["runtime_kind"] = runtime_kind
         models[model_id] = entry
         self._save_state(state)
 

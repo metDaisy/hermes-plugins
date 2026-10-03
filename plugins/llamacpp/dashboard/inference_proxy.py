@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import threading
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -18,7 +20,11 @@ router = APIRouter()
 COORDINATOR_PORT = 18380
 RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes" / "runtimes" / "llamacpp"
 STATE_PATH = RUNTIME_ROOT / "state.json"
+ACTIVITY_LOG_PATH = RUNTIME_ROOT / "logs" / "activity.log"
+REQUEST_CONTEXT_LOG_PATH = RUNTIME_ROOT / "logs" / "request-context.jsonl"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
+_CONTEXT_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_activity_log_lock = threading.Lock()
 _transition_lock = asyncio.Lock()
 _counter_lock = asyncio.Lock()
 _active_main_requests = 0
@@ -87,6 +93,30 @@ def logical_role(body: bytes) -> str | None:
     return {"main-local": "main", "compression-local": "compression"}.get(str(payload.get("model") or ""))
 
 
+def _safe_context_value(value: Any) -> str:
+    return _CONTEXT_VALUE_RE.sub("_", str(value or "").strip())[:128].strip("_")
+
+
+def record_request_context(role: str, profile: str, session: str) -> bool:
+    """Journal a privacy-safe identity at the current activity byte offset."""
+    safe_role = str(role or "").strip().lower()
+    safe_profile = _safe_context_value(profile)
+    safe_session = _safe_context_value(session)
+    if safe_role not in {"main", "compression"} or not safe_profile or not safe_session:
+        return False
+    event = {
+        "type": "hermes_request_context",
+        "role": safe_role,
+        "profile": safe_profile,
+        "session": safe_session,
+        "activity_offset": ACTIVITY_LOG_PATH.stat().st_size if ACTIVITY_LOG_PATH.exists() else 0,
+    }
+    REQUEST_CONTEXT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _activity_log_lock, REQUEST_CONTEXT_LOG_PATH.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+    return True
+
+
 def validate_logical_model(body: bytes) -> str:
     """Reject physical model ids so every inference request uses role locking."""
     try:
@@ -114,8 +144,6 @@ def rewrite_logical_model(body: bytes, state: dict[str, Any]) -> bytes:
     role = logical_role(body)
     if not role:
         return body
-    if state.get("execution_mode") == "native_router":
-        return body
     profiles = state.get("execution_profiles")
     profile = profiles.get(role) if isinstance(profiles, dict) else None
     if role == "main" and not isinstance(profile, dict) and state.get("active_model_id"):
@@ -123,13 +151,37 @@ def rewrite_logical_model(body: bytes, state: dict[str, Any]) -> bytes:
     model_id = str(profile.get("model_id") or "") if isinstance(profile, dict) else ""
     if not model_id:
         raise HTTPException(status_code=503, detail=f"{role} execution profile is not configured")
-    payload["model"] = model_id
+
+    model_settings = state.get("model_settings")
+    settings = model_settings.get(model_id) if isinstance(model_settings, dict) else None
+    saved_effort = settings.get("reasoning-effort") if isinstance(settings, dict) else None
+    normalized_effort = str(saved_effort).strip() if saved_effort is not None else ""
+    if normalized_effort:
+        payload["reasoning_effort"] = normalized_effort
+    else:
+        payload.pop("reasoning_effort", None)
+
+    if state.get("execution_mode") != "native_router":
+        payload["model"] = model_id
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _filtered_headers(headers: Any) -> dict[str, str]:
-    excluded = set(_HOP_BY_HOP) | {"host", "content-length", "authorization"}
+    excluded = set(_HOP_BY_HOP) | {
+        "host", "content-length", "authorization", "x-hermes-profile", "x-hermes-session",
+    }
     return {str(key): str(value) for key, value in headers.items() if str(key).lower() not in excluded}
+
+
+@router.post("/__llamacpp/request-context", include_in_schema=False)
+async def publish_request_context(body: dict[str, Any]) -> dict[str, Any]:
+    role = {"main-local": "main", "compression-local": "compression"}.get(
+        str(body.get("model") or "")
+    )
+    accepted = record_request_context(role or "", body.get("profile"), body.get("session"))
+    if not accepted:
+        raise HTTPException(status_code=400, detail="invalid Hermes request context")
+    return {"ok": True}
 
 
 def streaming_response(client: Any, upstream: Any,
@@ -333,6 +385,12 @@ async def proxy_inference(request: Request, path: str) -> StreamingResponse:
     try:
         raw_body = await request.body()
         role = validate_logical_model(raw_body) if request.method not in {"GET", "DELETE"} else None
+        if role:
+            record_request_context(
+                role,
+                request.headers.get("x-hermes-profile"),
+                request.headers.get("x-hermes-session"),
+            )
         finalize = await _begin_execution(role)
         state = _worker_state()
         body = rewrite_logical_model(raw_body, state)

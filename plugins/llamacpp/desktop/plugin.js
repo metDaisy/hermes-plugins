@@ -157,7 +157,7 @@ function UnexpectedExitPanel({ diagnostic }) {
 
 function ExecutionProfileRow({ role, label, auxRole, status, modelId, onModelChange, saving }) {
   const profile = status?.profiles?.[role] || {}
-  const models = status?.profile_model_options || []
+  const models = (role === 'main' ? status?.main_model_options : status?.auxiliary_model_options) || []
   const runtimeKind = modelId.startsWith('Ternary-Bonsai') ? 'prism_ml' : 'official'
   const serverRunning = Boolean(status?.server_running)
   const running = Boolean(serverRunning && status?.execution?.active_role === role && status?.active_model_id === modelId)
@@ -326,7 +326,7 @@ function SettingsAdder({ settings, options, query, setQuery, selectedKey, setSel
 }
 
 function ParameterControl({ id, option, value, onChange, onBlur, onKeyDown, error, describedBy, ariaLabel, className = input, allowEmpty = false }) {
-  if (option && !option.requires_value) return jsx('span', { className: `flex h-8 items-center px-2 text-xs ${muted}`, role: 'status', children: '값 없는 flag' })
+  if (option && !option.requires_value) return jsx('span', { className: `min-w-0 flex h-8 flex-1 items-center px-2 text-xs ${muted}`, role: 'status', children: 'flag' })
   const common = { id, value, 'aria-label': ariaLabel, 'aria-invalid': Boolean(error), 'aria-describedby': describedBy, onChange, onBlur, onKeyDown }
   if (option?.choices?.length) {
     return jsx('select', { ...common, className, style: themedSelect(), children: [allowEmpty ? jsx('option', { style: themedOption, value: '', children: '값을 선택하세요' }) : null, ...option.choices.map(choice => jsx('option', { style: themedOption, value: choice, children: choice }, choice))] })
@@ -455,13 +455,17 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
       jsxs('div', { className: 'mb-4 rounded-md bg-(--ui-bg-tertiary) p-3', children: [
         jsx('p', { className: 'mb-1 text-xs font-medium text-(--ui-text-primary)', children: 'parameter preset' }),
         jsx('p', { className: `mb-2 text-xs ${muted}`, children: '저장은 선택한 preset 값으로 현재 모델 설정을 교체합니다.' }),
-        jsxs('div', { className: 'flex flex-wrap gap-2', children: [
-          jsx('select', { className: compactInput, style: themedSelect(), value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
-          jsx('button', { className: compactPrimary, disabled: !selectedPresetId || saving, onClick: applyPreset, children: '저장' }),
-          jsx('button', { className: compactDanger, disabled: !selectedPresetId || saving, onClick: deletePreset, children: '삭제' })
+        jsxs('div', { className: 'flex items-stretch gap-2', 'data-testid': 'preset-actions', children: [
+          jsx('select', { className: `${compactInput} min-w-0 flex-1`, style: { ...themedSelect(), width: 'auto', minWidth: 0, flex: '1 1 auto' }, value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
+          jsx('button', { className: `${compactPrimary} shrink-0`, disabled: !selectedPresetId || saving, onClick: applyPreset, children: '저장' }),
+          jsx('button', { className: `${compactDanger} shrink-0`, disabled: !selectedPresetId || saving, onClick: deletePreset, children: '삭제' })
         ] }),
-        selectedPreset ? jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx('input', { className: compactInput, value: presetRename, 'aria-label': `${selectedPreset.name} preset 이름`, onChange: event => setPresetRename(event.target.value), onKeyDown: event => { if (event.key === 'Enter') renamePreset() } }), jsx('button', { className: compactPrimary, disabled: saving || !presetRename.trim(), onClick: renamePreset, children: '이름 변경' })] }) : null,
-        jsxs('div', { className: 'mt-2 flex gap-2', children: [jsx('input', { className: compactInput, value: presetName, 'aria-label': `${modelId} 새 preset 이름`, placeholder: '새 preset 이름', onChange: event => setPresetName(event.target.value), onKeyDown: event => { if (event.key === 'Enter') savePreset() } }), jsx('button', { className: compactPrimary, disabled: saving || !presetName.trim(), onClick: savePreset, children: '새 preset 만들기' })] })
+        jsxs('div', { className: 'mt-2 flex items-stretch gap-2', 'data-testid': 'preset-name-actions', children: [
+          selectedPreset ? jsx('input', { className: `${compactInput} min-w-0 flex-1`, value: presetRename, 'aria-label': `${selectedPreset.name} preset 이름`, onChange: event => setPresetRename(event.target.value), onKeyDown: event => { if (event.key === 'Enter') renamePreset() } }) : null,
+          selectedPreset ? jsx('button', { className: `${compactPrimary} shrink-0`, disabled: saving || !presetRename.trim(), onClick: renamePreset, children: '이름 변경' }) : null,
+          jsx('input', { className: `${compactInput} min-w-0 flex-1`, value: presetName, 'aria-label': `${modelId} 새 preset 이름`, placeholder: '새 preset 이름', onChange: event => setPresetName(event.target.value), onKeyDown: event => { if (event.key === 'Enter') savePreset() } }),
+          jsx('button', { className: `${compactPrimary} shrink-0`, disabled: saving || !presetName.trim(), onClick: savePreset, children: '새 preset 만들기' })
+        ] })
       ] }),
       settings.isLoading ? jsx('p', { className: muted, role: 'status', children: '현재 설정을 불러오는 중…' }) : null,
       jsx('div', { className: 'grid gap-x-4 gap-y-1 sm:grid-cols-2', children: Object.entries(draft).map(([key, current]) => jsxs('div', { className: 'flex min-w-0 items-start gap-2 border-b border-(--ui-stroke-secondary) py-1.5', children: [jsx('label', { className: 'w-24 shrink-0 truncate pt-2 text-xs font-medium text-(--ui-text-primary)', htmlFor: `parameter-${modelId}-${key}`, children: key }), jsxs('div', { className: 'min-w-0 flex-1', children: [jsxs('div', { className: 'flex min-w-0 items-center gap-1.5', children: [jsx(ParameterControl, { id: `parameter-${modelId}-${key}`, option: settings.data?.metadata?.[key], value: current, className: compactInput, error: fieldErrors[key], describedBy: fieldErrors[key] ? `parameter-error-${modelId}-${key}` : undefined, ariaLabel: `${key} 값`, onChange: event => update(key, event.target.value), onBlur: event => commit(key, event.target.value) }), jsx('button', { className: compactDanger, disabled: saving, onClick: () => remove(key), 'aria-label': `${key} parameter 삭제`, children: '삭제' })] }), fieldErrors[key] ? jsx('p', { id: `parameter-error-${modelId}-${key}`, className: 'mt-1 text-[11px] text-(--dt-destructive)', role: 'alert', children: fieldErrors[key] }) : null] })] }, key)) }),
@@ -478,6 +482,7 @@ function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' })
   const [searched, setSearched] = useState(false)
   const [repo, setRepo] = useState(initialRepo)
   const [fileIndex, setFileIndex] = useState('')
+  const [alias, setAlias] = useState('')
   const [jobId, setJobId] = useState('')
   const [actionMessage, setActionMessage] = useState('')
   const search = useQuery({ queryKey: [ID, 'search', queryText], queryFn: () => api(`/search?q=${encodeURIComponent(queryText)}&limit=20`), enabled: mode === 'download' && searched && queryText.trim().length > 1 })
@@ -503,13 +508,19 @@ function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' })
   const registerModel = async () => {
     if (!repo || !selected) return
     setActionMessage('')
-    await api('/register', { method: 'POST', body: { repo, paths: selected.paths } })
-    setActionMessage('모델을 명시적으로 등록했습니다. 다운로드와 등록은 별개입니다.')
-    refresh()
+    try {
+      const result = await api('/register', { method: 'POST', body: { repo, paths: selected.paths, alias } })
+      setActionMessage(`${result.model_id} 모델을 등록했습니다.`)
+      if (result.suggested_alias) setAlias(result.suggested_alias)
+      await refresh()
+    } catch (cause) {
+      setActionMessage(`등록 실패: ${cause?.message || String(cause)}`)
+    }
   }
   const running = job.data?.status === 'running'
-  useEffect(() => { setRepo(initialRepo); setFileIndex(''); setActionMessage('') }, [initialRepo])
+  useEffect(() => { setRepo(initialRepo); setFileIndex(''); setAlias(''); setActionMessage('') }, [initialRepo])
   useEffect(() => { if (mode === 'register' && fileIndex === '' && groups.length) setFileIndex('0') }, [mode, fileIndex, groups.length])
+  useEffect(() => { if (mode === 'register' && cachedFiles.data?.suggested_alias) setAlias(cachedFiles.data.suggested_alias) }, [mode, repo, cachedFiles.data?.suggested_alias])
   return jsxs('section', { className: `${card} mt-4 p-4 sm:p-5`, 'aria-labelledby': 'llama-wizard-title', children: [
     jsxs('div', { className: 'flex items-start justify-between gap-4', children: [jsx('div', { className: 'min-w-0', children: [jsx('div', { className: 'text-[11px] font-semibold uppercase tracking-[0.16em] text-(--ui-accent)', children: mode === 'register' ? '다운받은 모델 등록' : '모델 다운로드' }), jsx('h2', { id: 'llama-wizard-title', className: 'mt-1 text-lg font-semibold', children: mode === 'register' ? '다운받은 GGUF 파일 등록' : 'Hugging Face 저장소와 양자화 선택' })] }), jsx('button', { className: button, onClick: close, 'aria-label': '모델 wizard 닫기', children: '닫기' })] }),
     mode === 'download' ? jsxs('div', { className: 'mt-5', children: [
@@ -522,11 +533,10 @@ function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' })
     mode === 'download' && search.isLoading ? jsx('p', { className: `mt-3 ${muted}`, children: 'Hugging Face 검색 중…' }) : null,
     mode === 'download' && search.error ? jsx('p', { className: 'mt-3 text-sm text-(--dt-destructive)', children: String(search.error.message || search.error) }) : null,
     mode === 'download' && search.data?.hits?.length ? jsx('div', { className: 'mt-3 rounded-md border border-(--ui-stroke-secondary) overscroll-contain', style: { maxHeight: '24rem', overflowY: 'auto', scrollbarColor: 'var(--ui-stroke-secondary) transparent' }, children: search.data.hits.map(hit => jsx('button', { className: 'flex w-full items-center justify-between border-b border-(--ui-stroke-secondary) px-3 py-2 text-left text-sm last:border-0 hover:bg-(--ui-bg-tertiary)', onClick: () => { setRepo(hit.repo); setFileIndex(''); setActionMessage('') }, children: [jsx('span', { className: 'min-w-0 break-words pr-3 font-mono', children: hit.repo }), jsx('span', { className: `shrink-0 ${muted}`, children: `${Number(hit.downloads || 0).toLocaleString()} downloads` })] }, hit.repo))}) : null,
-    mode === 'register' && repo ? jsxs('div', { className: 'mt-5', children: [jsx('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('span', { className: 'min-w-0 break-words text-sm font-medium', children: repo }), jsx('span', { className: `shrink-0 text-xs ${muted}`, children: '다운로드 완료 파일' })] }), cachedFiles.isLoading ? jsx('p', { className: muted, role: 'status', children: '다운받은 파일을 확인하는 중…' }) : cachedFiles.error ? jsx('p', { className: 'text-sm text-(--dt-destructive)', role: 'alert', children: String(cachedFiles.error.message || cachedFiles.error) }) : cachedFiles.data?.warning ? jsx('p', { className: 'text-sm text-(--dt-destructive)', role: 'alert', children: cachedFiles.data.warning }) : groups.length === 1 ? jsx('div', { className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) px-3 py-2 text-sm', children: selected?.paths.join(', ') }) : groups.length ? jsx('select', { className: input, style: themedSelect(), value: fileIndex, 'aria-label': '등록할 GGUF 파일 선택', onChange: event => setFileIndex(event.target.value), children: groups.map((group, index) => jsx('option', { style: themedOption, value: index, children: group.paths.join(', ') }, `${group.label}-${index}`)) }) : jsx('p', { className: muted, children: '다운로드가 완료된 GGUF 파일이 없습니다.' }), selected ? jsx('p', { className: `mt-2 ${muted}`, children: `${selected.paths.length > 1 ? `${selected.paths.length}개 split part · ` : ''}${selected.fit}` }) : null] }) : null,
+    mode === 'register' && repo ? jsxs('div', { className: 'mt-5', children: [jsx('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('span', { className: 'min-w-0 break-words text-sm font-medium', children: repo }), jsx('span', { className: `shrink-0 text-xs ${muted}`, children: '다운로드 완료 파일' })] }), cachedFiles.isLoading ? jsx('p', { className: muted, role: 'status', children: '다운받은 파일을 확인하는 중…' }) : cachedFiles.error ? jsx('p', { className: 'text-sm text-(--dt-destructive)', role: 'alert', children: String(cachedFiles.error.message || cachedFiles.error) }) : cachedFiles.data?.warning ? jsx('p', { className: 'text-sm text-(--dt-destructive)', role: 'alert', children: cachedFiles.data.warning }) : groups.length ? jsxs('div', { className: 'flex items-stretch gap-3', 'data-testid': 'registration-actions', children: [jsx('input', { className: input, style: { width: '16rem', maxWidth: '16rem', flex: '0 0 16rem' }, value: alias, 'aria-label': '등록 이름(alias)', placeholder: '모델 이름(alias)', onChange: event => setAlias(event.target.value) }), jsx('select', { className: `${input} min-w-0 flex-1`, style: { ...themedSelect(), width: 'auto', minWidth: 0, flex: '1 1 auto' }, value: fileIndex, 'aria-label': '등록할 GGUF 파일 선택', onChange: event => setFileIndex(event.target.value), children: groups.map((group, index) => jsx('option', { style: themedOption, value: index, children: group.paths.join(', ') }, `${group.label}-${index}`)) }), jsx('button', { className: `${primary} shrink-0`, disabled: !selected || !alias.trim() || running, onClick: registerModel, 'aria-label': '선택한 GGUF 등록', children: '선택' })] }) : jsx('p', { className: muted, children: '다운로드가 완료된 GGUF 파일이 없습니다.' })] }) : null,
     mode === 'download' && repo ? jsxs('div', { className: 'mt-5', children: [jsx('div', { className: 'mb-2 flex items-center justify-between gap-3', children: [jsx('span', { className: 'min-w-0 break-words text-sm font-medium', children: repo }), jsx('span', { className: `shrink-0 text-xs ${muted}`, children: 'Q4 / Q5 / IQ / F16' })] }), files.isLoading ? jsx('p', { className: muted, role: 'status', children: 'repo의 GGUF 양자화 목록을 불러오는 중…' }) : jsx('select', { className: input, style: themedSelect(), value: fileIndex, 'aria-label': '다운로드할 양자화 선택', onChange: event => setFileIndex(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: '양자화를 선택하세요' }), ...groups.map((group, index) => jsx('option', { style: themedOption, value: index, children: `${group.label} · ${(Number(group.total_bytes || 0) / (1 << 30)).toFixed(1)} GB · ${group.fit}` }, `${group.label}-${index}`))] }), selected ? jsx('p', { className: `mt-2 ${muted}`, children: `${selected.paths.length > 1 ? `${selected.paths.length}개 split part 다운로드 · ` : ''}${selected.fit}` }) : null] }) : null,
     jsx(JobProgress, { job: job.data }),
-    actionMessage ? jsx('p', { className: `mt-3 text-xs ${muted}`, role: 'status', children: actionMessage }) : null,
-    mode === 'register' ? jsx('div', { className: 'mt-5 flex justify-end', children: jsx('button', { className: primary, disabled: !selected || running, onClick: registerModel, 'aria-label': '선택한 GGUF 등록', children: '선택 항목 등록' }) }) : null
+    actionMessage ? jsx('p', { className: `mt-3 text-xs ${actionMessage.startsWith('등록 실패:') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: actionMessage }) : null
   ] })
 }
 

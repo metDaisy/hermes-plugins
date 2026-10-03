@@ -43,7 +43,7 @@ try:
     from .application.official_runtime import OfficialRuntimeService
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
-    from .application.activity_log_projection import project_activity_lines
+    from .application.activity_log_projection import contextual_activity_tail, project_activity_lines
     from .application.profile_model_routing import sync_profile_models
     from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from .application.prism_runtime import PrismRuntimeInstaller
@@ -90,7 +90,7 @@ except ImportError:
     from application.official_runtime import OfficialRuntimeService
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
-    from application.activity_log_projection import project_activity_lines
+    from application.activity_log_projection import contextual_activity_tail, project_activity_lines
     from application.profile_model_routing import sync_profile_models
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
@@ -131,6 +131,7 @@ PRESET_DB_PATH = RUNTIME_ROOT / "presets.db"
 OPTION_METADATA_CACHE_PATH = RUNTIME_ROOT / "parameter-metadata-cache.json"
 ROUTER_PRESET_PATH = RUNTIME_ROOT / "router-models.ini"
 ACTIVITY_LOG_PATH = RUNTIME_ROOT / "logs" / "activity.log"
+REQUEST_CONTEXT_LOG_PATH = RUNTIME_ROOT / "logs" / "request-context.jsonl"
 # Compatibility aliases for older callers. All runtime events now share one ordered log.
 SERVER_LOG_PATH = ACTIVITY_LOG_PATH
 MAIN_LOG_PATH = ACTIVITY_LOG_PATH
@@ -253,7 +254,9 @@ def _hf_cache() -> HuggingFaceCacheService:
         )
         return result.returncode, result.stdout or ""
 
-    return HuggingFaceCacheService(lambda: shutil.which("hf"), run)
+    return HuggingFaceCacheService(
+        lambda: shutil.which("hf"), run, cache_root=lambda: _hf_storage()[1],
+    )
 
 
 def _hf_downloaded_models() -> tuple[list[dict[str, str]], str | None, str | None]:
@@ -303,8 +306,11 @@ def _model_rows() -> list[dict[str, Any]]:
 
 def _register_model(model_id: str, paths: list[Path], owned: bool,
                     hf_repo: str | None = None, hf_file: str | None = None,
-                    size_bytes: int = 0) -> None:
-    _models().register(model_id, paths, owned, hf_repo, hf_file, size_bytes)
+                    size_bytes: int = 0, runtime_kind: str | None = None) -> None:
+    _models().register(
+        model_id, paths, owned, hf_repo, hf_file, size_bytes,
+        runtime_kind=runtime_kind,
+    )
 
 
 def _job_manager() -> JobManager:
@@ -799,7 +805,7 @@ def _start_server() -> None:
 
 
 def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]:
-    raw = _server_lifecycle(ACTIVITY_LOG_PATH).log_tail(limit)
+    raw = contextual_activity_tail(ACTIVITY_LOG_PATH, REQUEST_CONTEXT_LOG_PATH, limit)
     raw_lines = list(raw.get("lines") or [])
     projected = project_activity_lines(raw_lines)
     return {
@@ -1038,10 +1044,16 @@ def _status() -> dict[str, Any]:
     state = _state()
     execution = execution_profiles()
     status.update(execution)
-    models = state.get("models") if isinstance(state.get("models"), dict) else {}
-    status["profile_model_options"] = [
-        {"id": str(model_id), "label": str(model_id)} for model_id in sorted(models)
+    visible_models = _model_rows()
+    status["models"] = visible_models
+    profile_options = [
+        {"id": str(model.get("id")), "label": str(model.get("id"))}
+        for model in visible_models
+        if isinstance(model, dict) and model.get("id")
     ]
+    status["main_model_options"] = list(profile_options)
+    status["auxiliary_model_options"] = list(profile_options)
+    status["profile_model_options"] = list(profile_options)
     status["coordinator"] = {
         "ok": True,
         "pid": os.getpid(),
@@ -1106,6 +1118,7 @@ def _hf_workflow() -> HuggingFaceModelWorkflow:
         download=_hf_download, register=_register_model, remove_cache=_remove_hf_cache,
         model_id=_model_id,
         visible_repositories=lambda kind, repositories: _model_policy.visible_repositories(kind, repositories),
+        registration_runtime_kind=lambda model_id: "prism_ml" if model_id.startswith("Ternary-Bonsai") else "official",
     )
 
 

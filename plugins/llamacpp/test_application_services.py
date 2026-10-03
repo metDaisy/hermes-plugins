@@ -214,6 +214,22 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "호환"):
             service.save("compression", {"runtime_kind": "prism_ml", "model_id": "model"})
 
+    def test_execution_profile_uses_registered_runtime_for_custom_alias(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state: dict[str, object] = {
+            "models": {"my-compressor": {"runtime_kind": "prism_ml"}},
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda kind, _model_id: kind == "prism_ml",
+        )
+
+        result = service.save("compression", {"model_id": "my-compressor"})
+
+        self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "prism_ml")
+
     def test_concurrent_execution_profile_saves_preserve_both_roles(self) -> None:
         import tempfile
         from dashboard.application.execution_profiles import ExecutionProfileService
@@ -396,6 +412,25 @@ class RegisteredModelServiceTests(unittest.TestCase):
                 self.assertEqual(rows[0]["paths"], [str(model_path.resolve())])
                 self.assertEqual(service.active_path("model"), model_path.resolve())
 
+    def test_registration_preserves_runtime_kind_and_refuses_alias_overwrite(self) -> None:
+        from dashboard.application.model_registry import RegisteredModelService
+
+        state: dict[str, object] = {"models": {"same-name": {"paths": [], "owned": False}}}
+        service = RegisteredModelService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            cached_files=lambda _repo: ([], None),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "이미 등록"):
+            service.register("same-name", [Path("E:/models/model.gguf")], False)
+
+        service.register(
+            "custom-alias", [Path("E:/models/model.gguf")], False,
+            hf_repo="owner/model-GGUF", hf_file="model.gguf", runtime_kind="official",
+        )
+        self.assertEqual(state["models"]["custom-alias"]["runtime_kind"], "official")
+
     def test_legacy_hf_registration_is_migrated_to_cached_local_paths(self) -> None:
         from dashboard.application.model_registry import RegisteredModelService
 
@@ -512,9 +547,21 @@ class ModelRouteAdapterTests(unittest.TestCase):
         from dashboard.routes.model_routes import ModelRouteContext, create_router
         from fastapi import HTTPException
 
+        registrations: list[tuple[str, list[str], str]] = []
+
         class Workflow:
             def search(self, _query, _limit):
                 raise RuntimeError("offline")
+
+            def register(self, repo_id, paths, alias=""):
+                registrations.append((repo_id, paths, alias))
+                return {"model_id": alias}
+
+            def cached_files(self, _repo_id):
+                return ([{"paths": ["model.gguf"]}], None)
+
+            def suggested_alias(self, _repo_id):
+                return "model-(2)"
 
         context = ModelRouteContext(
             lifecycle=lambda: object(), workflow=lambda: Workflow(),
@@ -529,6 +576,15 @@ class ModelRouteAdapterTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             paths["/search"]("test", 20)
         self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(
+            paths["/register"]({"repo": "owner/model-GGUF", "paths": ["model.gguf"], "alias": "model-(2)"}),
+            {"model_id": "model-(2)"},
+        )
+        self.assertEqual(registrations, [("owner/model-GGUF", ["model.gguf"], "model-(2)")])
+        self.assertEqual(
+            paths["/hf-models/files"]("owner/model-GGUF")["suggested_alias"],
+            "model-(2)",
+        )
 
 
 class PrismRuntimeInstallerTests(unittest.TestCase):
@@ -1163,6 +1219,40 @@ class HuggingFaceCacheServiceTests(unittest.TestCase):
             self.assertIsNone(warning)
             self.assertEqual(groups, [{"label": "model", "paths": ["model-00001-of-00002.gguf", "model-00002-of-00002.gguf"], "total_bytes": 3, "fit": "downloaded"}])
 
+    def test_inventory_and_file_selection_include_complete_snapshot_omitted_by_hf_cli(self) -> None:
+        from dashboard.application.huggingface_cache import HuggingFaceCacheService
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            hub = Path(raw_root) / "hub"
+            repo = hub / "models--prism-ml--Ternary-Bonsai-2-27B-gguf"
+            snapshot = repo / "snapshots" / "revision"
+            snapshot.mkdir(parents=True)
+            (repo / "refs").mkdir()
+            (repo / "refs" / "main").write_text("revision", encoding="utf-8")
+            (repo / "blobs").mkdir()
+            (repo / "blobs" / "other-quant.downloadInProgress").write_bytes(b"partial")
+            (snapshot / "Ternary-Bonsai-2-27B-PQ2_0.gguf").write_bytes(b"model")
+
+            def run(argv):
+                if "--revisions" in argv:
+                    return 0, "[]"
+                return 0, '[{"repo_id":"owner/Official-GGUF","size":"1.0G"}]'
+
+            service = HuggingFaceCacheService(lambda: "hf", run, cache_root=lambda: hub)
+
+            models, _executable, warning = service.downloaded_models()
+            groups, files_warning = service.cached_files("prism-ml/Ternary-Bonsai-2-27B-gguf")
+
+            self.assertIsNone(warning)
+            self.assertEqual(
+                [model["repo_id"] for model in models],
+                ["owner/Official-GGUF", "prism-ml/Ternary-Bonsai-2-27B-gguf"],
+            )
+            self.assertIsNone(files_warning)
+            self.assertEqual(groups[0]["paths"], ["Ternary-Bonsai-2-27B-PQ2_0.gguf"])
+
 
 class JsonHttpClientTests(unittest.TestCase):
     def test_sends_hf_token_only_to_huggingface_hosts(self) -> None:
@@ -1241,11 +1331,76 @@ class HuggingFaceModelWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow.search("model", 20), {"hits": [{"repo": "owner/repo", "downloads": 12}]})
         self.assertEqual(workflow.repository("owner/repo"), {"files": [{"label": "model", "paths": ["model.gguf"], "total_bytes": 3, "fit": "available"}]})
         registered_model = workflow.register("owner/repo", ["model.gguf"])
-        self.assertEqual(registered_model["model_id"], "model")
-        self.assertEqual(registered[0][0], "model")
+        self.assertEqual(registered_model["model_id"], "repo")
+        self.assertEqual(registered[0][0], "repo")
         self.assertEqual(registered[0][1], [Path("E:/gguf/models/model.gguf")])
         with self.assertRaisesRegex(RuntimeError, "HF cache"):
             workflow.register("owner/repo", ["missing.gguf"])
+
+    def test_register_uses_model_runtime_instead_of_selected_dashboard_runtime(self) -> None:
+        from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
+
+        accepted_kinds: list[str] = []
+        registered: list[tuple[object, ...]] = []
+        workflow = HuggingFaceModelWorkflow(
+            load_state=lambda: {"runtime_kind": "prism_ml", "prism_release_tag": "prism-test"},
+            runtime_kind=lambda current: str(current["runtime_kind"]),
+            accepts=lambda kind, _repo, _paths, _version: accepted_kinds.append(kind) is None or kind == "official",
+            cache_models=lambda: ([], "hf", None),
+            cached_files=lambda _repo: ([{"label": "Qwen", "paths": ["Qwen-Q6_K.gguf"], "total_bytes": 3, "fit": "downloaded"}], None),
+            cached_paths=lambda _repo, paths: ([Path("E:/gguf/models") / path for path in paths], None),
+            http_json=lambda _url: [],
+            download=lambda *_args, **_kwargs: None,
+            register=lambda *args, **kwargs: registered.append(args),
+            remove_cache=lambda _repo: True,
+            model_id=lambda path: path.stem,
+            registration_runtime_kind=lambda model_id: "prism_ml" if model_id.startswith("Ternary-Bonsai") else "official",
+        )
+
+        result = workflow.register("owner/Qwen-GGUF", ["Qwen-Q6_K.gguf"])
+
+        self.assertEqual(result["model_id"], "Qwen")
+        self.assertEqual(accepted_kinds, ["official"])
+        self.assertEqual(registered[0][0], "Qwen")
+
+    def test_suggests_repo_alias_and_suffixes_existing_names_for_repeat_registration(self) -> None:
+        from dashboard.application.huggingface_model_workflow import HuggingFaceModelWorkflow
+
+        state: dict[str, object] = {
+            "runtime_kind": "official",
+            "models": {
+                "Ornith-1.5-35B-A3B": {},
+                "Ornith-1.5-35B-A3B-(2)": {},
+            },
+        }
+        registered: list[tuple[object, ...]] = []
+
+        def register(model_id, *args, **kwargs):
+            registered.append((model_id, *args))
+            state["models"][model_id] = {"paths": []}
+
+        workflow = HuggingFaceModelWorkflow(
+            load_state=lambda: state,
+            runtime_kind=lambda current: str(current["runtime_kind"]),
+            accepts=lambda *_args: True,
+            cache_models=lambda: ([], "hf", None),
+            cached_files=lambda _repo: ([{"label": "Ornith-Q6", "paths": ["Ornith-Q6.gguf"], "total_bytes": 3, "fit": "downloaded"}], None),
+            cached_paths=lambda _repo, paths: ([Path("E:/gguf/models") / path for path in paths], None),
+            http_json=lambda _url: [], download=lambda *_args, **_kwargs: None,
+            register=register, remove_cache=lambda _repo: True, model_id=lambda path: path.stem,
+            registration_runtime_kind=lambda _model_id: "official",
+        )
+
+        self.assertEqual(
+            workflow.suggested_alias("ornith-ai/Ornith-1.5-35B-A3B-GGUF"),
+            "Ornith-1.5-35B-A3B-(3)",
+        )
+        result = workflow.register(
+            "ornith-ai/Ornith-1.5-35B-A3B-GGUF", ["Ornith-Q6.gguf"],
+            alias="Ornith-1.5-35B-A3B",
+        )
+        self.assertEqual(result["model_id"], "Ornith-1.5-35B-A3B-(3)")
+        self.assertEqual(registered[0][0], "Ornith-1.5-35B-A3B-(3)")
 
 
 class HuggingFaceDownloadServiceTests(unittest.TestCase):

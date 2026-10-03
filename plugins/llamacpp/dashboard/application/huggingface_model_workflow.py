@@ -7,6 +7,7 @@ adapters and FastAPI exception translation remain outside this module.
 from __future__ import annotations
 
 import urllib.parse
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ class HuggingFaceModelWorkflow:
         remove_cache: Callable[[str], bool],
         model_id: Callable[[Path], str],
         visible_repositories: Callable[[str, list[str]], list[str]] | None = None,
+        registration_runtime_kind: Callable[[str], str] | None = None,
     ) -> None:
         self._load_state = load_state
         self._runtime_kind = runtime_kind
@@ -41,6 +43,7 @@ class HuggingFaceModelWorkflow:
         self._remove_cache = remove_cache
         self._model_id = model_id
         self._visible_repositories = visible_repositories or (lambda _kind, repositories: repositories)
+        self._registration_runtime_kind = registration_runtime_kind
 
     def local_models(self) -> dict[str, Any]:
         models, _executable, warning = self._cache_models()
@@ -53,6 +56,11 @@ class HuggingFaceModelWorkflow:
 
     def cached_files(self, repo_id: str) -> tuple[list[dict[str, Any]], str | None]:
         return self._cached_files(repo_id)
+
+    def suggested_alias(self, repo_id: str) -> str:
+        raw_name = str(repo_id or "").strip().rstrip("/").rsplit("/", 1)[-1]
+        base = re.sub(r"-GGUF$", "", raw_name, flags=re.IGNORECASE).strip()
+        return self._unique_alias(base or "model")
 
     def remove_cached_repository(self, repo_id: str) -> dict[str, Any]:
         state = self._load_state()
@@ -118,9 +126,10 @@ class HuggingFaceModelWorkflow:
         self._require_compatible(repo_id, paths)
         return self._model_id(Path(paths[0]))
 
-    def register(self, repo_id: str, paths: list[str]) -> dict[str, Any]:
-        self._require_compatible(repo_id, paths)
-        model_id = self._model_id(Path(paths[0]))
+    def register(self, repo_id: str, paths: list[str], alias: str = "") -> dict[str, Any]:
+        artifact_model_id = self._model_id(Path(paths[0]))
+        runtime_kind = self._registration_runtime_kind(artifact_model_id) if self._registration_runtime_kind else None
+        self._require_compatible(repo_id, paths, runtime_kind=runtime_kind)
         groups, warning = self._cached_files(repo_id)
         selected = next((group for group in groups if set(group["paths"]) == set(paths)), None)
         if selected is None:
@@ -129,11 +138,32 @@ class HuggingFaceModelWorkflow:
         local_paths, warning = self._cached_paths(repo_id, paths)
         if warning or len(local_paths) != len(paths):
             raise RuntimeError(warning or "선택한 GGUF의 로컬 cache 경로를 확인할 수 없습니다")
-        self._register(model_id, local_paths, False, hf_repo=repo_id, hf_file=paths[0], size_bytes=size_bytes)
-        return {"ok": True, "model_id": model_id, "registered": True, "downloaded": False, "size_bytes": size_bytes}
+        requested_alias = str(alias or "").strip() or self.suggested_alias(repo_id)
+        if len(requested_alias) > 120 or any(ord(char) < 32 for char in requested_alias) or "/" in requested_alias or "\\" in requested_alias:
+            raise RuntimeError("모델 이름(alias)은 120자 이하이며 경로 문자 없이 입력해야 합니다")
+        model_id = self._unique_alias(requested_alias)
+        self._register(
+            model_id, local_paths, False, hf_repo=repo_id, hf_file=paths[0],
+            size_bytes=size_bytes, runtime_kind=runtime_kind,
+        )
+        return {
+            "ok": True, "model_id": model_id, "registered": True, "downloaded": False,
+            "size_bytes": size_bytes, "suggested_alias": self.suggested_alias(repo_id),
+        }
 
-    def _require_compatible(self, repo_id: str, paths: list[str]) -> None:
-        kind, version = self._runtime_context()
+    def _unique_alias(self, base: str) -> str:
+        models = self._load_state().get("models")
+        existing = {str(model_id).lower() for model_id in models} if isinstance(models, dict) else set()
+        if base.lower() not in existing:
+            return base
+        suffix = 2
+        while f"{base}-({suffix})".lower() in existing:
+            suffix += 1
+        return f"{base}-({suffix})"
+
+    def _require_compatible(self, repo_id: str, paths: list[str], runtime_kind: str | None = None) -> None:
+        selected_kind, version = self._runtime_context()
+        kind = runtime_kind or selected_kind
         if not self._accepts(kind, repo_id, paths, version):
             raise RuntimeError("Prism-ML backend에는 catalog에 등록된 Prism Bonsai/Ternary GGUF quant만 등록할 수 있습니다")
 

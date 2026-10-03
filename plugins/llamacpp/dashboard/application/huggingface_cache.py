@@ -16,9 +16,11 @@ class HuggingFaceCacheService:
         self,
         find_cli: Callable[[], str | None],
         run: Callable[[list[str]], tuple[int, str]],
+        cache_root: Callable[[], Path] | None = None,
     ) -> None:
         self._find_cli = find_cli
         self._run = run
+        self._cache_root = cache_root
 
     def downloaded_models(self) -> tuple[list[dict[str, str]], str | None, str | None]:
         executable = self._find_cli()
@@ -38,6 +40,11 @@ class HuggingFaceCacheService:
             and repo_id
             and isinstance(size := item.get("size"), str)
         ]
+        known = {model["repo_id"].casefold() for model in models}
+        for model in self._discovered_snapshot_models():
+            if model["repo_id"].casefold() not in known:
+                models.append(model)
+                known.add(model["repo_id"].casefold())
         return models, executable, None
 
     def cached_files(self, repo_id: str) -> tuple[list[dict[str, Any]], str | None]:
@@ -85,11 +92,99 @@ class HuggingFaceCacheService:
             return None, payload
         revision = next((item for item in payload if isinstance(item, dict) and item.get("repo_id") == repo_id and item.get("snapshot_path")), None)
         if not revision:
+            snapshot = self._snapshot_from_cache(repo_id)
+            if snapshot is not None:
+                return snapshot, None
             return None, "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
         snapshot = Path(str(revision["snapshot_path"])).resolve()
         if not snapshot.is_dir():
             return None, "다운로드가 완료된 cache snapshot을 찾을 수 없습니다."
         return snapshot, None
+
+    def _discovered_snapshot_models(self) -> list[dict[str, str]]:
+        root = self._resolved_cache_root()
+        if root is None:
+            return []
+        models: list[dict[str, str]] = []
+        for repository in sorted(root.glob("models--*"), key=lambda path: path.name.casefold()):
+            repo_id = self._repo_id(repository.name)
+            snapshot = self._repository_snapshot(repository)
+            if not repo_id or snapshot is None:
+                continue
+            paths = list(snapshot.rglob("*.gguf"))
+            if not any(
+                path.is_file()
+                and "mmproj" not in path.name.casefold()
+                and "draft" not in path.name.casefold()
+                for path in paths
+            ):
+                continue
+            unique: dict[str, Path] = {}
+            for path in paths:
+                if path.is_file():
+                    unique[str(path.resolve()).casefold()] = path
+            size_bytes = sum(path.stat().st_size for path in unique.values())
+            models.append({"repo_id": repo_id, "size": self._format_size(size_bytes)})
+        return models
+
+    def _snapshot_from_cache(self, repo_id: str) -> Path | None:
+        root = self._resolved_cache_root()
+        parts = repo_id.split("/")
+        if root is None or len(parts) != 2 or any(
+            not part or part in {".", ".."} or "\\" in part for part in parts
+        ):
+            return None
+        repository = (root / ("models--" + "--".join(parts))).resolve()
+        if root not in repository.parents:
+            return None
+        return self._repository_snapshot(repository)
+
+    def _resolved_cache_root(self) -> Path | None:
+        if self._cache_root is None:
+            return None
+        root = self._cache_root().resolve()
+        return root if root.is_dir() else None
+
+    @staticmethod
+    def _repository_snapshot(repository: Path) -> Path | None:
+        snapshots = repository / "snapshots"
+        if not snapshots.is_dir():
+            return None
+        ref = repository / "refs" / "main"
+        if ref.is_file():
+            candidate = snapshots / ref.read_text(encoding="utf-8", errors="replace").strip()
+            if candidate.is_dir() and HuggingFaceCacheService._has_model_gguf(candidate):
+                return candidate.resolve()
+        candidates = [
+            path for path in snapshots.iterdir()
+            if path.is_dir() and HuggingFaceCacheService._has_model_gguf(path)
+        ]
+        return max(candidates, key=lambda path: path.stat().st_mtime).resolve() if candidates else None
+
+    @staticmethod
+    def _has_model_gguf(snapshot: Path) -> bool:
+        return any(
+            path.is_file()
+            and "mmproj" not in path.name.casefold()
+            and "draft" not in path.name.casefold()
+            for path in snapshot.rglob("*.gguf")
+        )
+
+    @staticmethod
+    def _repo_id(directory_name: str) -> str | None:
+        parts = directory_name.removeprefix("models--").split("--", 1)
+        if not directory_name.startswith("models--") or len(parts) != 2 or not all(parts):
+            return None
+        return "/".join(parts)
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        value = float(size_bytes)
+        for unit in ("B", "K", "M", "G", "T"):
+            if value < 1024 or unit == "T":
+                return f"{int(value)}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+            value /= 1024
+        return f"{size_bytes}B"
 
     @staticmethod
     def _json_list(output: str, operation: str) -> list[Any] | str:
