@@ -647,29 +647,29 @@ def _profile_provider_models() -> dict[str, int]:
 
 def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]:
     base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
-    provider_models = _profile_provider_models()
-    if not provider_models and fallback_model:
+    execution_models = _profile_provider_models()
+    if "main-local" not in execution_models and fallback_model:
         stored_options = _load_options().get(fallback_model, {})
         try:
             context_length = int(stored_options.get("ctx-size") or 65536)
         except (TypeError, ValueError):
             context_length = 65536
-        provider_models = {fallback_model: context_length}
-    if not provider_models:
-        raise RuntimeError("configure a Main or Compression execution profile first")
-    default_model = "main-local" if "main-local" in provider_models else next(iter(provider_models))
+        execution_models["main-local"] = context_length
+    if "main-local" not in execution_models:
+        raise RuntimeError("configure a Main execution profile first")
+    provider_models = {"main-local": execution_models["main-local"]}
+    default_model = "main-local"
     with _custom_endpoint_lock:
         updates: list[tuple[Path, str, str]] = []
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
-            if path.parent.name in {"project-manager", "coder", "reviewer"}:
-                updated = sync_profile_models(
-                    updated,
-                    base_url=base_url,
-                    main_served="main-local" in provider_models,
-                    compression_served="compression-local" in provider_models,
-                )
+            updated = sync_profile_models(
+                updated,
+                base_url=base_url,
+                main_served=True,
+                compression_served="compression-local" in execution_models,
+            )
             if updated != text:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
@@ -684,15 +684,14 @@ def _unregister_custom_endpoint() -> None:
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated, changed = _remove_managed_endpoint(text)
-            if path.parent.name in {"project-manager", "coder", "reviewer"}:
-                routed = sync_profile_models(
-                    updated,
-                    base_url=f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
-                    main_served=False,
-                    compression_served=False,
-                )
-                changed = changed or routed != updated
-                updated = routed
+            routed = sync_profile_models(
+                updated,
+                base_url=f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
+                main_served=False,
+                compression_served=False,
+            )
+            changed = changed or routed != updated
+            updated = routed
             if changed:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
@@ -703,9 +702,14 @@ def _stop_server(*, preserve_log: bool = False, keep_endpoint: bool = False) -> 
     _server_lifecycle().stop(True, keep_endpoint)
 
 
+def reset_profile_model_policy() -> None:
+    """Restore every Hermes profile to the remote default while no worker is serving."""
+    _unregister_custom_endpoint()
+
+
 def shutdown_machine_runtime() -> None:
     """Stop only verified plugin-owned work before the coordinator exits."""
-    _server_lifecycle().stop(preserve_log=True, keep_endpoint=True)
+    _server_lifecycle().stop(preserve_log=True, keep_endpoint=False)
     update_execution_queue(0, 0)
 
 
@@ -949,7 +953,7 @@ def record_resource_sample() -> dict[str, Any] | None:
         "auxContextPercent": context_percent("compression"),
     }
     RESOURCE_HISTORY.append(sample)
-    publish_event("resource_sample", refresh=["metrics"])
+    publish_event("resource_sample", refresh=[], snapshot=snapshot, sample=sample)
     return sample
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 class ManagedEndpointConfigTests(unittest.TestCase):
-    def test_desktop_leases_expire_and_wait_for_active_execution(self) -> None:
+    def test_desktop_leases_expire_after_owner_heartbeat_stops(self) -> None:
         from dashboard.application.desktop_leases import DesktopLeaseRegistry
 
         now = [100.0]
@@ -20,8 +20,7 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         leases.release("desktop-a")
         self.assertFalse(leases.should_shutdown())
         now[0] += 9
-        self.assertFalse(leases.should_shutdown(execution_busy=True))
-        self.assertTrue(leases.should_shutdown(execution_busy=False))
+        self.assertTrue(leases.should_shutdown())
 
     def test_desktop_lease_rejects_missing_or_oversized_client_id(self) -> None:
         from dashboard.application.desktop_leases import DesktopLeaseRegistry
@@ -574,13 +573,13 @@ class CoordinatorEventBusTests(unittest.TestCase):
         self.assertEqual([event["id"] for event in batch["events"]], [second["id"], third["id"]])
         self.assertEqual(batch["cursor"], third["id"])
 
-    def test_activity_classification_limits_resource_refresh_to_metric_lines(self) -> None:
+    def test_activity_classification_leaves_periodic_metrics_to_resource_sampler(self) -> None:
         from dashboard.application.event_bus import classify_activity_line
 
         self.assertEqual(classify_activity_line("ordinary llama.cpp info"), ("log", ["logs"]))
         self.assertEqual(
             classify_activity_line("prompt eval time = 100 ms / 10 tokens"),
-            ("prompt_completed", ["logs", "metrics"]),
+            ("prompt_completed", ["logs"]),
         )
         self.assertEqual(
             classify_activity_line("llama_server: model loaded"),
@@ -610,7 +609,7 @@ class CoordinatorEventBusTests(unittest.TestCase):
             self.assertEqual(log_path.read_text(encoding="utf-8"), "ordinary info\nprompt eval time = 20 ms / 4 tokens\n")
             self.assertEqual(observed, [
                 ("log", ["logs"]),
-                ("prompt_completed", ["logs", "metrics"]),
+                ("prompt_completed", ["logs"]),
                 ("worker_output_closed", ["logs", "status", "metrics"]),
             ])
 

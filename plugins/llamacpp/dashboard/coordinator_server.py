@@ -16,9 +16,9 @@ if str(DASHBOARD_DIR) not in sys.path:
 
 from backend_impl import (  # noqa: E402
     coordinator_shutdown_requested, record_resource_sample, router,
-    shutdown_machine_runtime, update_execution_queue,
+    reset_profile_model_policy, shutdown_machine_runtime, update_execution_queue,
 )
-from inference_proxy import execution_busy, router as inference_router  # noqa: E402
+from inference_proxy import router as inference_router  # noqa: E402
 
 try:  # noqa: E402
     from application.coordinator_lock import MachineFileLock
@@ -37,7 +37,7 @@ LIFETIME_LOCK = RUNTIME_ROOT / ("coordinator.lock" if COORDINATOR_PORT == 18380 
 COORDINATOR_STOP_MARKER = RUNTIME_ROOT / "coordinator-stopped"
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.86"
+COORDINATOR_BUILD = "0.2.91"
 DESKTOP_LEASE_TIMEOUT_SECONDS = 8.0
 _desktop_leases = DesktopLeaseRegistry(DESKTOP_LEASE_TIMEOUT_SECONDS)
 
@@ -112,6 +112,7 @@ if __name__ == "__main__":
     if not lifetime.acquire():
         raise SystemExit(0)
     try:
+        reset_profile_model_policy()
         update_execution_queue(0, 0)
         print(f"{COORDINATOR_SERVICE} protocol={COORDINATOR_PROTOCOL} build={COORDINATOR_BUILD} pid={os.getpid()}", flush=True)
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=COORDINATOR_PORT, log_level="warning"))
@@ -125,7 +126,7 @@ if __name__ == "__main__":
                     finally:
                         server.should_exit = True
                     return
-                if not _desktop_leases.should_shutdown(execution_busy()):
+                if not _desktop_leases.should_shutdown():
                     continue
                 try:
                     shutdown_machine_runtime()

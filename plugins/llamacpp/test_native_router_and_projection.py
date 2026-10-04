@@ -219,6 +219,44 @@ class ActivityLogProjectionTests(unittest.TestCase):
 
 
 class ResourceMetricsTests(unittest.TestCase):
+    def test_resource_sample_pushes_snapshot_and_point_without_metrics_refetch(self) -> None:
+        from dashboard import backend_impl
+
+        snapshot = {
+            "sampled_at": 1000.0,
+            "window_seconds": 60,
+            "roles": {
+                "main": {
+                    "last_activity_at": 999.0,
+                    "prompt_tokens_per_second": 125.0,
+                    "generation_tokens_per_second": 25.0,
+                    "context_tokens": 4096,
+                    "context_limit": 8192,
+                },
+                "compression": {},
+            },
+            "worker": {
+                "running": True,
+                "workerRssBytes": 1024,
+                "workerPrivateBytes": 512,
+                "model_id": "main-model",
+                "active_role": "main",
+                "active_requests": 1,
+                "queued_requests": 0,
+            },
+        }
+
+        with patch.object(backend_impl, "_resource_metrics", return_value=snapshot), \
+                patch.object(backend_impl.RESOURCE_HISTORY, "append") as append, \
+                patch.object(backend_impl, "publish_event") as publish:
+            result = backend_impl.record_resource_sample()
+
+        self.assertIsNotNone(result)
+        append.assert_called_once_with(result)
+        publish.assert_called_once_with(
+            "resource_sample", refresh=[], snapshot=snapshot, sample=result,
+        )
+
     def test_aggregates_profile_rates_and_context_in_rolling_window(self) -> None:
         from dashboard.application.resource_metrics import aggregate_profile_metrics
 
@@ -301,12 +339,13 @@ class ProfileModelRoutingTests(unittest.TestCase):
         self.assertIn("  provider: llamacpp-local\n  default: main-local", updated)
         self.assertIn("  base_url: http://127.0.0.1:18380/v1", updated)
         self.assertIn("  api_mode: chat_completions", updated)
+        self.assertIn("  reasoning_effort: high", updated)
         self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", updated)
         self.assertEqual(updated.count("fallback_providers:"), 1)
         self.assertIn("  compression:\n    provider: llamacpp-local\n    model: compression-local", updated)
-        self.assertIn("    reasoning_effort: medium", updated)
+        self.assertIn("    reasoning_effort: high", updated)
 
-    def test_routes_missing_local_roles_to_luna_high(self) -> None:
+    def test_routes_missing_local_roles_to_luna_with_high_reasoning(self) -> None:
         from dashboard.application.profile_model_routing import sync_profile_models
 
         updated = sync_profile_models(
@@ -314,13 +353,15 @@ class ProfileModelRoutingTests(unittest.TestCase):
             main_served=False, compression_served=False,
         )
 
-        self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna-high", updated)
+        self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna", updated)
         self.assertIn("  base_url: https://chatgpt.com/backend-api/codex", updated)
         self.assertIn("  api_mode: codex_responses", updated)
-        self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna-high", updated)
+        self.assertIn("  reasoning_effort: high", updated)
+        self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", updated)
+        self.assertIn("    reasoning_effort: high", updated)
         self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", updated)
 
-    def test_keeps_aux_on_luna_high_when_only_main_is_local(self) -> None:
+    def test_keeps_aux_on_luna_high_reasoning_when_only_main_is_local(self) -> None:
         from dashboard.application.profile_model_routing import sync_profile_models
 
         updated = sync_profile_models(
@@ -329,7 +370,8 @@ class ProfileModelRoutingTests(unittest.TestCase):
         )
 
         self.assertIn("  default: main-local", updated)
-        self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna-high", updated)
+        self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", updated)
+        self.assertIn("    reasoning_effort: high", updated)
 
 
 class ProductionIntegrationTests(unittest.TestCase):
@@ -598,46 +640,41 @@ class ProductionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(result["raw_lines"]), 3)
         self.assertNotIn("PRIVATE", "\n".join(result["lines"]))
 
-    def test_endpoint_sync_changes_model_policy_only_for_worker_profiles(self) -> None:
+    def test_endpoint_sync_changes_model_policy_for_every_profile(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            workers = [root / name / "config.yaml" for name in ("project-manager", "coder", "reviewer")]
-            others = [root / name / "config.yaml" for name in ("main", "comfy-master")]
-            for path in (*workers, *others):
+            profiles = [root / name / "config.yaml" for name in (
+                "project-manager", "coder", "reviewer", "main", "comfy-master",
+            )]
+            for path in profiles:
                 path.parent.mkdir(parents=True)
                 path.write_text(ProfileModelRoutingTests.BASE, encoding="utf-8")
 
-            with patch.object(api, "_profile_config_paths", return_value=[*workers, *others]), \
+            with patch.object(api, "_profile_config_paths", return_value=profiles), \
                     patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768, "compression-local": 8192,
                     }):
                 api._sync_execution_profile_endpoint()
 
-            for path in workers:
+            for path in profiles:
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("  default: main-local", text, path.parent.name)
                 self.assertIn("    model: compression-local", text, path.parent.name)
-                self.assertIn('default_model: "main-local"', text, path.parent.name)
-                self.assertIn('"main-local":', text, path.parent.name)
-            for path in others:
-                text = path.read_text(encoding="utf-8")
-                self.assertIn("  default: gpt-5.6-luna", text, path.parent.name)
-                self.assertIn("# BEGIN llamacpp endpoint (managed)", text, path.parent.name)
+                self.assertIn("    reasoning_effort: high", text, path.parent.name)
                 self.assertIn('default_model: "main-local"', text, path.parent.name)
                 self.assertIn('"main-local":', text, path.parent.name)
 
-    def test_endpoint_removal_restores_worker_profiles_to_remote_policy(self) -> None:
+    def test_endpoint_removal_restores_every_profile_to_remote_policy(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
         from dashboard.application.profile_model_routing import sync_profile_models
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            coder = root / "coder" / "config.yaml"
-            coder.parent.mkdir(parents=True)
+            profiles = [root / name / "config.yaml" for name in ("coder", "main", "comfy-master")]
             local = sync_profile_models(
                 ProfileModelRoutingTests.BASE,
                 base_url="http://127.0.0.1:18380/v1",
@@ -648,16 +685,21 @@ class ProductionIntegrationTests(unittest.TestCase):
                 local, "http://127.0.0.1:18380/v1", "main-local",
                 {"main-local": 32768, "compression-local": 8192},
             )
-            coder.write_text(local, encoding="utf-8")
+            for path in profiles:
+                path.parent.mkdir(parents=True)
+                path.write_text(local, encoding="utf-8")
 
-            with patch.object(api, "_profile_config_paths", return_value=[coder]):
+            with patch.object(api, "_profile_config_paths", return_value=profiles):
                 api._unregister_custom_endpoint()
 
-            restored = coder.read_text(encoding="utf-8")
-            self.assertNotIn("# BEGIN llamacpp endpoint (managed)", restored)
-            self.assertIn("  default: gpt-5.6-luna-high", restored)
-            self.assertIn("    model: gpt-5.6-luna-high", restored)
-            self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", restored)
+            for path in profiles:
+                restored = path.read_text(encoding="utf-8")
+                self.assertNotIn("# BEGIN llamacpp endpoint (managed)", restored, path.parent.name)
+                self.assertIn("  default: gpt-5.6-luna", restored, path.parent.name)
+                self.assertIn("  reasoning_effort: high", restored, path.parent.name)
+                self.assertIn("    model: gpt-5.6-luna", restored, path.parent.name)
+                self.assertIn("    reasoning_effort: high", restored, path.parent.name)
+                self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", restored)
 
 
 if __name__ == "__main__":

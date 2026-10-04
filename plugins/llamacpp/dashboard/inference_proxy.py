@@ -137,14 +137,12 @@ def validate_logical_model(body: bytes) -> str:
 
 
 def logical_models_payload(state: dict[str, Any]) -> dict[str, Any]:
-    """Advertise the stable aliases accepted by the coordinator, never worker ids."""
+    """Advertise only the user-selectable Main alias; Compression is auxiliary-only."""
     profiles = state.get("execution_profiles")
     configured = profiles if isinstance(profiles, dict) else {}
-    aliases = [
-        logical_model
-        for role, logical_model in (("main", "main-local"), ("compression", "compression-local"))
-        if isinstance(configured.get(role), dict) and configured[role].get("model_id")
-    ]
+    aliases = ["main-local"] if (
+        isinstance(configured.get("main"), dict) and configured["main"].get("model_id")
+    ) else []
     return {
         "object": "list",
         "data": [

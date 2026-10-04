@@ -36,9 +36,12 @@ class DesktopLeaseRegistry:
         with self._lock:
             return self._prune_locked()
 
-    def should_shutdown(self, execution_busy: bool = False) -> bool:
+    def should_shutdown(self) -> bool:
         with self._lock:
-            return self._armed and self._prune_locked() == 0 and not execution_busy
+            # The Desktop process owns the coordinator and every process it spawns.
+            # Once all Desktop leases expire, active inference must not keep that
+            # process tree alive after the owner application has exited.
+            return self._armed and self._prune_locked() == 0
 
     def _prune_locked(self) -> int:
         cutoff = self._clock() - self._timeout_seconds

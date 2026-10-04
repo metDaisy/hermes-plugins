@@ -1015,7 +1015,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "logical model"):
             validate_logical_model(b'{"model":""}')
 
-    def test_proxy_advertises_only_configured_logical_models(self) -> None:
+    def test_proxy_advertises_only_main_model_while_compression_stays_auxiliary(self) -> None:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
         from dashboard import inference_proxy
@@ -1034,12 +1034,9 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
 
-        self.assertEqual([model["id"] for model in payload["data"]], [
-            "main-local", "compression-local",
-        ])
-        self.assertEqual([model["model"] for model in payload["models"]], [
-            "main-local", "compression-local",
-        ])
+        self.assertEqual([model["id"] for model in payload["data"]], ["main-local"])
+        self.assertEqual([model["model"] for model in payload["models"]], ["main-local"])
+        self.assertNotIn("compression-local", json.dumps(payload))
         self.assertNotIn("Ternary-Bonsai-2-27B", json.dumps(payload))
 
     def test_execution_role_applies_profile_runtime_model_and_role_log(self) -> None:
@@ -1293,6 +1290,42 @@ class LlamaCppManagerTests(unittest.TestCase):
 
             self.assertEqual(first.read_text(encoding="utf-8"), "providers:\n")
             self.assertEqual(second.read_text(encoding="utf-8"), "providers:\n")
+
+    def test_profile_endpoint_registers_only_main_and_routes_compression_as_auxiliary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            config_path = Path(raw_root) / "project-manager" / "config.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                "model:\n"
+                "  provider: openai-codex\n"
+                "  default: gpt-5.6-luna\n"
+                "fallback_providers: []\n"
+                "auxiliary:\n"
+                "  compression:\n"
+                "    provider: openai-codex\n"
+                "    model: gpt-5.6-luna\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(api, "_profile_config_paths", return_value=[config_path]), \
+                    patch.object(api, "_profile_provider_models", return_value={
+                        "main-local": 32768,
+                        "compression-local": 8192,
+                    }):
+                endpoint = api._sync_execution_profile_endpoint()
+
+            updated = config_path.read_text(encoding="utf-8")
+            managed = updated.split("# BEGIN llamacpp endpoint (managed)", 1)[1].split(
+                "# END llamacpp endpoint (managed)", 1,
+            )[0]
+            self.assertEqual(endpoint["model"], "main-local")
+            self.assertEqual(endpoint["models"], {"main-local": 32768})
+            self.assertIn('"main-local":', managed)
+            self.assertNotIn("compression-local", managed)
+            self.assertIn(
+                "  compression:\n    provider: llamacpp-local\n    model: compression-local",
+                updated,
+            )
 
     def test_profile_endpoint_sync_surfaces_rollback_write_failure(self) -> None:
         first = Path("first.yaml")
@@ -1576,8 +1609,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("coordinator.stopped ? 'stopped' : 'unavailable'", source)
         self.assertIn("cancel propagation on", source)
         self.assertIn("Exclusive swap", source)
-        self.assertIn("Official ${status?.runtime_options?.official?.version || '미설치'}", source)
-        self.assertIn("Prism-ML ${status?.runtime_options?.prism_ml?.version || '미설치'}", source)
+        self.assertIn("children: `${label}(${version})`", source)
+        self.assertIn("'aria-label': 'runtime 버전 및 업데이트'", source)
         self.assertIn("Main", source)
         self.assertIn("서버와 Singleton proxy를 중지했습니다.", source)
         self.assertIn("queryClient.setQueryData([ID, 'status']", source)
@@ -1668,9 +1701,21 @@ class LlamaCppManagerTests(unittest.TestCase):
         runtime_card = source[source.index("function RuntimeCard"):source.index("function ParameterSummary")]
         self.assertNotIn("openFolder", runtime_card)
         self.assertNotIn("children: '열기'", runtime_card)
-        self.assertIn("width: '11rem', maxWidth: '11rem', flex: '0 0 11rem'", runtime_card)
+        self.assertNotIn("'aria-label': 'runtime 선택'", runtime_card)
+        self.assertNotIn("children: '업데이트'", runtime_card)
+        self.assertNotIn("useRuntime", runtime_card)
+        self.assertNotIn("changeRuntime", runtime_card)
+        self.assertNotIn("requestedKind", runtime_card)
+        self.assertIn("function RuntimeUpdateControl", source)
+        self.assertIn("label: 'Official'", runtime_card)
+        self.assertIn("label: 'Prism-ML'", runtime_card)
+        self.assertIn("children: '|'", runtime_card)
+        self.assertIn("children: '↻'", source)
+        self.assertIn("disabled: disabled || !actionable", source)
+        self.assertIn("onClick: () => onInstall(kind)", source)
+        self.assertIn("kind: 'official'", runtime_card)
+        self.assertIn("kind: 'prism_ml'", runtime_card)
         self.assertNotIn("overflow-x-auto", runtime_card)
-        self.assertIn("children: '업데이트'", runtime_card)
         self.assertNotIn("children: 'backend'", runtime_card)
         self.assertNotIn("children: '활성 모델'", runtime_card)
         self.assertNotIn("children: 'server'", runtime_card)
@@ -1722,7 +1767,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("role: 'compression'", execution)
         self.assertNotIn("activeTab", execution)
 
-        model_row = source[source.index("function ModelRow"):source.index("function SettingsAdder")]
+        model_row = source[source.index("function ModelRow"):source.index("function ParameterControl")]
         self.assertIn("children: 'parameter preset'", model_row)
         self.assertIn("children: '적용'", model_row)
         self.assertIn("children: '×'", model_row)
@@ -2037,7 +2082,10 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("import pluginSdk from '@hermes/plugin-sdk'", desktop_source)
         self.assertNotIn("react/jsx-runtime", desktop_source)
         self.assertIn("const jsxs = jsx", desktop_source)
-        self.assertIn("const { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } = React", desktop_source)
+        self.assertIn("const { createElement, useEffect, useLayoutEffect, useRef, useState } = React", desktop_source)
+        self.assertNotIn("function SettingsAdder", desktop_source)
+        self.assertNotIn("function formatVram", desktop_source)
+        self.assertNotIn("modelIdFromPath", desktop_source)
         self.assertIn("el.scrollTop = el.scrollHeight", desktop_source)
         self.assertIn("jsx('pre', { ref: logRef", desktop_source)
         self.assertIn("const validateDraft = (next, extraMetadata = {})", desktop_source)
@@ -2058,7 +2106,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'presets'] })", desktop_source)
         self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'status'] })", desktop_source)
         self.assertIn("children: preset.name", desktop_source)
-        model_row = desktop_source[desktop_source.index("function ModelRow"):desktop_source.index("function SettingsAdder")]
+        model_row = desktop_source[desktop_source.index("function ModelRow"):desktop_source.index("function ParameterControl")]
         self.assertLess(model_row.index("jsx(ParameterSummary"), model_row.index("'data-testid': 'model-card-presets'"))
 
 
@@ -2132,11 +2180,11 @@ class LlamaCppManagerTests(unittest.TestCase):
 
     def test_desktop_lifecycle_contract_stops_coordinator_after_last_lease(self) -> None:
         source = (Path(__file__).parent / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8")
+        backend_source = (Path(__file__).parent / "dashboard" / "backend_impl.py").read_text(encoding="utf-8")
         event_source = (Path(__file__).parent / "dashboard" / "application" / "event_bus.py").read_text(encoding="utf-8")
         desktop_source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn('app.post("/lifecycle/lease")', source)
         self.assertIn('app.delete("/lifecycle/lease")', source)
-        self.assertIn("_desktop_leases.should_shutdown(execution_busy())", source)
         self.assertIn("shutdown_machine_runtime()", source)
         self.assertIn("server.should_exit = True", source)
         self.assertNotIn("subprocess", event_source)
@@ -2144,6 +2192,19 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("disposeSocket()", desktop_source)
         self.assertIn("stopHealthCheck()", desktop_source)
         self.assertIn("timers.clear()", desktop_source)
+        self.assertIn("_desktop_leases.should_shutdown()", source)
+        self.assertNotIn("_desktop_leases.should_shutdown(execution_busy())", source)
+        self.assertIn("reset_profile_model_policy()", source)
+        self.assertIn("_server_lifecycle().stop(preserve_log=True, keep_endpoint=False)", backend_source)
+
+    def test_resource_sample_updates_desktop_cache_without_two_second_refetch(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+        self.assertIn("frame.type === 'resource_sample'", source)
+        self.assertIn("queryClient.setQueriesData", source)
+        self.assertIn("mergeResourceMetricFrame", source)
+        self.assertIn("pushConnected && showDetails ? 30000", source)
+        self.assertIn("refresh=[]", (Path(__file__).parent / "dashboard" / "backend_impl.py").read_text(encoding="utf-8"))
 
     def test_coordinator_persists_bounded_long_running_resource_history(self) -> None:
         backend_source = (Path(__file__).parent / "dashboard" / "backend_impl.py").read_text(encoding="utf-8")

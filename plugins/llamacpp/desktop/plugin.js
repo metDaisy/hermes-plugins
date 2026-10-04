@@ -1,7 +1,7 @@
 import React from 'react'
 import pluginSdk from '@hermes/plugin-sdk'
 
-const { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } = React
+const { createElement, useEffect, useLayoutEffect, useRef, useState } = React
 const { ROUTES_AREA, SIDEBAR_NAV_AREA, queryClient, useQuery } = pluginSdk
 const jsx = (type, props, key) => createElement(type, key === undefined ? props : { ...props, key })
 const jsxs = jsx
@@ -10,7 +10,6 @@ const ID = 'llamacpp'
 const LOG_NEWLINE = String.fromCharCode(10)
 let pluginCtx
 let desktopLeaseDispose
-const modelIdFromPath = path => String(path || '').split('/').pop().replace(/-\d{5}-of-\d{5}(?=\.gguf$)/i, '').replace(/\.gguf$/i, '')
 const card = 'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)'
 const muted = 'text-sm text-(--ui-text-secondary)'
 const button = 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2 text-sm transition hover:bg-(--ui-bg-tertiary) disabled:cursor-not-allowed disabled:opacity-50'
@@ -29,6 +28,25 @@ const themeColorScheme = () => {
 const themedSelect = () => ({ colorScheme: themeColorScheme(), backgroundColor: 'var(--ui-bg-secondary)', color: 'var(--ui-text-primary)' })
 const themedOption = { backgroundColor: 'var(--ui-bg-elevated)', color: 'var(--ui-text-primary)' }
 const api = (path, options) => pluginCtx.rest(path, options)
+
+function mergeResourceMetricFrame(previous, frame) {
+  if (!previous || !frame?.snapshot || !frame?.sample) return previous
+  const windowSeconds = Number(previous.window_seconds) || 60
+  const sampledAt = Number(frame.sample.at || frame.snapshot.sampled_at || frame.timestamp)
+  if (!Number.isFinite(sampledAt)) return previous
+  const cutoff = sampledAt - windowSeconds
+  const series = (Array.isArray(previous.series) ? previous.series : [])
+    .filter(row => Number(row?.at) >= cutoff && Number(row?.at) !== sampledAt)
+    .concat(frame.sample)
+  return { ...previous, ...frame.snapshot, window_seconds: windowSeconds, series }
+}
+
+function applyResourceMetricFrame(frame) {
+  queryClient.setQueriesData(
+    { queryKey: [ID, 'resource-metrics'] },
+    previous => mergeResourceMetricFrame(previous, frame)
+  )
+}
 
 function useCoordinatorPush() {
   const [pushConnected, setPushConnected] = useState(false)
@@ -58,6 +76,7 @@ function useCoordinatorPush() {
         if (!frame || typeof frame !== 'object') return
         lastFrameAt = Date.now()
         setPushConnected(true)
+        if (frame.type === 'resource_sample') applyResourceMetricFrame(frame)
         for (const name of Array.isArray(frame.refresh) ? frame.refresh : []) schedule(name)
       })
     } catch {
@@ -117,15 +136,6 @@ const optionValueError = (option, value) => {
 function Badge({ children, tone = 'neutral' }) {
   const color = tone === 'good' ? 'bg-(--ui-accent)/15 text-(--ui-accent)' : tone === 'warn' ? 'bg-(--ui-accent-secondary)/15 text-(--ui-accent-secondary)' : 'bg-(--ui-bg-tertiary) text-(--ui-text-secondary)'
   return jsx('span', { className: `rounded-full px-2 py-1 text-xs ${color}`, children })
-}
-
-function formatVram(device) {
-  const total = Number(device?.vram_total_bytes)
-  const free = Number(device?.vram_free_bytes)
-  if (!Number.isFinite(total) || !Number.isFinite(free) || total <= 0) return '확인 중'
-  const used = Math.max(0, total - free)
-  const toGb = bytes => (bytes / (1024 ** 3)).toFixed(1)
-  return `${toGb(used)}GB/${toGb(total)}GB`
 }
 
 function JobProgress({ job }) {
@@ -344,7 +354,7 @@ function ResourceMetricsPanel({ status, pushConnected }) {
     queryKey: [ID, 'resource-metrics', showDetails ? windowSeconds : 60],
     queryFn: () => api(`/metrics?window=${showDetails ? windowSeconds : 60}`),
     enabled: status?.server_running === true,
-    refetchInterval: pushConnected ? false : status?.server_running ? 10000 : false,
+    refetchInterval: pushConnected && showDetails ? 30000 : pushConnected ? false : status?.server_running ? 10000 : false,
     refetchOnWindowFocus: false,
     placeholderData: previousData => previousData,
     staleTime: 30000
@@ -544,26 +554,54 @@ function CoordinatorStatusPanel({ status }) {
   ] })
 }
 
+function RuntimeUpdateControl({ kind, label, option, disabled, onInstall }) {
+  const installed = Boolean(option?.installed)
+  const actionable = Boolean(option) && (!installed || Boolean(option?.update_available))
+  const version = option?.version || '미설치'
+  const latest = option?.latest_version
+  const actionLabel = installed ? '업데이트' : '설치'
+  const title = actionable
+    ? `${label} runtime ${actionLabel}${latest ? ` · 최신 ${latest}` : ''}`
+    : `${label} runtime 최신 상태${latest ? ` · ${latest}` : ''}`
+  return jsxs('button', {
+    type: 'button',
+    className: `inline-flex items-center gap-1 rounded px-1.5 py-1 font-mono text-xs transition disabled:cursor-not-allowed disabled:opacity-50 ${actionable ? 'text-(--ui-text-primary) hover:bg-(--ui-bg-tertiary)' : 'text-(--ui-text-tertiary)'}`,
+    disabled: disabled || !actionable,
+    title,
+    'aria-label': `${label}(${version}) ${actionable ? actionLabel + ' 가능' : '최신 상태'}`,
+    onClick: () => onInstall(kind),
+    children: [jsx('span', { children: `${label}(${version})` }), jsx('span', { className: actionable ? 'text-(--ui-accent)' : 'text-(--ui-text-tertiary)', 'aria-hidden': true, children: '↻' })]
+  })
+}
+
 function RuntimeCard({ status, jobs, onRefresh, pushConnected }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  const [requestedKind, setRequestedKind] = useState(status?.runtime_kind || 'official')
   const runtimeJob = (jobs || []).find(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && job.status === 'running') || (jobs || []).find(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && ['error', 'done'].includes(job.status))
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
-  const activeKind = status?.runtime_kind || 'official'
-  const available = status?.runtime_options?.[requestedKind] || {}
   const runtimeBusy = busy || runtimeJob?.status === 'running'
   const serverBusy = serverJob?.status === 'running'
 
-  useEffect(() => { setRequestedKind(status?.runtime_kind || 'official') }, [status?.runtime_kind])
   useEffect(() => { if (runtimeJob?.status === 'done') { setMessage('runtime 준비가 완료되었습니다.'); onRefresh() } }, [runtimeJob?.job_id, runtimeJob?.status])
-  const install = async () => { setBusy(true); setMessage(''); try { await api('/runtime/install', { method: 'POST', body: { kind: requestedKind } }); await onRefresh(); setMessage('runtime 준비 작업을 시작했습니다.') } catch (cause) { setMessage(`runtime 준비 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
-  const useRuntime = async kind => { setBusy(true); setMessage(''); try { await api('/runtime', { method: 'PUT', body: { kind } }); await onRefresh(); setMessage('선택한 runtime으로 전환했습니다.') } catch (cause) { setMessage(`runtime 전환 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) } }
-  const changeRuntime = async event => { const kind = event.target.value; setRequestedKind(kind); if (kind === activeKind) return; const candidate = status?.runtime_options?.[kind] || {}; if (!candidate.installed) { setMessage('먼저 선택한 runtime을 다운로드하세요.'); return } await useRuntime(kind) }
+  const install = async kind => {
+    const label = kind === 'prism_ml' ? 'Prism-ML' : 'Official'
+    setBusy(true); setMessage('')
+    try {
+      await api('/runtime/install', { method: 'POST', body: { kind } })
+      await onRefresh()
+      setMessage(`${label} runtime 준비 작업을 시작했습니다.`)
+    } catch (cause) { setMessage(`${label} runtime 준비 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
+  }
 
   return jsxs('section', { className: `${card} p-4 sm:p-5`, children: [
-    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }), jsxs('div', { className: 'flex flex-wrap justify-end gap-2', 'aria-label': '설치된 runtime', children: [jsx(Badge, { tone: status?.runtime_options?.official?.installed ? 'good' : 'warn', children: `Official ${status?.runtime_options?.official?.version || '미설치'}` }), jsx(Badge, { tone: status?.runtime_options?.prism_ml?.installed ? 'good' : 'warn', children: `Prism-ML ${status?.runtime_options?.prism_ml?.version || '미설치'}` })] })] }),
-    jsxs('div', { className: 'mt-4 flex items-center gap-2', children: [jsx('select', { className: `${input} shrink-0`, style: { ...themedSelect(), width: '11rem', maxWidth: '11rem', flex: '0 0 11rem' }, value: requestedKind, disabled: runtimeBusy || serverBusy, 'aria-label': 'runtime 선택', onChange: changeRuntime, children: [jsx('option', { style: themedOption, value: 'official', children: 'official' }), jsx('option', { style: themedOption, value: 'prism_ml', children: 'Prism-ML' })] }), requestedKind === activeKind ? null : jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || !available.installed, onClick: () => useRuntime(requestedKind), children: `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} 사용` }), jsx('button', { className: `${primary} shrink-0`, disabled: runtimeBusy || serverBusy || (Boolean(available.version) && !available.update_available), 'aria-label': `${requestedKind === 'prism_ml' ? 'Prism-ML' : 'official'} runtime 업데이트`, title: available.version && available.latest_version ? `현재 ${available.version} · GitHub 최신 ${available.latest_version}` : undefined, onClick: install, children: '업데이트' })] }),
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-4', children: [
+      jsx('div', { children: [jsx('h1', { className: 'text-xl font-semibold tracking-tight', children: 'llama.cpp Manager' }), jsx('p', { className: `mt-1 ${muted}`, children: 'runtime, 모델, parameter를 분리해 관리합니다.' })] }),
+      jsxs('div', { className: 'flex flex-wrap items-center justify-end gap-1', 'aria-label': 'runtime 버전 및 업데이트', children: [
+        jsx(RuntimeUpdateControl, { kind: 'official', label: 'Official', option: status?.runtime_options?.official, disabled: runtimeBusy || serverBusy, onInstall: install }),
+        jsx('span', { className: 'text-(--ui-text-tertiary)', 'aria-hidden': true, children: '|' }),
+        jsx(RuntimeUpdateControl, { kind: 'prism_ml', label: 'Prism-ML', option: status?.runtime_options?.prism_ml, disabled: runtimeBusy || serverBusy, onInstall: install })
+      ] })
+    ] }),
     jsx(ExecutionProfilesPanel, { status, onRefresh }),
     jsx(ServerLogPanel, { status, jobs, pushConnected }),
     jsx(ResourceMetricsPanel, { status, pushConnected }),
@@ -623,17 +661,6 @@ function ModelRow({ model, status, refresh }) {
       jsx('button', { className: compactPrimary, disabled: busy || !selectedPresetId, onClick: applyPreset, children: '적용' }),
       presetMessage ? jsx('span', { className: `basis-full text-xs ${presetMessage.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-secondary)'}`, role: 'status', children: presetMessage }) : null
     ] })
-  ] })
-}
-
-function SettingsAdder({ settings, options, query, setQuery, selectedKey, setSelectedKey, value, setValue, onAdd, onRemove }) {
-  const selected = options.find(option => option.key === selectedKey)
-  return jsxs('div', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) p-4', children: [
-    jsx('p', { className: `mb-3 ${muted}`, children: '현재 llama-server가 허용하는 parameter를 검색해 모델별 설정으로 추가합니다.' }),
-    Object.keys(settings).length ? jsxs('div', { className: 'mb-4 space-y-2', children: Object.entries(settings).map(([key, current]) => jsxs('div', { className: 'flex items-center justify-between gap-3 rounded bg-(--ui-bg-tertiary) px-3 py-2 text-sm', children: [jsxs('span', { className: 'min-w-0', children: [jsx('code', { children: key }), jsx('span', { className: `ml-2 ${muted}`, children: `- ${current}` })] }), jsx('button', { className: button, onClick: () => onRemove(key), children: '삭제' })] }, key)) }) : null,
-    jsx('input', { className: input, value: query, placeholder: 'parameter 검색 (예: ctx, flash, batch)', onChange: event => setQuery(event.target.value) }),
-    options.length ? jsx('div', { className: 'mt-2 max-h-48 overflow-y-auto rounded-md border border-(--ui-stroke-secondary)', children: options.map(option => jsx('button', { className: `flex w-full items-start justify-between gap-3 border-b border-(--ui-stroke-secondary) px-3 py-2 text-left text-sm last:border-0 hover:bg-(--ui-bg-tertiary) ${selectedKey === option.key ? 'bg-(--ui-bg-tertiary)' : ''}`, onClick: () => setSelectedKey(option.key), children: [jsxs('span', { className: 'min-w-0', children: [jsx('code', { children: option.name }), option.value_hint ? jsx('span', { className: `ml-2 ${muted}`, children: option.value_hint }) : null, option.description ? jsx('span', { className: `mt-1 block text-xs ${muted}`, children: option.description }) : null] }), jsx('span', { className: `shrink-0 text-xs ${muted}`, children: option.key })] }, option.key)) }) : query.trim() ? jsx('p', { className: `mt-2 text-xs ${muted}`, children: '일치하는 parameter가 없습니다.' }) : null,
-    selected ? jsxs('div', { className: 'mt-3 flex gap-2', children: [jsx('input', { className: input, value, placeholder: selected.value_hint || `${selected.key} 값`, onChange: event => setValue(event.target.value), onKeyDown: event => { if (event.key === 'Enter') onAdd() } }), jsx('button', { className: primary, disabled: !value.trim(), onClick: onAdd, children: '설정 추가' })] }) : null
   ] })
 }
 

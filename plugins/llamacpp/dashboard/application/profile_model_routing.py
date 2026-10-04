@@ -6,7 +6,7 @@ from typing import Iterable
 
 _LOCAL_PROVIDER = "llamacpp-local"
 _REMOTE_PROVIDER = "openai-codex"
-_REMOTE_MAIN = "gpt-5.6-luna-high"
+_REMOTE_MAIN = "gpt-5.6-luna"
 _REMOTE_FALLBACK = "gpt-5.6-luna"
 _REMOTE_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
@@ -61,7 +61,10 @@ def _set_aux_compression(lines: list[str], provider: str, model: str) -> None:
     if aux_start is None:
         if lines and lines[-1].strip():
             lines.append("")
-        lines.extend(["auxiliary:", "  compression:", f"    provider: {provider}", f"    model: {model}"])
+        lines.extend([
+            "auxiliary:", "  compression:", f"    provider: {provider}",
+            f"    model: {model}", "    reasoning_effort: high",
+        ])
         return
     aux_end = _root_end(lines, aux_start)
     compression = next(
@@ -69,14 +72,17 @@ def _set_aux_compression(lines: list[str], provider: str, model: str) -> None:
         None,
     )
     if compression is None:
-        lines[aux_end:aux_end] = ["  compression:", f"    provider: {provider}", f"    model: {model}"]
+        lines[aux_end:aux_end] = [
+            "  compression:", f"    provider: {provider}",
+            f"    model: {model}", "    reasoning_effort: high",
+        ]
         return
     child_end = next(
         (index for index in range(compression + 1, aux_end)
          if lines[index].startswith("  ") and not lines[index].startswith("    ") and lines[index].strip()),
         aux_end,
     )
-    for key, value in (("provider", provider), ("model", model)):
+    for key, value in (("provider", provider), ("model", model), ("reasoning_effort", "high")):
         prefix = f"    {key}:"
         found = next((index for index in range(compression + 1, child_end) if lines[index].startswith(prefix)), None)
         replacement = f"    {key}: {value}"
@@ -99,11 +105,13 @@ def sync_profile_models(text: str, *, base_url: str, main_served: bool,
         model_values = (
             ("provider", _LOCAL_PROVIDER), ("default", "main-local"),
             ("base_url", base_url), ("api_mode", "chat_completions"),
+            ("reasoning_effort", "high"),
         )
     else:
         model_values = (
             ("provider", _REMOTE_PROVIDER), ("default", _REMOTE_MAIN),
             ("base_url", _REMOTE_BASE_URL), ("api_mode", "codex_responses"),
+            ("reasoning_effort", "high"),
         )
     _set_mapping(lines, "model", model_values)
     _replace_root(lines, "fallback_providers", [

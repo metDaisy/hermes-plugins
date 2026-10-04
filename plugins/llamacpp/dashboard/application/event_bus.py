@@ -65,13 +65,13 @@ def classify_activity_line(line: str) -> tuple[str, list[str]]:
     if "model loaded" in lowered or "listening on http" in lowered or "server is listening" in lowered:
         return "worker_state", ["logs", "status", "metrics"]
     if "prompt processing" in lowered:
-        return "prompt_progress", ["logs", "metrics"]
+        return "prompt_progress", ["logs"]
     if "prompt eval time" in lowered:
-        return "prompt_completed", ["logs", "metrics"]
+        return "prompt_completed", ["logs"]
     if "eval time" in lowered or "n_gen =" in lowered:
-        return "generation_progress", ["logs", "metrics"]
+        return "generation_progress", ["logs"]
     if "stop processing" in lowered:
-        return "request_finished", ["logs", "metrics"]
+        return "request_finished", ["logs"]
     return "log", ["logs"]
 
 
