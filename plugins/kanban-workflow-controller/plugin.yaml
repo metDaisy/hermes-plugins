@@ -1,0 +1,30 @@
+manifest_version: 2
+api_version: 1
+name: kanban-workflow-controller
+label: Kanban Workflow Controller
+version: 0.1.0
+description: Routes actionable Kanban events to the existing Project Manager workflow session.
+author: metDaisy
+license: MIT
+kind: standalone
+provides_hooks:
+  - pre_llm_call
+  - on_kanban_dispatch_tick
+tags:
+  - kanban
+  - workflow
+  - orchestration
+  - events
+config_schema:
+  board:
+    type: string
+    required: true
+    description: Kanban board slug monitored by the controller.
+  coordinator_profile:
+    type: string
+    default: project-manager
+    description: Profile that owns the persistent workflow coordinator session.
+  decision_comment_author:
+    type: string
+    default: dashboard
+    description: Exact Kanban comment author treated as the human response on blocked Decision cards.
