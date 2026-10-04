@@ -14,6 +14,7 @@ REQUIRED = (
     "dashboard/coordinator_server.py",
     "dashboard/inference_proxy.py",
     "dashboard/backend_impl.py",
+    "dashboard/application/preset_store.py",
     "dashboard/application/coordinator_lock.py",
     "dashboard/application/desktop_leases.py",
     "dashboard/application/execution_profiles.py",

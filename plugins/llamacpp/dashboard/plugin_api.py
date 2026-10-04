@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,7 +34,9 @@ _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 1
-COORDINATOR_BUILD = "0.2.91"
+COORDINATOR_BUILD = "0.3.5"
+_READ_ONLY_BACKEND_MODULE = "llamacpp_profile_read_only_backend"
+_read_only_backend_lock = threading.RLock()
 
 
 def _health_payload() -> dict[str, object] | None:
@@ -217,10 +221,12 @@ def _ensure_coordinator(*, allow_start: bool = False) -> None:
 
 def _coordinator_start_requested(method: str, path: str, body: bytes) -> bool:
     normalized = path.strip("/")
-    if method != "POST" or normalized not in {"server", "profiles/start"}:
+    if method != "POST":
         return False
-    if normalized == "profiles/start":
+    if normalized in {"profiles/start", "runtime/install"}:
         return True
+    if normalized != "server":
+        return False
     try:
         payload = json.loads(body.decode("utf-8")) if body else {}
     except (UnicodeDecodeError, ValueError):
@@ -229,40 +235,100 @@ def _coordinator_start_requested(method: str, path: str, body: bytes) -> bool:
 
 
 def _read_only_backend():
-    try:
-        from dashboard import backend_impl
-    except ImportError:  # pragma: no cover - standalone plugin loader fallback
-        import backend_impl  # type: ignore[no-redef]
-    return backend_impl
+    with _read_only_backend_lock:
+        loaded = sys.modules.get(_READ_ONLY_BACKEND_MODULE)
+        if loaded is not None:
+            return loaded
+        backend_path = Path(__file__).with_name("backend_impl.py")
+        spec = importlib.util.spec_from_file_location(_READ_ONLY_BACKEND_MODULE, backend_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load read-only llama.cpp backend from {backend_path}")
+        backend = importlib.util.module_from_spec(spec)
+        sys.modules[_READ_ONLY_BACKEND_MODULE] = backend
+        try:
+            spec.loader.exec_module(backend)
+        except BaseException:
+            sys.modules.pop(_READ_ONLY_BACKEND_MODULE, None)
+            raise
+        return backend
 
 
-def _stopped_payload(path: str, query: object) -> dict[str, object] | None:
-    """Serve safe read-only snapshots while intentional stop blocks the coordinator."""
+def _stopped_payload(
+    path: str,
+    query: object,
+    method: str = "GET",
+    body: bytes = b"",
+) -> dict[str, object] | None:
+    """Serve snapshots and safe parameter persistence while the coordinator is stopped."""
     normalized = path.strip("/")
     backend = _read_only_backend()
-    if normalized == "status":
-        payload = backend.status()
-        payload["server_running"] = False
-        payload["coordinator"] = {
-            "ok": False,
-            "stopped": True,
-            "port": COORDINATOR_PORT,
-            "singleton": True,
-            "inference_base_url": f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
-            "cancellation_propagation": True,
-        }
-        return payload
     getter = getattr(query, "get", lambda *_args: None)
-    if normalized == "logs":
-        return backend.activity_logs(max(1, min(int(getter("limit") or 250), 1000)))
-    if normalized == "metrics":
-        return backend.resource_metrics(int(getter("window") or 60))
-    if normalized == "jobs":
-        return {"jobs": []}
-    if normalized == "hf-models":
-        return backend._local_hf_models()
-    if normalized == "presets":
-        return backend.presets(str(getter("model_id") or ""))
+    if method == "GET":
+        if normalized == "status":
+            payload = backend.status()
+            payload["server_running"] = False
+            payload["coordinator"] = {
+                "ok": False,
+                "stopped": True,
+                "port": COORDINATOR_PORT,
+                "singleton": True,
+                "inference_base_url": f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
+                "cancellation_propagation": True,
+            }
+            return payload
+        if normalized == "logs":
+            return backend.activity_logs(max(1, min(int(getter("limit") or 250), 1000)))
+        if normalized == "metrics":
+            return backend.resource_metrics(int(getter("window") or 60))
+        if normalized == "jobs":
+            return {"jobs": []}
+        if normalized == "hf-models":
+            return backend._local_hf_models()
+        if normalized == "presets":
+            return backend.presets(str(getter("model_id") or ""))
+        if normalized == "settings":
+            query_text = str(getter("q") or "").strip().lower()
+            limit = max(1, min(int(getter("limit") or 50), 100))
+            options = [
+                option for option in backend._option_list()
+                if query_text and (
+                    query_text in option["key"].lower()
+                    or query_text in option["name"].lower()
+                    or query_text in option["description"].lower()
+                )
+            ]
+            return {
+                "editable": True,
+                "query": str(getter("q") or ""),
+                "options": options[:limit],
+                "runtime": str(backend._server_executable() or ""),
+                "message": "plugin이 관리하는 llama-server --help에서 검색합니다.",
+            }
+        if normalized.startswith("settings/"):
+            return backend.model_settings(normalized.removeprefix("settings/"))
+        return None
+
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON body must be an object")
+
+    if method == "PUT" and normalized.startswith("settings/"):
+        return backend.save_model_settings(normalized.removeprefix("settings/"), payload)
+    if method == "POST" and normalized == "presets":
+        return backend.create_preset(payload)
+
+    parts = normalized.split("/")
+    if len(parts) >= 2 and parts[0] == "presets":
+        preset_id = parts[1]
+        if method == "POST" and len(parts) == 3 and parts[2] == "apply":
+            return backend.apply_preset(preset_id, payload)
+        if method == "PATCH" and len(parts) == 2:
+            return backend.rename_preset(preset_id, payload)
+        if method == "DELETE" and len(parts) == 2:
+            return backend.delete_preset(preset_id)
     return None
 
 
@@ -359,8 +425,11 @@ def _streaming_response(client: httpx.AsyncClient, upstream: httpx.Response) -> 
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
 async def proxy(request: Request, path: str) -> StreamingResponse:
-    if request.method == "GET" and COORDINATOR_STOP_MARKER.exists():
-        stopped_payload = await asyncio.to_thread(_stopped_payload, path, request.query_params)
+    body = await request.body()
+    if COORDINATOR_STOP_MARKER.exists():
+        stopped_payload = await asyncio.to_thread(
+            _stopped_payload, path, request.query_params, request.method, body,
+        )
         if stopped_payload is not None:
             return JSONResponse(stopped_payload)
     client = httpx.AsyncClient(
@@ -369,7 +438,6 @@ async def proxy(request: Request, path: str) -> StreamingResponse:
         follow_redirects=False,
     )
     try:
-        body = await request.body()
         await asyncio.to_thread(
             _ensure_coordinator,
             allow_start=_coordinator_start_requested(request.method, path, body),

@@ -4,6 +4,3 @@ __pycache__/
 
 # Local Codebase Memory graph artifacts
 .codebase-memory/**
-
-# Local Git hooks
-.githooks/

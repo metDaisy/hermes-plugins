@@ -10,6 +10,7 @@ from typing import Any
 _ROLE_LABELS = {"main": "Main", "compression": "Compress", "server": "Server"}
 _MODEL_ROLES = {"main-local": "main", "compression-local": "compression"}
 _SESSION_DISPLAY_LIMIT = 24
+_NATIVE_ELAPSED_PREFIX = re.compile(r"^(\d+)\.(\d{2})\.(\d{3})\.(\d{3})(?:\s|$)")
 
 
 def _display_session(session: str) -> str:
@@ -27,6 +28,34 @@ def _unwrap(line: str) -> tuple[str, str]:
             pass
     level = "warning" if re.search(r"(?:^|\s)W\s+(?:srv|cmn|slot)", text) else "error" if re.search(r"(?:^|\s)E\s+(?:srv|cmn|slot)", text) else "info"
     return text, level
+
+
+def _native_elapsed_seconds(line: str) -> float | None:
+    text, _level = _unwrap(line)
+    match = _NATIVE_ELAPSED_PREFIX.match(text)
+    if not match:
+        return None
+    minutes, seconds, milliseconds, microseconds = (int(value) for value in match.groups())
+    return minutes * 60.0 + seconds + milliseconds / 1000.0 + microseconds / 1_000_000.0
+
+
+def _event_observed_times(raw_lines: list[str], latest_observed_at: float | None) -> dict[int, float]:
+    if latest_observed_at is None:
+        return {}
+    elapsed = [(index, value) for index, raw in enumerate(raw_lines)
+               if (value := _native_elapsed_seconds(raw)) is not None]
+    if not elapsed:
+        return {}
+    _last_index, last_elapsed = elapsed[-1]
+    epoch_start = 0
+    next_elapsed = last_elapsed
+    for index, value in reversed(elapsed[:-1]):
+        if value > next_elapsed + 1.0:
+            epoch_start = index + 1
+            break
+        next_elapsed = value
+    anchor = float(latest_observed_at)
+    return {index: anchor - (last_elapsed - value) for index, value in elapsed if index >= epoch_start}
 
 
 def _role_for_model(model: str) -> str:
@@ -52,7 +81,7 @@ def _emit(events: list[dict[str, Any]], lines: list[str], role: str, event: str,
             "profile": profile,
             "session": session,
             "request_id": str(context.get("request_id") or ""),
-            "observed_at": float(context.get("recorded_at") or 0),
+            "observed_at": float(context.get("observed_at") or context.get("recorded_at") or 0),
         } if identity else {}),
         **fields,
     })
@@ -63,13 +92,15 @@ def contextual_activity_tail(activity_path: Path, context_path: Path,
     """Merge request identities journaled at activity-log byte offsets."""
     bounded = max(1, min(int(limit), 500))
     try:
-        size_bytes = activity_path.stat().st_size
+        stat = activity_path.stat()
+        size_bytes = stat.st_size
+        modified_at = stat.st_mtime
         read_start = max(0, size_bytes - 256 * 1024)
         with activity_path.open("rb") as stream:
             stream.seek(read_start)
             data = stream.read()
     except OSError:
-        return {"path": str(activity_path), "lines": [], "size_bytes": 0}
+        return {"path": str(activity_path), "lines": [], "size_bytes": 0, "modified_at": 0.0}
 
     positioned: list[tuple[int, str]] = []
     offset = read_start
@@ -81,7 +112,7 @@ def contextual_activity_tail(activity_path: Path, context_path: Path,
         positioned.append((start, chunk.decode("utf-8", errors="replace").rstrip("\r\n")))
     positioned = positioned[-bounded:]
     if not positioned:
-        return {"path": str(activity_path), "lines": [], "size_bytes": size_bytes}
+        return {"path": str(activity_path), "lines": [], "size_bytes": size_bytes, "modified_at": modified_at}
 
     contexts: list[dict[str, Any]] = []
     try:
@@ -109,18 +140,19 @@ def contextual_activity_tail(activity_path: Path, context_path: Path,
             merged.append(json.dumps(pending[context_index], ensure_ascii=False, separators=(",", ":")))
             context_index += 1
         merged.append(line)
-    return {"path": str(activity_path), "lines": merged, "size_bytes": size_bytes}
+    return {"path": str(activity_path), "lines": merged, "size_bytes": size_bytes, "modified_at": modified_at}
 
 
-def project_activity_lines(raw_lines: list[str]) -> dict[str, Any]:
+def project_activity_lines(raw_lines: list[str], *, latest_observed_at: float | None = None) -> dict[str, Any]:
     """Return allowlisted events; unknown lines and request content are suppressed."""
     events: list[dict[str, Any]] = []
     lines: list[str] = []
     current_role = "server"
     port_roles: dict[str, str] = {}
     contexts: dict[str, dict[str, Any]] = {}
+    observed_times = _event_observed_times(raw_lines, latest_observed_at)
 
-    for raw in raw_lines:
+    for line_index, raw in enumerate(raw_lines):
         try:
             context = json.loads(str(raw or "").strip())
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -158,6 +190,9 @@ def project_activity_lines(raw_lines: list[str]) -> dict[str, Any]:
 
         port_prefix = re.search(r"\[\s*(\d+)\]", text)
         role = port_roles.get(port_prefix.group(1), current_role) if port_prefix else current_role
+        observed_at = observed_times.get(line_index)
+        if observed_at is not None and role in contexts:
+            contexts[role]["observed_at"] = observed_at
 
         listening = re.search(r"listening on http://[^:]+:(\d+)", text)
         if listening:

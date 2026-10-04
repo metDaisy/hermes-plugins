@@ -44,7 +44,7 @@ try:
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
     from .application.activity_log_projection import contextual_activity_tail, project_activity_lines
-    from .application.resource_metrics import aggregate_profile_metrics
+    from .application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
     from .application.resource_history import ResourceHistoryStore, worker_memory_sample
     from .application.event_bus import publish_event, start_activity_pump
     from .application.profile_model_routing import sync_profile_models
@@ -94,7 +94,7 @@ except ImportError:
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
     from application.activity_log_projection import contextual_activity_tail, project_activity_lines
-    from application.resource_metrics import aggregate_profile_metrics
+    from application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
     from application.resource_history import ResourceHistoryStore, worker_memory_sample
     from application.event_bus import publish_event, start_activity_pump
     from application.profile_model_routing import sync_profile_models
@@ -438,7 +438,16 @@ def _server_executable_for_runtime(runtime_kind: str) -> Path | None:
         try:
             adapter = get_backend(normalized)
             selected_path = state.get("runtime_path") or state.get("custom_runtime_path")
-            raw_path = selected_path if _runtime_kind(state) == normalized and selected_path else adapter.managed_root(MACHINE_ROOT)
+            if _runtime_kind(state) == normalized and selected_path:
+                raw_path = selected_path
+            elif normalized == "prism_ml":
+                tag = str(state.get("prism_release_tag") or "").strip()
+                backend = str(state.get("prism_backend") or "").strip()
+                raw_path = adapter.managed_root(MACHINE_ROOT)
+                if tag and backend:
+                    raw_path = raw_path / tag / backend
+            else:
+                raw_path = adapter.managed_root(MACHINE_ROOT)
             return adapter.resolve_executable(raw_path)
         except RuntimeError:
             return None
@@ -623,7 +632,11 @@ def _apply_profile_updates(updates: list[tuple[Path, str, str]]) -> None:
 def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
     base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
     worker_base_url = f"http://127.0.0.1:{port}/v1"
-    endpoint = _sync_execution_profile_endpoint(fallback_model=model_id)
+    existing = _state().get("custom_endpoint")
+    if isinstance(existing, dict) and existing.get("base_url") == base_url:
+        endpoint = dict(existing)
+    else:
+        endpoint = _sync_execution_profile_endpoint(fallback_model=model_id)
     endpoint["worker_base_url"] = worker_base_url
     return endpoint
 
@@ -667,8 +680,8 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
             updated = sync_profile_models(
                 updated,
                 base_url=base_url,
-                main_served=True,
-                compression_served="compression-local" in execution_models,
+                main_served=path.parent.name != "main",
+                compression_served=(None if path.parent.name == "main" else "compression-local" in execution_models),
             )
             if updated != text:
                 updates.append((path, text, updated))
@@ -688,7 +701,7 @@ def _unregister_custom_endpoint() -> None:
                 updated,
                 base_url=f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
                 main_served=False,
-                compression_served=False,
+                compression_served=None if path.parent.name == "main" else False,
             )
             changed = changed or routed != updated
             updated = routed
@@ -846,7 +859,7 @@ def _start_server() -> None:
 def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]:
     raw = contextual_activity_tail(ACTIVITY_LOG_PATH, REQUEST_CONTEXT_LOG_PATH, limit)
     raw_lines = list(raw.get("lines") or [])
-    projected = project_activity_lines(raw_lines)
+    projected = project_activity_lines(raw_lines, latest_observed_at=float(raw.get("modified_at") or 0) or None)
     return {
         **raw,
         "role": "activity",
@@ -858,8 +871,8 @@ def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]
 
 def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dict[str, Any]:
     requested = int(window)
-    if requested < 5 or requested > 86400:
-        raise ValueError("window must be between 5 and 86400 seconds")
+    if requested < 5 or requested > 14 * 24 * 3600:
+        raise ValueError("window must be between 5 and 1209600 seconds")
     projected = _server_log_tail(500)
     result = aggregate_profile_metrics(
         list(projected.get("events") or []), window_seconds=min(requested, 300),
@@ -888,7 +901,7 @@ def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dic
             "tokens_per_minute": 0,
             "prompt_tokens_per_second": None,
             "generation_tokens_per_second": None,
-            "context_tokens": 0,
+            "context_tokens": None,
             "session": "",
             "last_activity_at": 0.0,
         })
@@ -897,6 +910,10 @@ def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dic
             "context_limit": int(role_settings.get("ctx-size") or 0),
             "active": role == active_role and running,
         })
+    slot_context = read_worker_slot_context(int(state.get("port") or 18434)) if running else None
+    active_metric = role_metrics.get(active_role) if isinstance(role_metrics.get(active_role), dict) else None
+    if active_metric is not None and slot_context is not None:
+        active_metric.update(slot_context)
     worker_pid = int(state.get("pid") or 0) if running else 0
     result["worker"] = {
         "running": running,
@@ -934,7 +951,8 @@ def record_resource_sample() -> dict[str, Any] | None:
     def context_percent(role: str) -> float | None:
         metric = roles.get(role) if isinstance(roles.get(role), dict) else {}
         limit = int(metric.get("context_limit") or 0)
-        return min(100.0, int(metric.get("context_tokens") or 0) / limit * 100.0) if limit else None
+        tokens = metric.get("context_tokens")
+        return min(100.0, int(tokens) / limit * 100.0) if limit and tokens is not None else None
 
     sample = {
         "at": sampled_at,
@@ -948,9 +966,6 @@ def record_resource_sample() -> dict[str, Any] | None:
         "mainPrompt": recent_rate("main", "prompt_tokens_per_second"),
         "mainGeneration": recent_rate("main", "generation_tokens_per_second"),
         "mainContextPercent": context_percent("main"),
-        "auxPrompt": recent_rate("compression", "prompt_tokens_per_second"),
-        "auxGeneration": recent_rate("compression", "generation_tokens_per_second"),
-        "auxContextPercent": context_percent("compression"),
     }
     RESOURCE_HISTORY.append(sample)
     publish_event("resource_sample", refresh=[], snapshot=snapshot, sample=sample)

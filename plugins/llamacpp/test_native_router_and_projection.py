@@ -217,8 +217,60 @@ class ActivityLogProjectionTests(unittest.TestCase):
         self.assertEqual(result["events"][0]["request_id"], "request-1")
         self.assertEqual(result["events"][0]["observed_at"], 1000.0)
 
+    def test_uses_native_log_elapsed_time_for_long_request_metrics(self) -> None:
+        import json
+        from dashboard.application.activity_log_projection import project_activity_lines
+        from dashboard.application.resource_metrics import aggregate_profile_metrics
+
+        projected = project_activity_lines([
+            json.dumps({
+                "type": "hermes_request_context", "role": "main", "profile": "main",
+                "session": "session-1", "request_id": "request-1", "recorded_at": 1000.0,
+            }),
+            "00.45.000.000 I slot print_timing: n_gen = 100, tg = 15.0 t/s",
+            "00.46.000.000 I slot print_timing: prompt eval time = 2000 ms / 1000 tokens",
+            "00.46.100.000 I slot release: stop processing: n_tokens = 8192",
+        ], latest_observed_at=1046.1)
+
+        metrics = aggregate_profile_metrics(projected["events"], now=1046.1, window_seconds=60)
+        main = metrics["roles"]["main"]
+        self.assertAlmostEqual(main["prompt_tokens_per_second"], 500.0)
+        self.assertAlmostEqual(main["generation_tokens_per_second"], 15.0)
+        self.assertEqual(main["context_tokens"], 8192)
+        self.assertGreater(main["last_activity_at"], 1045.0)
+
 
 class ResourceMetricsTests(unittest.TestCase):
+    def test_reads_active_worker_slot_context_without_prompt_content(self) -> None:
+        import json
+        from dashboard.application.resource_metrics import read_worker_slot_context
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read() -> bytes:
+                return json.dumps([
+                    {"id": 0, "is_processing": False, "n_ctx": 131072, "n_prompt_tokens": 999},
+                    {"id": 1, "is_processing": True, "n_ctx": 131072, "n_prompt_tokens": 95182,
+                     "prompt": "must not be projected"},
+                ]).encode("utf-8")
+
+        captured = []
+
+        def open_url(request, timeout):
+            captured.append((request.full_url, timeout))
+            return Response()
+
+        result = read_worker_slot_context(8180, opener=open_url)
+
+        self.assertEqual(result, {"context_tokens": 95182, "context_limit": 131072})
+        self.assertEqual(captured, [("http://127.0.0.1:8180/slots", 0.5)])
+
     def test_resource_sample_pushes_snapshot_and_point_without_metrics_refetch(self) -> None:
         from dashboard import backend_impl
 
@@ -252,6 +304,9 @@ class ResourceMetricsTests(unittest.TestCase):
             result = backend_impl.record_resource_sample()
 
         self.assertIsNotNone(result)
+        self.assertNotIn("auxPrompt", result)
+        self.assertNotIn("auxGeneration", result)
+        self.assertNotIn("auxContextPercent", result)
         append.assert_called_once_with(result)
         publish.assert_called_once_with(
             "resource_sample", refresh=[], snapshot=snapshot, sample=result,
@@ -297,6 +352,31 @@ class ResourceMetricsTests(unittest.TestCase):
         self.assertEqual(result["roles"]["compression"]["generation_tokens_per_second"], 20.0)
         self.assertEqual(result["roles"]["compression"]["context_tokens"], 4096)
 
+    def test_projects_recent_compression_calls_with_input_context_and_duration(self) -> None:
+        from dashboard.application.resource_metrics import aggregate_profile_metrics
+
+        first = {"profile": "main", "session": "session-1", "request_id": "aux-1",
+                 "role": "compression", "observed_at": 1000.0}
+        second = {"profile": "reviewer", "session": "session-2", "request_id": "aux-2",
+                  "role": "compression", "observed_at": 1010.0}
+        result = aggregate_profile_metrics([
+            {**first, "event": "prompt_completed", "prompt_tokens": 48000, "prompt_eval_ms": 12000.0},
+            {**first, "event": "inference_completed", "observed_at": 1004.0,
+             "total_tokens": 900, "total_ms": 18400.0},
+            {**second, "event": "prompt_completed", "prompt_tokens": 72000, "prompt_eval_ms": 18000.0},
+        ], now=1020.0, window_seconds=60)
+
+        self.assertEqual(result["compression_calls"], [
+            {
+                "request_id": "aux-2", "profile": "reviewer", "session": "session-2",
+                "input_context_tokens": 72000, "duration_ms": None, "completed_at": 1010.0,
+            },
+            {
+                "request_id": "aux-1", "profile": "main", "session": "session-1",
+                "input_context_tokens": 48000, "duration_ms": 18400.0, "completed_at": 1004.0,
+            },
+        ])
+
     def test_backend_projects_configured_main_and_auxiliary_models_without_recent_activity(self) -> None:
         from dashboard import backend_impl
 
@@ -314,10 +394,14 @@ class ResourceMetricsTests(unittest.TestCase):
         }
         with patch.object(backend_impl, "_server_log_tail", return_value={"events": []}), \
                 patch.object(backend_impl, "_state", return_value=state), \
-                patch.object(backend_impl, "_is_server_running", return_value=True):
+                patch.object(backend_impl, "_is_server_running", return_value=True), \
+                patch.object(backend_impl, "read_worker_slot_context", return_value={
+                    "context_tokens": 95182, "context_limit": 131072,
+                }):
             result = backend_impl._resource_metrics(60)
 
         self.assertEqual(result["roles"]["main"]["model_id"], "main-model")
+        self.assertEqual(result["roles"]["main"]["context_tokens"], 95182)
         self.assertEqual(result["roles"]["main"]["context_limit"], 131072)
         self.assertTrue(result["roles"]["main"]["active"])
         self.assertEqual(result["roles"]["compression"]["model_id"], "aux-model")
@@ -360,6 +444,23 @@ class ProfileModelRoutingTests(unittest.TestCase):
         self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", updated)
         self.assertIn("    reasoning_effort: high", updated)
         self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", updated)
+
+    def test_keeps_user_managed_compression_when_management_is_disabled(self) -> None:
+        from dashboard.application.profile_model_routing import sync_profile_models
+
+        custom = self.BASE.replace(
+            "    provider: openai-codex\n    model: gpt-5.6-luna\n    reasoning_effort: medium",
+            "    provider: llamacpp-local\n    model: compression-local\n    reasoning_effort: high",
+        )
+        updated = sync_profile_models(
+            custom, base_url="http://127.0.0.1:18380/v1",
+            main_served=False, compression_served=None,
+        )
+
+        self.assertIn(
+            "  compression:\n    provider: llamacpp-local\n    model: compression-local\n    reasoning_effort: high",
+            updated,
+        )
 
     def test_keeps_aux_on_luna_high_reasoning_when_only_main_is_local(self) -> None:
         from dashboard.application.profile_model_routing import sync_profile_models
@@ -661,9 +762,15 @@ class ProductionIntegrationTests(unittest.TestCase):
 
             for path in profiles:
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("  default: main-local", text, path.parent.name)
-                self.assertIn("    model: compression-local", text, path.parent.name)
-                self.assertIn("    reasoning_effort: high", text, path.parent.name)
+                if path.parent.name == "main":
+                    self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna", text)
+                    self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", text)
+                    self.assertIn("    reasoning_effort: medium", text)
+                    self.assertNotIn("    model: compression-local", text)
+                else:
+                    self.assertIn("  default: main-local", text, path.parent.name)
+                    self.assertIn("    model: compression-local", text, path.parent.name)
+                    self.assertIn("    reasoning_effort: high", text, path.parent.name)
                 self.assertIn('default_model: "main-local"', text, path.parent.name)
                 self.assertIn('"main-local":', text, path.parent.name)
 
@@ -697,7 +804,10 @@ class ProductionIntegrationTests(unittest.TestCase):
                 self.assertNotIn("# BEGIN llamacpp endpoint (managed)", restored, path.parent.name)
                 self.assertIn("  default: gpt-5.6-luna", restored, path.parent.name)
                 self.assertIn("  reasoning_effort: high", restored, path.parent.name)
-                self.assertIn("    model: gpt-5.6-luna", restored, path.parent.name)
+                if path.parent.name == "main":
+                    self.assertIn("    model: compression-local", restored)
+                else:
+                    self.assertIn("    model: gpt-5.6-luna", restored, path.parent.name)
                 self.assertIn("    reasoning_effort: high", restored, path.parent.name)
                 self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", restored)
 

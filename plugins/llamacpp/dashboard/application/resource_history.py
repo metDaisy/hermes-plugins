@@ -11,7 +11,6 @@ from typing import Any, Callable
 _ALLOWED_FIELDS = {
     "at", "workerPid", "workerRssBytes", "workerPrivateBytes", "modelId", "activeRole",
     "active", "queued", "mainPrompt", "mainGeneration", "mainContextPercent",
-    "auxPrompt", "auxGeneration", "auxContextPercent",
 }
 _PEAK_FIELDS = {"workerRssBytes", "workerPrivateBytes", "active", "queued"}
 
@@ -40,7 +39,7 @@ def worker_memory_sample(pid: int | None, process_factory: Callable[[int], Any] 
 class ResourceHistoryStore:
     """Append JSONL samples and return downsampled rolling windows."""
 
-    def __init__(self, path: Path, retention_seconds: int = 7 * 24 * 3600) -> None:
+    def __init__(self, path: Path, retention_seconds: int = 14 * 24 * 3600) -> None:
         self._path = path
         self._retention_seconds = max(3600, int(retention_seconds))
         self._lock = threading.RLock()
@@ -63,7 +62,7 @@ class ResourceHistoryStore:
 
     def read(self, window_seconds: int, *, now: float | None = None, max_points: int = 360) -> list[dict[str, Any]]:
         current = float(now if now is not None else time.time())
-        cutoff = current - max(5, min(int(window_seconds), 24 * 3600))
+        cutoff = current - max(5, min(int(window_seconds), 14 * 24 * 3600))
         with self._lock:
             rows = [row for row in self._rows() if float(row.get("at") or 0) >= cutoff]
         rows.sort(key=lambda row: float(row.get("at") or 0))

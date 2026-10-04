@@ -95,7 +95,7 @@ def _set_aux_compression(lines: list[str], provider: str, model: str) -> None:
 
 
 def sync_profile_models(text: str, *, base_url: str, main_served: bool,
-                        compression_served: bool) -> str:
+                        compression_served: bool | None) -> str:
     """Apply the user's fixed model policy while preserving unrelated settings."""
     newline = "\r\n" if "\r\n" in text else "\n"
     trailing = text.endswith(("\n", "\r"))
@@ -117,10 +117,11 @@ def sync_profile_models(text: str, *, base_url: str, main_served: bool,
     _replace_root(lines, "fallback_providers", [
         "fallback_providers:", f"  - provider: {_REMOTE_PROVIDER}", f"    model: {_REMOTE_FALLBACK}",
     ])
-    _set_aux_compression(
-        lines,
-        _LOCAL_PROVIDER if compression_served else _REMOTE_PROVIDER,
-        "compression-local" if compression_served else _REMOTE_MAIN,
-    )
+    if compression_served is not None:
+        _set_aux_compression(
+            lines,
+            _LOCAL_PROVIDER if compression_served else _REMOTE_PROVIDER,
+            "compression-local" if compression_served else _REMOTE_MAIN,
+        )
     result = newline.join(lines)
     return result + newline if trailing else result

@@ -60,6 +60,17 @@ class PresetStore:
         if "parameter_presets" not in state and "model_presets" not in state:
             return False
         with self._lock, self._connection() as connection:
+            migrated = connection.execute(
+                "SELECT 1 FROM metadata WHERE key = 'legacy-json-migrated-v1'"
+            ).fetchone()
+            existing = connection.execute(
+                "SELECT 1 FROM parameter_presets LIMIT 1"
+            ).fetchone()
+            if migrated or existing:
+                connection.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES ('legacy-json-migrated-v1', '1')"
+                )
+                return True
             connection.execute("DELETE FROM model_presets")
             connection.execute("DELETE FROM parameter_presets")
             raw_presets = state.get("parameter_presets")

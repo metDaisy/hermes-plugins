@@ -615,6 +615,27 @@ class CoordinatorEventBusTests(unittest.TestCase):
 
 
 class ResourceHistoryTests(unittest.TestCase):
+    def test_keeps_and_reads_two_second_samples_for_fourteen_days(self) -> None:
+        import json
+        import tempfile
+
+        from dashboard.application.resource_history import ResourceHistoryStore
+
+        day = 24 * 3600
+        now = float(20 * day)
+        with tempfile.TemporaryDirectory() as raw_root:
+            path = Path(raw_root) / "resource-history.jsonl"
+            store = ResourceHistoryStore(path)
+            for at in (now - 15 * day, now - 13 * day, now):
+                store.append({"at": at, "workerRssBytes": int(at)})
+
+            recent = store.read(window_seconds=14 * day, now=now, max_points=10)
+            store._compact(now)
+            retained = [json.loads(line)["at"] for line in path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual([row["at"] for row in recent], [now - 13 * day, now])
+        self.assertEqual(retained, [now - 13 * day, now])
+
     def test_supports_five_second_metric_windows_for_two_second_samples(self) -> None:
         import tempfile
 
@@ -1085,6 +1106,21 @@ class ModelLifecycleServiceTests(unittest.TestCase):
             side = root / "side.gguf"
             side.write_bytes(b"s")
             self.assertEqual(service.sideload(side)["model_id"], "side")
+
+
+class PresetStoreMigrationTests(unittest.TestCase):
+    def test_completed_migration_does_not_replace_sqlite_presets_with_stale_legacy_state(self) -> None:
+        import tempfile
+        from dashboard.application.preset_store import PresetStore
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            store = PresetStore(Path(raw_root) / "presets.db")
+            store.create("saved", "Saved", {"ctx-size": "131072"}, 1.0)
+            self.assertTrue(store.migrate_legacy_state({
+                "parameter_presets": {"stale": {"name": "Stale", "options": {}}},
+                "model_presets": {},
+            }))
+            self.assertEqual(set(store.presets()), {"saved"})
 
 
 class ParameterSettingsServiceTests(unittest.TestCase):
