@@ -84,6 +84,23 @@ class LlamaCppManagerTests(unittest.TestCase):
             "session": "20261003_164117_5bf794",
         })
 
+    def test_plugin_hook_uses_context_local_profile_home(self) -> None:
+        entrypoint = Path(__file__).parent / "__init__.py"
+        spec = importlib.util.spec_from_file_location("llamacpp_plugin_profile_override", entrypoint)
+        assert spec and spec.loader
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+
+        hermes_constants = types.ModuleType("hermes_constants")
+        hermes_constants.get_hermes_home = lambda: Path(
+            "C:/Users/leee/AppData/Local/hermes/profiles/project-manager"
+        )
+        process_home = "C:/Users/leee/AppData/Local/hermes/profiles/main"
+        with patch.dict(os.environ, {"HERMES_HOME": process_home}), patch.dict(
+            sys.modules, {"hermes_constants": hermes_constants}
+        ):
+            self.assertEqual(plugin._profile_name(), "project-manager")
+
     def test_plugin_manifest_versions_match(self) -> None:
         root = Path(__file__).parent
         plugin_version = next(line.split(":", 1)[1].strip() for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))

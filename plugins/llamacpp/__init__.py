@@ -12,7 +12,12 @@ _COORDINATOR_CONTEXT_URL = "http://127.0.0.1:18380/__llamacpp/request-context"
 
 
 def _profile_name() -> str:
-    home = Path(os.environ.get("HERMES_HOME") or "").resolve()
+    try:
+        from hermes_constants import get_hermes_home
+
+        home = get_hermes_home().resolve()
+    except (ImportError, OSError):
+        home = Path(os.environ.get("HERMES_HOME") or "").resolve()
     if home.parent.name.lower() == "profiles" and home.name:
         return home.name
     return "main"
