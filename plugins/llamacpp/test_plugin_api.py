@@ -1710,6 +1710,9 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("query.state.data?.coordinator?.ok === false ? false", source)
         self.assertIn("query.state.data?.coordinator?.stopped ? false", source)
         self.assertIn("pluginCtx.socket('/events'", source)
+        self.assertIn("const activeProfile = useValue(host.state.profile)", source)
+        push_hook = source[source.index("function useCoordinatorPush"):source.index("function startDesktopLease")]
+        self.assertIn("}, [activeProfile])", push_hook)
         self.assertIn("inventory: [ID, 'hf-models']", source)
         coordinator_source = (Path(__file__).parent / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8")
         self.assertEqual(coordinator_source.count('"refresh": ["status", "jobs", "logs", "metrics", "inventory"]'), 2)

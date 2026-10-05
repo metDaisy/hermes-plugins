@@ -2,7 +2,7 @@ import React from 'react'
 import pluginSdk from '@hermes/plugin-sdk'
 
 const { createElement, useEffect, useLayoutEffect, useRef, useState } = React
-const { ROUTES_AREA, SIDEBAR_NAV_AREA, queryClient, useQuery } = pluginSdk
+const { ROUTES_AREA, SIDEBAR_NAV_AREA, host, queryClient, useQuery, useValue } = pluginSdk
 const jsx = (type, props, key) => createElement(type, key === undefined ? props : { ...props, key })
 const jsxs = jsx
 
@@ -50,7 +50,9 @@ function applyResourceMetricFrame(frame) {
 
 function useCoordinatorPush() {
   const [pushConnected, setPushConnected] = useState(false)
+  const activeProfile = useValue(host.state.profile)
   useEffect(() => {
+    setPushConnected(false)
     const timers = new Map()
     let lastFrameAt = 0
     const keys = {
@@ -91,7 +93,7 @@ function useCoordinatorPush() {
       for (const timer of timers.values()) window.clearTimeout(timer)
       timers.clear()
     }
-  }, [])
+  }, [activeProfile])
   return pushConnected
 }
 
