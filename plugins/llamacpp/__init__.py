@@ -23,6 +23,19 @@ def _profile_name() -> str:
     return "main"
 
 
+def _session_id(hook_session_id: Any) -> str:
+    """Resolve the request-local session before the reusable agent's cached id."""
+    try:
+        from gateway.session_context import get_session_env
+
+        current = str(get_session_env("HERMES_SESSION_ID", "") or "").strip()
+        if current:
+            return current
+    except (ImportError, OSError):
+        pass
+    return str(hook_session_id or "").strip()
+
+
 def _is_local_request(provider: Any, base_url: Any, model: Any) -> bool:
     return (
         str(provider or "") in {"custom", "llamacpp-local"}
@@ -31,10 +44,9 @@ def _is_local_request(provider: Any, base_url: Any, model: Any) -> bool:
     )
 
 
-def _publish_request_context(**kwargs: Any) -> None:
+def _publish_resolved_request_context(session: str, **kwargs: Any) -> None:
     if not _is_local_request(kwargs.get("provider"), kwargs.get("base_url"), kwargs.get("model")):
         return
-    session = str(kwargs.get("session_id") or "").strip()
     if not session:
         return
     payload = json.dumps({
@@ -56,7 +68,18 @@ def _publish_request_context(**kwargs: Any) -> None:
         return
 
 
+def _publish_request_context(**kwargs: Any) -> None:
+    _publish_resolved_request_context(_session_id(kwargs.get("session_id")), **kwargs)
+
+
+def _publish_auxiliary_request_context(**kwargs: Any) -> None:
+    """Prefer the auxiliary hook's parent-turn identity over ambient process context."""
+    parent_turn_session = str(kwargs.get("session_id") or "").strip()
+    session = parent_turn_session or _session_id(None)
+    _publish_resolved_request_context(session, **kwargs)
+
+
 def register(ctx) -> None:
     """Register request metadata propagation for privacy-safe runtime log attribution."""
     ctx.register_hook("pre_api_request", _publish_request_context)
-    ctx.register_hook("pre_auxiliary_call", _publish_request_context)
+    ctx.register_hook("pre_auxiliary_call", _publish_auxiliary_request_context)

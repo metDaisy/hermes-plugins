@@ -8,6 +8,7 @@ from pathlib import Path
 REPO_PLUGIN = Path(__file__).resolve().parent
 HERMES_ROOT = Path.home() / "AppData" / "Local" / "hermes"
 REQUIRED = (
+    "__init__.py",
     "plugin.yaml",
     "pack.yml",
     "dashboard/plugin_api.py",
@@ -40,7 +41,11 @@ def main() -> None:
     expected_version = version(REPO_PLUGIN / "plugin.yaml")
     if version(REPO_PLUGIN / "pack.yml") != expected_version:
         raise SystemExit("repository manifest versions differ")
-    profile_plugins = sorted((HERMES_ROOT / "profiles").glob("*/plugins/llamacpp"))
+    profile_plugins = sorted(
+        path
+        for path in (HERMES_ROOT / "profiles").glob("*/plugins/llamacpp")
+        if not path.parent.parent.name.startswith(".")
+    )
     if not profile_plugins:
         raise SystemExit("no profile llama.cpp plugin copies found")
     for installed in profile_plugins:

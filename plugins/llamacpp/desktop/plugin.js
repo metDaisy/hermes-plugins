@@ -345,7 +345,10 @@ function CompressionCallsSummary({ calls }) {
       ] }) }),
       jsx('tbody', { children: rows.map(call => jsxs('tr', { className: 'border-t border-(--ui-stroke-secondary)', children: [
         jsx('td', { className: 'py-2 tabular-nums text-(--ui-text-secondary)', children: formatSampleTime(call.completed_at) }),
-        jsx('td', { className: 'max-w-48 truncate py-2 font-mono text-[10px] text-(--ui-text-secondary)', title: `${call.profile || ''}/${call.session || ''}`, children: `${call.profile || '—'} / ${call.session || '—'}` }),
+        jsxs('td', { className: 'max-w-48 whitespace-nowrap py-2 font-mono text-[10px] text-(--ui-text-secondary)', title: `${call.profile || ''}/${call.session || ''}`, children: [
+          `${call.profile || '—'} / `,
+          jsx('span', { className: 'select-text cursor-text', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, 'aria-label': `Session ${call.session || '없음'}`, children: call.session || '—' })
+        ] }),
         jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: `${Number(call.input_context_tokens || 0).toLocaleString()} tok` }),
         jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: duration(call.duration_ms) })
       ] }, call.request_id || `${call.profile}-${call.completed_at}`)) })

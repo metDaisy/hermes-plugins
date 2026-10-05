@@ -101,6 +101,104 @@ class LlamaCppManagerTests(unittest.TestCase):
         ):
             self.assertEqual(plugin._profile_name(), "project-manager")
 
+    def test_plugin_hook_uses_context_local_session_id(self) -> None:
+        entrypoint = Path(__file__).parent / "__init__.py"
+        spec = importlib.util.spec_from_file_location("llamacpp_plugin_session_override", entrypoint)
+        assert spec and spec.loader
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+
+        opened = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def open_request(request, timeout):
+            opened.append((request, timeout))
+            return Response()
+
+        current_session = "20261006_001122_current"
+        stale_agent_session = "20261005_235039_841a9f"
+        gateway = types.ModuleType("gateway")
+        session_context = types.ModuleType("gateway.session_context")
+        session_context.get_session_env = lambda name, default="": (
+            current_session if name == "HERMES_SESSION_ID" else default
+        )
+        gateway.session_context = session_context
+
+        with patch.dict(sys.modules, {
+            "gateway": gateway,
+            "gateway.session_context": session_context,
+        }), patch.object(plugin, "urlopen", side_effect=open_request):
+            plugin._publish_request_context(
+                provider="custom",
+                base_url="http://127.0.0.1:18380/v1",
+                model="main-local",
+                session_id=stale_agent_session,
+            )
+
+        self.assertEqual(len(opened), 1)
+        request, _timeout = opened[0]
+        self.assertEqual(json.loads(request.data)["session"], current_session)
+
+    def test_auxiliary_hook_uses_parent_turn_session_id(self) -> None:
+        entrypoint = Path(__file__).parent / "__init__.py"
+        spec = importlib.util.spec_from_file_location("llamacpp_plugin_aux_session", entrypoint)
+        assert spec and spec.loader
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+
+        hooks = {}
+        opened = []
+
+        class Context:
+            @staticmethod
+            def register_hook(name, callback):
+                hooks[name] = callback
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def open_request(request, timeout):
+            opened.append((request, timeout))
+            return Response()
+
+        gateway = types.ModuleType("gateway")
+        session_context = types.ModuleType("gateway.session_context")
+        session_context.get_session_env = lambda name, default="": (
+            "20261005_stale_context" if name == "HERMES_SESSION_ID" else default
+        )
+        gateway.session_context = session_context
+
+        plugin.register(Context())
+        with patch.dict(sys.modules, {
+            "gateway": gateway,
+            "gateway.session_context": session_context,
+        }), patch.object(plugin, "urlopen", side_effect=open_request):
+            hooks["pre_auxiliary_call"](
+                provider="custom",
+                base_url="http://127.0.0.1:18380/v1",
+                model="compression-local",
+                aux_task="compression",
+                session_id="20261006_parent_turn",
+            )
+
+        self.assertEqual(len(opened), 1)
+        request, _timeout = opened[0]
+        self.assertEqual(json.loads(request.data), {
+            "model": "compression-local",
+            "profile": "main",
+            "session": "20261006_parent_turn",
+        })
+
     def test_plugin_manifest_versions_match(self) -> None:
         root = Path(__file__).parent
         plugin_version = next(line.split(":", 1)[1].strip() for line in (root / "plugin.yaml").read_text(encoding="utf-8").splitlines() if line.startswith("version:"))
@@ -1803,6 +1901,10 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("children: '최근 Aux compression 호출'", source)
         self.assertIn("children: '입력 context'", source)
         self.assertIn("children: '소요 시간'", source)
+        compression_summary = source[source.index("function CompressionCallsSummary"):source.index("function ResourceMetricsPanel")]
+        self.assertIn("className: 'select-text cursor-text'", compression_summary)
+        self.assertIn("style: { userSelect: 'text', WebkitUserSelect: 'text' }", compression_summary)
+        self.assertIn("'aria-label': `Session ${call.session || '없음'}`", compression_summary)
         self.assertIn("label: 'Prompt tok/s'", source)
         self.assertIn("label: 'Generation tok/s'", source)
         self.assertIn("children: 'Token 처리량 · Main timeline'", source)
