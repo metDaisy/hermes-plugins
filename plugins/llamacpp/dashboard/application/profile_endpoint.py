@@ -51,6 +51,8 @@ class ManagedEndpointConfig:
         begin, end = managed
         root_created = begin >= 1 and lines[begin - 1].strip() == "providers:" and not lines[begin - 1].startswith((" ", "\t"))
         start = begin - 1 if root_created else begin
+        if root_created and start > 0 and not lines[start - 1].strip():
+            start -= 1
         del lines[start : end + 1]
         while start < len(lines) and not lines[start].strip() and (start == 0 or not lines[start - 1].strip()):
             del lines[start]

@@ -239,6 +239,34 @@ class ActivityLogProjectionTests(unittest.TestCase):
         self.assertEqual(main["context_tokens"], 8192)
         self.assertGreater(main["last_activity_at"], 1045.0)
 
+    def test_uses_official_router_jsonl_time_for_long_request_metrics(self) -> None:
+        import json
+        from dashboard.application.activity_log_projection import project_activity_lines
+        from dashboard.application.resource_metrics import aggregate_profile_metrics
+
+        projected = project_activity_lines([
+            json.dumps({
+                "type": "hermes_request_context", "role": "main", "profile": "main",
+                "session": "session-1", "request_id": "request-1", "recorded_at": 1000.0,
+            }),
+            json.dumps({
+                "type": "log", "time": 45_000_000, "level": "none",
+                "msg": '[19001] {"type":"log","time":44900000,"level":"info",'
+                       '"msg":"slot print_timing: n_gen = 100, tg = 15.0 t/s\\n"}',
+            }),
+            json.dumps({
+                "type": "log", "time": 46_000_000, "level": "none",
+                "msg": '[19001] {"type":"log","time":45900000,"level":"info",'
+                       '"msg":"slot print_timing: prompt eval time = 2000 ms / 1000 tokens\\n"}',
+            }),
+        ], latest_observed_at=1046.0)
+
+        metrics = aggregate_profile_metrics(projected["events"], now=1046.0, window_seconds=60)
+
+        self.assertAlmostEqual(metrics["roles"]["main"]["prompt_tokens_per_second"], 500.0)
+        self.assertAlmostEqual(metrics["roles"]["main"]["generation_tokens_per_second"], 15.0)
+        self.assertGreater(metrics["roles"]["main"]["last_activity_at"], 1044.0)
+
 
 class ResourceMetricsTests(unittest.TestCase):
     def test_reads_active_worker_slot_context_without_prompt_content(self) -> None:
@@ -270,6 +298,98 @@ class ResourceMetricsTests(unittest.TestCase):
 
         self.assertEqual(result, {"context_tokens": 95182, "context_limit": 131072})
         self.assertEqual(captured, [("http://127.0.0.1:8180/slots", 0.5)])
+
+    def test_reads_active_worker_slot_context_through_official_router(self) -> None:
+        import json
+        from dashboard.application.resource_metrics import read_worker_slot_context
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        captured = []
+
+        def open_url(request, timeout):
+            captured.append((request.full_url, timeout))
+            if request.full_url == "http://127.0.0.1:8180/slots":
+                raise OSError("router does not expose worker slots")
+            if request.full_url == "http://127.0.0.1:8180/models":
+                return Response({"data": [{
+                    "id": "compression-local",
+                    "status": {"value": "loaded", "args": ["llama-server.exe", "--port", "59980"]},
+                }]})
+            if request.full_url == "http://127.0.0.1:59980/slots":
+                return Response([{
+                    "id": 0, "is_processing": True, "n_ctx": 262144,
+                    "n_prompt_tokens": 72000, "prompt": "must not be projected",
+                }])
+            raise AssertionError(request.full_url)
+
+        result = read_worker_slot_context(8180, model_alias="compression-local", opener=open_url)
+
+        self.assertEqual(result, {"context_tokens": 72000, "context_limit": 262144})
+        self.assertEqual(captured, [
+            ("http://127.0.0.1:8180/slots", 0.5),
+            ("http://127.0.0.1:8180/models", 0.5),
+            ("http://127.0.0.1:59980/slots", 0.5),
+        ])
+
+    def test_pages_auxiliary_calls_by_stable_cursor_five_at_a_time(self) -> None:
+        import json
+        import tempfile
+        from dashboard.application.activity_log_projection import compression_call_page
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            activity_path = root / "activity.log"
+            context_path = root / "request-context.jsonl"
+            activity = bytearray()
+            contexts = []
+            for index in range(7):
+                request_id = f"aux-{index}"
+                contexts.append({
+                    "type": "hermes_request_context",
+                    "role": "compression",
+                    "profile": "project-manager",
+                    "session": f"session-{index}",
+                    "request_id": request_id,
+                    "recorded_at": 1000.0 + index,
+                    "activity_offset": len(activity),
+                })
+                activity.extend(
+                    f"slot prompt eval time = 1000.00 ms / {10000 + index} tokens\n".encode()
+                )
+                activity.extend(
+                    f"slot total time = {2000 + index}.00 ms / {11000 + index} tokens\n".encode()
+                )
+            activity_path.write_bytes(bytes(activity))
+            context_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in contexts), encoding="utf-8",
+            )
+
+            first = compression_call_page(activity_path, context_path, limit=5)
+            second = compression_call_page(
+                activity_path, context_path, limit=5, cursor=first["next_cursor"],
+            )
+
+        self.assertEqual([row["request_id"] for row in first["items"]], [
+            "aux-6", "aux-5", "aux-4", "aux-3", "aux-2",
+        ])
+        self.assertEqual(first["items"][0]["timestamp"], 1006.0)
+        self.assertEqual(first["items"][0]["input_context_tokens"], 10006)
+        self.assertEqual(first["items"][0]["duration_ms"], 2006.0)
+        self.assertEqual(first["next_cursor"], "aux-2")
+        self.assertEqual([row["request_id"] for row in second["items"]], ["aux-1", "aux-0"])
+        self.assertIsNone(second["next_cursor"])
 
     def test_resource_sample_pushes_snapshot_and_point_without_metrics_refetch(self) -> None:
         from dashboard import backend_impl
@@ -392,13 +512,15 @@ class ResourceMetricsTests(unittest.TestCase):
                 "aux-model": {"ctx-size": "32768"},
             },
         }
+        page = {"items": [{"request_id": "aux-1", "timestamp": 1000.0}], "next_cursor": "aux-1"}
         with patch.object(backend_impl, "_server_log_tail", return_value={"events": []}), \
                 patch.object(backend_impl, "_state", return_value=state), \
                 patch.object(backend_impl, "_is_server_running", return_value=True), \
+                patch.object(backend_impl, "compression_call_page", return_value=page) as call_page, \
                 patch.object(backend_impl, "read_worker_slot_context", return_value={
                     "context_tokens": 95182, "context_limit": 131072,
-                }):
-            result = backend_impl._resource_metrics(60)
+                }) as slot_context:
+            result = backend_impl._resource_metrics(60, compression_cursor="aux-5")
 
         self.assertEqual(result["roles"]["main"]["model_id"], "main-model")
         self.assertEqual(result["roles"]["main"]["context_tokens"], 95182)
@@ -407,73 +529,42 @@ class ResourceMetricsTests(unittest.TestCase):
         self.assertEqual(result["roles"]["compression"]["model_id"], "aux-model")
         self.assertEqual(result["roles"]["compression"]["context_limit"], 32768)
         self.assertFalse(result["roles"]["compression"]["active"])
+        self.assertEqual(result["compression_calls"], page["items"])
+        self.assertEqual(result["compression_calls_next_cursor"], "aux-1")
+        call_page.assert_called_once_with(
+            backend_impl.ACTIVITY_LOG_PATH, backend_impl.REQUEST_CONTEXT_LOG_PATH,
+            limit=5, cursor="aux-5",
+        )
+        slot_context.assert_called_once_with(18434, model_alias="main-local")
 
 
 class ProfileModelRoutingTests(unittest.TestCase):
     BASE = """model:\n  provider: openai-codex\n  default: gpt-5.6-luna\n  base_url: https://chatgpt.com/backend-api/codex\n  api_mode: codex_responses\n  reasoning_effort: high\nfallback_providers: []\nagent:\n  max_turns: 90\nauxiliary:\n  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna\n    reasoning_effort: medium\n"""
 
-    def test_routes_main_and_compression_to_local_and_fixes_fallback(self) -> None:
-        from dashboard.application.profile_model_routing import sync_profile_models
+    def test_endpoint_sync_preserves_core_owned_model_policy(self) -> None:
+        import tempfile
+        from dashboard import backend_impl as api
 
-        updated = sync_profile_models(
-            self.BASE, base_url="http://127.0.0.1:18380/v1",
-            main_served=True, compression_served=True,
-        )
+        with tempfile.TemporaryDirectory() as raw_root:
+            config_path = Path(raw_root) / "coder" / "config.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(self.BASE, encoding="utf-8")
 
-        self.assertIn("  provider: llamacpp-local\n  default: main-local", updated)
-        self.assertIn("  base_url: http://127.0.0.1:18380/v1", updated)
-        self.assertIn("  api_mode: chat_completions", updated)
-        self.assertIn("  reasoning_effort: high", updated)
-        self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", updated)
-        self.assertEqual(updated.count("fallback_providers:"), 1)
-        self.assertIn("  compression:\n    provider: llamacpp-local\n    model: compression-local", updated)
-        self.assertIn("    reasoning_effort: high", updated)
+            with patch.object(api, "_profile_config_paths", return_value=[config_path]), \
+                    patch.object(api, "_profile_provider_models", return_value={"main-local": 32768}):
+                api._sync_execution_profile_endpoint()
 
-    def test_routes_missing_local_roles_to_luna_with_high_reasoning(self) -> None:
-        from dashboard.application.profile_model_routing import sync_profile_models
+            updated = config_path.read_text(encoding="utf-8")
 
-        updated = sync_profile_models(
-            self.BASE, base_url="http://127.0.0.1:18380/v1",
-            main_served=False, compression_served=False,
-        )
-
-        self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna", updated)
-        self.assertIn("  base_url: https://chatgpt.com/backend-api/codex", updated)
-        self.assertIn("  api_mode: codex_responses", updated)
-        self.assertIn("  reasoning_effort: high", updated)
-        self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", updated)
-        self.assertIn("    reasoning_effort: high", updated)
-        self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", updated)
-
-    def test_keeps_user_managed_compression_when_management_is_disabled(self) -> None:
-        from dashboard.application.profile_model_routing import sync_profile_models
-
-        custom = self.BASE.replace(
-            "    provider: openai-codex\n    model: gpt-5.6-luna\n    reasoning_effort: medium",
-            "    provider: llamacpp-local\n    model: compression-local\n    reasoning_effort: high",
-        )
-        updated = sync_profile_models(
-            custom, base_url="http://127.0.0.1:18380/v1",
-            main_served=False, compression_served=None,
-        )
-
+        self.assertIn("# BEGIN llamacpp endpoint (managed)", updated)
+        self.assertIn('default_model: "main-local"', updated)
+        self.assertIn("model:\n  provider: openai-codex\n  default: gpt-5.6-luna", updated)
+        self.assertIn("fallback_providers: []", updated)
         self.assertIn(
-            "  compression:\n    provider: llamacpp-local\n    model: compression-local\n    reasoning_effort: high",
+            "auxiliary:\n  compression:\n    provider: openai-codex\n"
+            "    model: gpt-5.6-luna\n    reasoning_effort: medium",
             updated,
         )
-
-    def test_keeps_aux_on_luna_high_reasoning_when_only_main_is_local(self) -> None:
-        from dashboard.application.profile_model_routing import sync_profile_models
-
-        updated = sync_profile_models(
-            self.BASE, base_url="http://127.0.0.1:18380/v1",
-            main_served=True, compression_served=False,
-        )
-
-        self.assertIn("  default: main-local", updated)
-        self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", updated)
-        self.assertIn("    reasoning_effort: high", updated)
-
 
 class ProductionIntegrationTests(unittest.TestCase):
     def test_unexpected_worker_exit_unregisters_local_models_and_restores_remote_policy(self) -> None:
@@ -741,7 +832,7 @@ class ProductionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(result["raw_lines"]), 3)
         self.assertNotIn("PRIVATE", "\n".join(result["lines"]))
 
-    def test_endpoint_sync_changes_model_policy_for_every_profile(self) -> None:
+    def test_endpoint_sync_preserves_model_policy_for_every_profile(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
 
@@ -762,39 +853,27 @@ class ProductionIntegrationTests(unittest.TestCase):
 
             for path in profiles:
                 text = path.read_text(encoding="utf-8")
-                if path.parent.name == "main":
-                    self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna", text)
-                    self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", text)
-                    self.assertIn("    reasoning_effort: medium", text)
-                    self.assertNotIn("    model: compression-local", text)
-                else:
-                    self.assertIn("  default: main-local", text, path.parent.name)
-                    self.assertIn("    model: compression-local", text, path.parent.name)
-                    self.assertIn("    reasoning_effort: high", text, path.parent.name)
+                self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna", text)
+                self.assertIn("fallback_providers: []", text)
+                self.assertIn("  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna", text)
+                self.assertIn("    reasoning_effort: medium", text)
                 self.assertIn('default_model: "main-local"', text, path.parent.name)
                 self.assertIn('"main-local":', text, path.parent.name)
 
-    def test_endpoint_removal_restores_every_profile_to_remote_policy(self) -> None:
+    def test_endpoint_removal_preserves_every_profile_model_policy(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
-        from dashboard.application.profile_model_routing import sync_profile_models
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             profiles = [root / name / "config.yaml" for name in ("coder", "main", "comfy-master")]
-            local = sync_profile_models(
-                ProfileModelRoutingTests.BASE,
-                base_url="http://127.0.0.1:18380/v1",
-                main_served=True,
-                compression_served=True,
-            )
-            local = api._config_with_execution_profiles(
-                local, "http://127.0.0.1:18380/v1", "main-local",
-                {"main-local": 32768, "compression-local": 8192},
+            configured = api._config_with_execution_profiles(
+                ProfileModelRoutingTests.BASE, "http://127.0.0.1:18380/v1", "main-local",
+                {"main-local": 32768},
             )
             for path in profiles:
                 path.parent.mkdir(parents=True)
-                path.write_text(local, encoding="utf-8")
+                path.write_text(configured, encoding="utf-8")
 
             with patch.object(api, "_profile_config_paths", return_value=profiles):
                 api._unregister_custom_endpoint()
@@ -802,14 +881,7 @@ class ProductionIntegrationTests(unittest.TestCase):
             for path in profiles:
                 restored = path.read_text(encoding="utf-8")
                 self.assertNotIn("# BEGIN llamacpp endpoint (managed)", restored, path.parent.name)
-                self.assertIn("  default: gpt-5.6-luna", restored, path.parent.name)
-                self.assertIn("  reasoning_effort: high", restored, path.parent.name)
-                if path.parent.name == "main":
-                    self.assertIn("    model: compression-local", restored)
-                else:
-                    self.assertIn("    model: gpt-5.6-luna", restored, path.parent.name)
-                self.assertIn("    reasoning_effort: high", restored, path.parent.name)
-                self.assertIn("fallback_providers:\n  - provider: openai-codex\n    model: gpt-5.6-luna", restored)
+                self.assertEqual(restored, ProfileModelRoutingTests.BASE)
 
 
 if __name__ == "__main__":

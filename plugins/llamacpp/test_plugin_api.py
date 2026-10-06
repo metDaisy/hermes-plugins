@@ -1478,7 +1478,7 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertEqual(first.read_text(encoding="utf-8"), "providers:\n")
             self.assertEqual(second.read_text(encoding="utf-8"), "providers:\n")
 
-    def test_profile_endpoint_registers_only_main_and_routes_compression_as_auxiliary(self) -> None:
+    def test_profile_endpoint_registers_only_main_without_rewriting_auxiliary_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             config_path = Path(raw_root) / "project-manager" / "config.yaml"
             config_path.parent.mkdir(parents=True)
@@ -1510,7 +1510,7 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertIn('"main-local":', managed)
             self.assertNotIn("compression-local", managed)
             self.assertIn(
-                "  compression:\n    provider: llamacpp-local\n    model: compression-local",
+                "  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna",
                 updated,
             )
 
@@ -1915,7 +1915,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("enabled: open", log_panel)
         self.assertIn("placeholderData: previousData => previousData", log_panel)
         self.assertNotIn("open ? serverStopped ?", log_panel)
-        self.assertIn("api(`/metrics?window=${showDetails ? windowSeconds : 60}`)", source)
+        self.assertIn("compressionCursor", source)
+        self.assertIn("compression_cursor=${encodeURIComponent(compressionCursor)}", source)
         self.assertIn("function ResourceMetricsPanel", source)
         self.assertIn("const serverStopped = status?.server_running === false", source)
         self.assertIn("enabled: Boolean(status)", source)
@@ -1953,14 +1954,22 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("jsx(RoleMetricsSummary, { roles, serverRunning: !serverStopped })", source)
         self.assertNotIn("function RoleMetricSummary", source)
         self.assertIn("'aria-label': 'Main 모델 지표'", source)
-        self.assertIn("function CompressionCallsSummary({ calls })", source)
+        self.assertIn("function CompressionCallsSummary({ calls, canPrevious, canNext, onPrevious, onNext })", source)
         self.assertIn("children: '최근 Aux compression 호출'", source)
+        self.assertIn("function formatTimestamp(value)", source)
+        self.assertIn("toLocaleString", source)
+        self.assertIn("formatTimestamp(call.timestamp)", source)
         self.assertIn("children: '입력 context'", source)
         self.assertIn("children: '소요 시간'", source)
         compression_summary = source[source.index("function CompressionCallsSummary"):source.index("function ResourceMetricsPanel")]
         self.assertIn("className: 'select-text cursor-text'", compression_summary)
         self.assertIn("style: { userSelect: 'text', WebkitUserSelect: 'text' }", compression_summary)
         self.assertIn("'aria-label': `Session ${call.session || '없음'}`", compression_summary)
+        self.assertIn("'aria-label': '이전 Aux 호출'", compression_summary)
+        self.assertIn("'aria-label': '다음 Aux 호출'", compression_summary)
+        self.assertIn("children: '←'", compression_summary)
+        self.assertIn("children: '→'", compression_summary)
+        self.assertNotIn("페이지", compression_summary)
         self.assertIn("label: 'Prompt tok/s'", source)
         self.assertIn("label: 'Generation tok/s'", source)
         self.assertIn("children: 'Token 처리량 · Main timeline'", source)

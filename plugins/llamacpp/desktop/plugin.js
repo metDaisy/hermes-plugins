@@ -38,7 +38,18 @@ function mergeResourceMetricFrame(previous, frame) {
   const series = (Array.isArray(previous.series) ? previous.series : [])
     .filter(row => Number(row?.at) >= cutoff && Number(row?.at) !== sampledAt)
     .concat(frame.sample)
-  return { ...previous, ...frame.snapshot, window_seconds: windowSeconds, series }
+  const preserveCompressionPage = previous.compression_cursor !== frame.snapshot.compression_cursor
+  return {
+    ...previous,
+    ...frame.snapshot,
+    ...(preserveCompressionPage ? {
+      compression_calls: previous.compression_calls,
+      compression_calls_next_cursor: previous.compression_calls_next_cursor,
+      compression_cursor: previous.compression_cursor
+    } : {}),
+    window_seconds: windowSeconds,
+    series
+  }
 }
 
 function applyResourceMetricFrame(frame) {
@@ -180,6 +191,14 @@ function formatWindowOffset(seconds) {
 function formatSampleTime(value) {
   if (!value) return '—'
   return new Date(Number(value) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function formatTimestamp(value) {
+  if (!value) return '—'
+  return new Date(Number(value) * 1000).toLocaleString([], {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  })
 }
 
 function niceMaximum(value, fixedMaximum) {
@@ -330,11 +349,17 @@ function RoleMetricsSummary({ roles, serverRunning }) {
   ] }) })
 }
 
-function CompressionCallsSummary({ calls }) {
+function CompressionCallsSummary({ calls, canPrevious, canNext, onPrevious, onNext }) {
   const rows = Array.isArray(calls) ? calls : []
-  const duration = value => value == null ? '진행 중' : `${(Number(value) / 1000).toFixed(2)}초`
+  const duration = value => value == null ? '—' : `${(Number(value) / 1000).toFixed(2)}초`
   return jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': '최근 Aux compression 호출', children: [
-    jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '최근 Aux compression 호출' }),
+    jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
+      jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: '최근 Aux compression 호출' }),
+      jsxs('div', { className: 'flex items-center gap-1', children: [
+        jsx('button', { className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5 text-xs text-(--ui-text-secondary) disabled:opacity-40', type: 'button', disabled: !canPrevious, onClick: onPrevious, 'aria-label': '이전 Aux 호출', children: '←' }),
+        jsx('button', { className: 'rounded border border-(--ui-stroke-secondary) px-2 py-0.5 text-xs text-(--ui-text-secondary) disabled:opacity-40', type: 'button', disabled: !canNext, onClick: onNext, 'aria-label': '다음 Aux 호출', children: '→' })
+      ] })
+    ] }),
     jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '호출별 입력 context 크기와 전체 compression 소요 시간을 표시합니다.' }),
     rows.length ? jsx('div', { className: 'mt-2 overflow-x-auto', children: jsxs('table', { className: 'w-full min-w-[32rem] text-[11px]', children: [
       jsx('thead', { children: jsxs('tr', { className: 'text-left text-(--ui-text-tertiary)', children: [
@@ -344,12 +369,12 @@ function CompressionCallsSummary({ calls }) {
         jsx('th', { className: 'pb-2 text-right font-medium', scope: 'col', children: '소요 시간' })
       ] }) }),
       jsx('tbody', { children: rows.map(call => jsxs('tr', { className: 'border-t border-(--ui-stroke-secondary)', children: [
-        jsx('td', { className: 'py-2 tabular-nums text-(--ui-text-secondary)', children: formatSampleTime(call.completed_at) }),
+        jsx('td', { className: 'whitespace-nowrap py-2 tabular-nums text-(--ui-text-secondary)', children: formatTimestamp(call.timestamp) }),
         jsxs('td', { className: 'max-w-48 whitespace-nowrap py-2 font-mono text-[10px] text-(--ui-text-secondary)', title: `${call.profile || ''}/${call.session || ''}`, children: [
           `${call.profile || '—'} / `,
           jsx('span', { className: 'select-text cursor-text', style: { userSelect: 'text', WebkitUserSelect: 'text' }, tabIndex: 0, 'aria-label': `Session ${call.session || '없음'}`, children: call.session || '—' })
         ] }),
-        jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: `${Number(call.input_context_tokens || 0).toLocaleString()} tok` }),
+        jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: call.input_context_tokens == null ? '—' : `${Number(call.input_context_tokens).toLocaleString()} tok` }),
         jsx('td', { className: 'py-2 text-right tabular-nums text-(--ui-text-secondary)', children: duration(call.duration_ms) })
       ] }, call.request_id || `${call.profile}-${call.completed_at}`)) })
     ] }) }) : jsx('p', { className: 'mt-2 text-[11px] text-(--ui-text-tertiary)', role: 'status', children: '아직 Aux compression 호출 기록이 없습니다.' })
@@ -359,10 +384,12 @@ function CompressionCallsSummary({ calls }) {
 function ResourceMetricsPanel({ status, pushConnected }) {
   const [showDetails, setShowDetails] = useState(false)
   const [windowSeconds, setWindowSeconds] = useState(1800)
+  const [compressionCursors, setCompressionCursors] = useState([])
+  const compressionCursor = compressionCursors[compressionCursors.length - 1] || ''
   const serverStopped = status?.server_running === false
   const metricsQuery = useQuery({
-    queryKey: [ID, 'resource-metrics', showDetails ? windowSeconds : 60],
-    queryFn: () => api(`/metrics?window=${showDetails ? windowSeconds : 60}`),
+    queryKey: [ID, 'resource-metrics', showDetails ? windowSeconds : 60, compressionCursor],
+    queryFn: () => api(`/metrics?window=${showDetails ? windowSeconds : 60}${compressionCursor ? `&compression_cursor=${encodeURIComponent(compressionCursor)}` : ''}`),
     enabled: Boolean(status),
     refetchInterval: pushConnected ? false : status?.server_running ? 10000 : false,
     refetchOnWindowFocus: false,
@@ -373,6 +400,7 @@ function ResourceMetricsPanel({ status, pushConnected }) {
   const metricHistory = snapshot?.series || []
   const roles = snapshot?.roles || {}
   const compressionCalls = snapshot?.compression_calls || []
+  const nextCompressionCursor = snapshot?.compression_calls_next_cursor || ''
   const selectedWindowLabel = METRIC_WINDOWS.find(item => item.seconds === windowSeconds)?.label || formatWindowOffset(windowSeconds).replace(' 전', '')
   const latestAt = Number(snapshot?.sampled_at) || Date.now() / 1000
   return jsxs('section', { className: 'mt-3 overflow-hidden rounded-md border border-(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 실시간 리소스', children: [
@@ -385,7 +413,13 @@ function ResourceMetricsPanel({ status, pushConnected }) {
     ] }),
     !serverStopped && metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
     jsx(RoleMetricsSummary, { roles, serverRunning: !serverStopped }),
-    jsx(CompressionCallsSummary, { calls: compressionCalls }),
+    jsx(CompressionCallsSummary, {
+      calls: compressionCalls,
+      canPrevious: compressionCursors.length > 0,
+      canNext: Boolean(nextCompressionCursor),
+      onPrevious: () => setCompressionCursors(current => current.slice(0, -1)),
+      onNext: () => { if (nextCompressionCursor) setCompressionCursors(current => [...current, nextCompressionCursor]) }
+    }),
     showDetails ? jsxs('div', { id: 'llamacpp-resource-details', className: 'border-t border-(--ui-stroke-secondary)', children: [
       jsxs('div', { className: 'flex flex-wrap items-center justify-between gap-2 bg-(--ui-bg-tertiary) px-3 py-2', children: [
         jsxs('div', { children: [

@@ -10,29 +10,63 @@ from typing import Any, Callable
 def read_worker_slot_context(
     port: int,
     *,
+    model_alias: str = "",
     opener: Callable[..., Any] | None = None,
 ) -> dict[str, int] | None:
-    """Read only active slot token counts; never retain prompt content."""
+    """Read active slot counts from a worker or an Official native router child."""
     open_url = opener or urllib.request.urlopen
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{int(port)}/slots",
-        headers={"Accept": "application/json"},
-    )
-    try:
-        with open_url(request, timeout=0.5) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    except Exception:  # noqa: BLE001 - unavailable telemetry is represented as missing
+
+    def read_json(target_port: int, path: str) -> tuple[bool, Any]:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{int(target_port)}/{path.lstrip('/')}",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with open_url(request, timeout=0.5) as response:
+                return True, json.loads(response.read().decode("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001 - unavailable telemetry is represented as missing
+            return False, None
+
+    def active_context(payload: Any) -> dict[str, int] | None:
+        if not isinstance(payload, list):
+            return None
+        active = [slot for slot in payload if isinstance(slot, dict) and slot.get("is_processing") is True]
+        if not active:
+            return None
+        context_tokens = max(max(0, int(slot.get("n_prompt_tokens") or 0)) for slot in active)
+        context_limit = max(max(0, int(slot.get("n_ctx") or 0)) for slot in active)
+        if context_limit <= 0:
+            return None
+        return {"context_tokens": context_tokens, "context_limit": context_limit}
+
+    direct_ok, direct_payload = read_json(port, "slots")
+    if direct_ok:
+        return active_context(direct_payload)
+    if not model_alias:
         return None
-    if not isinstance(payload, list):
+
+    models_ok, models_payload = read_json(port, "models")
+    rows = models_payload.get("data") if models_ok and isinstance(models_payload, dict) else None
+    if not isinstance(rows, list):
         return None
-    active = [slot for slot in payload if isinstance(slot, dict) and slot.get("is_processing") is True]
-    if not active:
+    worker_port = 0
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("id") or "") != model_alias:
+            continue
+        status = row.get("status") if isinstance(row.get("status"), dict) else {}
+        args = status.get("args") if isinstance(status.get("args"), list) else []
+        for index, value in enumerate(args[:-1]):
+            if str(value) == "--port":
+                try:
+                    worker_port = int(args[index + 1])
+                except (TypeError, ValueError):
+                    worker_port = 0
+                break
+        break
+    if not 0 < worker_port <= 65535 or worker_port == int(port):
         return None
-    context_tokens = max(max(0, int(slot.get("n_prompt_tokens") or 0)) for slot in active)
-    context_limit = max(max(0, int(slot.get("n_ctx") or 0)) for slot in active)
-    if context_limit <= 0:
-        return None
-    return {"context_tokens": context_tokens, "context_limit": context_limit}
+    worker_ok, worker_payload = read_json(worker_port, "slots")
+    return active_context(worker_payload) if worker_ok else None
 
 
 def aggregate_profile_metrics(events: list[dict[str, Any]], *, now: float | None = None,

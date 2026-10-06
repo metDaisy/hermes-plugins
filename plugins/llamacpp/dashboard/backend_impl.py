@@ -43,11 +43,10 @@ try:
     from .application.official_runtime import OfficialRuntimeService
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
-    from .application.activity_log_projection import contextual_activity_tail, project_activity_lines
+    from .application.activity_log_projection import compression_call_page, contextual_activity_tail, project_activity_lines
     from .application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
     from .application.resource_history import ResourceHistoryStore, worker_memory_sample
     from .application.event_bus import publish_event, start_activity_pump
-    from .application.profile_model_routing import sync_profile_models
     from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from .application.prism_runtime import PrismRuntimeInstaller
     from .application.runtime_inspector import RuntimeInspector
@@ -93,11 +92,10 @@ except ImportError:
     from application.official_runtime import OfficialRuntimeService
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
-    from application.activity_log_projection import contextual_activity_tail, project_activity_lines
+    from application.activity_log_projection import compression_call_page, contextual_activity_tail, project_activity_lines
     from application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
     from application.resource_history import ResourceHistoryStore, worker_memory_sample
     from application.event_bus import publish_event, start_activity_pump
-    from application.profile_model_routing import sync_profile_models
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
     from application.runtime_inspector import RuntimeInspector
@@ -677,12 +675,6 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
-            updated = sync_profile_models(
-                updated,
-                base_url=base_url,
-                main_served=path.parent.name != "main",
-                compression_served=(None if path.parent.name == "main" else "compression-local" in execution_models),
-            )
             if updated != text:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
@@ -697,14 +689,6 @@ def _unregister_custom_endpoint() -> None:
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated, changed = _remove_managed_endpoint(text)
-            routed = sync_profile_models(
-                updated,
-                base_url=f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
-                main_served=False,
-                compression_served=None if path.parent.name == "main" else False,
-            )
-            changed = changed or routed != updated
-            updated = routed
             if changed:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
@@ -716,7 +700,7 @@ def _stop_server(*, preserve_log: bool = False, keep_endpoint: bool = False) -> 
 
 
 def reset_profile_model_policy() -> None:
-    """Restore every Hermes profile to the remote default while no worker is serving."""
+    """Remove the legacy managed endpoint without changing Core-owned routing."""
     _unregister_custom_endpoint()
 
 
@@ -869,7 +853,8 @@ def _server_log_tail(limit: int = 250, role: str = "activity") -> dict[str, Any]
     }
 
 
-def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dict[str, Any]:
+def _resource_metrics(window: int = 1800, compression_cursor: str | None = None,
+                      *, include_series: bool = True) -> dict[str, Any]:
     requested = int(window)
     if requested < 5 or requested > 14 * 24 * 3600:
         raise ValueError("window must be between 5 and 1209600 seconds")
@@ -878,6 +863,12 @@ def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dic
         list(projected.get("events") or []), window_seconds=min(requested, 300),
     )
     result["window_seconds"] = requested
+    compression_page = compression_call_page(
+        ACTIVITY_LOG_PATH, REQUEST_CONTEXT_LOG_PATH, limit=5, cursor=compression_cursor,
+    )
+    result["compression_calls"] = compression_page["items"]
+    result["compression_calls_next_cursor"] = compression_page["next_cursor"]
+    result["compression_cursor"] = compression_cursor
     state = _state()
     profiles = state.get("execution_profiles") if isinstance(state.get("execution_profiles"), dict) else {}
     active_role = str(state.get("active_role") or "")
@@ -910,7 +901,11 @@ def _resource_metrics(window: int = 1800, *, include_series: bool = True) -> dic
             "context_limit": int(role_settings.get("ctx-size") or 0),
             "active": role == active_role and running,
         })
-    slot_context = read_worker_slot_context(int(state.get("port") or 18434)) if running else None
+    role_alias = {"main": "main-local", "compression": "compression-local"}.get(active_role, "")
+    slot_context = (
+        read_worker_slot_context(int(state.get("port") or 18434), model_alias=role_alias)
+        if running else None
+    )
     active_metric = role_metrics.get(active_role) if isinstance(role_metrics.get(active_role), dict) else None
     if active_metric is not None and slot_context is not None:
         active_metric.update(slot_context)

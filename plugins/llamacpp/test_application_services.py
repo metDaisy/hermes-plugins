@@ -541,6 +541,24 @@ class ServerRouteAdapterTests(unittest.TestCase):
             routes["/server"]({"action": "start"})
         self.assertEqual(raised.exception.status_code, 400)
 
+    def test_metrics_forwards_auxiliary_cursor(self) -> None:
+        from dashboard.routes.server_routes import ServerRouteContext, create_router
+
+        captured = []
+        context = ServerRouteContext(
+            state=lambda: {"active_model_id": None}, stop=lambda: None, start=lambda: None,
+            create_job=lambda kind, detail: {"kind": kind, "detail": detail, "job_id": "job"},
+            launch=lambda _job, _work, _name: None, finish=lambda _job, _detail: None,
+            recent_jobs=lambda: [], find_job=lambda _job_id: None, logs=lambda _limit, _role: {},
+            metrics=lambda window, cursor: captured.append((window, cursor)) or {"ok": True},
+        )
+        routes = {route.path: route.endpoint for route in create_router(context).routes}
+
+        result = routes["/metrics"](60, "aux-5")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(captured, [(60, "aux-5")])
+
     def test_stop_requests_worker_and_coordinator_shutdown(self) -> None:
         from dashboard.routes.server_routes import ServerRouteContext, create_router
 

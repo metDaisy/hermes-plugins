@@ -20,7 +20,7 @@ class ServerRouteContext:
     recent_jobs: Callable[[], list[dict[str, Any]]]
     find_job: Callable[[str], dict[str, Any] | None]
     logs: Callable[[int, str], dict[str, Any]]
-    metrics: Callable[[int], dict[str, Any]]
+    metrics: Callable[[int, str | None], dict[str, Any]]
     shutdown: Callable[[], None] = lambda: None
 
 
@@ -67,9 +67,9 @@ def create_router(context: ServerRouteContext) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.get("/metrics")
-    def metrics(window: int = 60) -> dict[str, Any]:
+    def metrics(window: int = 60, compression_cursor: str | None = None) -> dict[str, Any]:
         try:
-            return context.metrics(window)
+            return context.metrics(window, compression_cursor)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

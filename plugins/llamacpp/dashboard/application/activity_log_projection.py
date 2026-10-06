@@ -31,7 +31,16 @@ def _unwrap(line: str) -> tuple[str, str]:
 
 
 def _native_elapsed_seconds(line: str) -> float | None:
-    text, _level = _unwrap(line)
+    raw = str(line or "").strip()
+    if raw.startswith("{"):
+        try:
+            payload = json.loads(raw)
+            timestamp = payload.get("time") if isinstance(payload, dict) else None
+            if isinstance(timestamp, (int, float)):
+                return float(timestamp) / 1_000_000.0
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    text, _level = _unwrap(raw)
     match = _NATIVE_ELAPSED_PREFIX.match(text)
     if not match:
         return None
@@ -276,3 +285,78 @@ def project_activity_lines(raw_lines: list[str], *, latest_observed_at: float | 
             _emit(events, lines, role, event, safe, "error" if level == "error" else "warning", contexts=contexts)
 
     return {"lines": lines, "events": events}
+
+
+def compression_call_page(activity_path: Path, context_path: Path, *, limit: int = 5,
+                          cursor: str | None = None) -> dict[str, Any]:
+    """Read a stable page of privacy-safe Aux calls from request journal offsets."""
+    page_size = max(1, min(int(limit), 25))
+    contexts: list[dict[str, Any]] = []
+    try:
+        for line in context_path.read_text(encoding="utf-8").splitlines():
+            value = json.loads(line)
+            if isinstance(value, dict) and value.get("type") == "hermes_request_context":
+                contexts.append(value)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {"items": [], "next_cursor": None}
+    contexts.sort(key=lambda value: (
+        int(value.get("activity_offset") or 0), float(value.get("recorded_at") or 0),
+    ))
+    compression = [value for value in contexts if str(value.get("role") or "") == "compression"]
+    compression.reverse()
+    start = 0
+    if cursor:
+        for index, value in enumerate(compression):
+            if str(value.get("request_id") or "") == cursor:
+                start = index + 1
+                break
+        else:
+            raise ValueError("invalid compression cursor")
+    selected = compression[start:start + page_size]
+    has_more = start + page_size < len(compression)
+    try:
+        activity_size = activity_path.stat().st_size
+    except OSError:
+        activity_size = 0
+
+    items: list[dict[str, Any]] = []
+    for context in selected:
+        segment: list[str] = []
+        offset = max(0, int(context.get("activity_offset") or 0))
+        later_offsets = [
+            int(value.get("activity_offset") or 0) for value in contexts
+            if int(value.get("activity_offset") or 0) > offset
+        ]
+        end = min(later_offsets) if later_offsets else activity_size
+        end = min(end, offset + 8 * 1024 * 1024)
+        if end > offset:
+            try:
+                with activity_path.open("rb") as stream:
+                    stream.seek(offset)
+                    segment = stream.read(end - offset).decode("utf-8", errors="replace").splitlines()
+            except OSError:
+                segment = []
+        projected = project_activity_lines([
+            json.dumps(context, ensure_ascii=False, separators=(",", ":")), *segment,
+        ])
+        events = list(projected.get("events") or [])
+        prompt_events = [event for event in events if event.get("event") == "prompt_completed"]
+        completion_events = [event for event in events if event.get("event") == "inference_completed"]
+        timestamp = float(context.get("recorded_at") or 0)
+        items.append({
+            "request_id": str(context.get("request_id") or ""),
+            "profile": str(context.get("profile") or ""),
+            "session": str(context.get("session") or ""),
+            "timestamp": timestamp,
+            "completed_at": timestamp,
+            "input_context_tokens": (
+                int(prompt_events[-1].get("prompt_tokens") or 0) if prompt_events else None
+            ),
+            "duration_ms": (
+                float(completion_events[-1].get("total_ms") or 0) if completion_events else None
+            ),
+        })
+    return {
+        "items": items,
+        "next_cursor": str(selected[-1].get("request_id") or "") if has_more and selected else None,
+    }
