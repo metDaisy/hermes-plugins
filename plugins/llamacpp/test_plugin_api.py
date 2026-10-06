@@ -185,6 +185,9 @@ class LlamaCppManagerTests(unittest.TestCase):
         expected_build = f'COORDINATOR_BUILD = "{plugin_version}"'
         self.assertIn(expected_build, (root / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8"))
         self.assertIn(expected_build, (root / "dashboard" / "plugin_api.py").read_text(encoding="utf-8"))
+        expected_protocol = "COORDINATOR_PROTOCOL = 2"
+        self.assertIn(expected_protocol, (root / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8"))
+        self.assertIn(expected_protocol, (root / "dashboard" / "plugin_api.py").read_text(encoding="utf-8"))
 
     def test_prism_execution_profile_uses_installed_release_tag_when_global_runtime_is_official(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
