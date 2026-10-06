@@ -1,7 +1,8 @@
 name: llamacpp
-version: 0.3.8
+version: 0.3.9
 description: Unified llama.cpp manager with official and Prism-ML backends.
 kind: standalone
 provides_hooks:
-  - pre_api_request
   - pre_auxiliary_call
+provides_middleware:
+  - llm_request

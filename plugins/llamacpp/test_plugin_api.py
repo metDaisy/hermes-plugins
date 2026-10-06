@@ -39,50 +39,38 @@ class LlamaCppManagerTests(unittest.TestCase):
         inference_proxy._active_main_requests = 0
         inference_proxy._queued_main_requests = 0
 
-    def test_plugin_hook_publishes_profile_and_session_only_for_local_requests(self) -> None:
+    def test_plugin_middleware_adds_profile_and_session_headers_only_for_local_requests(self) -> None:
         entrypoint = Path(__file__).parent / "__init__.py"
         spec = importlib.util.spec_from_file_location("llamacpp_plugin_entrypoint", entrypoint)
         assert spec and spec.loader
         plugin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(plugin)
 
-        opened = []
-
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-        def open_request(request, timeout):
-            opened.append((request, timeout))
-            return Response()
-
         with patch.dict(os.environ, {
             "HERMES_HOME": "C:/Users/leee/AppData/Local/hermes/profiles/project-manager",
-        }), patch.object(plugin, "urlopen", side_effect=open_request):
-            plugin._publish_request_context(
+        }):
+            local = plugin._tag_request_context(
+                request={"model": "main-local", "messages": [], "extra_headers": {"existing": "kept"}},
                 provider="custom",
                 base_url="http://127.0.0.1:18380/v1",
                 model="main-local",
                 session_id="20261003_164117_5bf794",
             )
-            plugin._publish_request_context(
+            remote = plugin._tag_request_context(
+                request={"model": "gpt-5.6-luna", "messages": []},
                 provider="openai-codex",
                 base_url="https://chatgpt.com/backend-api/codex",
                 model="gpt-5.6-luna",
                 session_id="20261003_164117_5bf794",
             )
 
-        self.assertEqual(len(opened), 1)
-        request, timeout = opened[0]
-        self.assertEqual(timeout, 2.0)
-        self.assertEqual(json.loads(request.data), {
-            "model": "main-local",
-            "profile": "project-manager",
-            "session": "20261003_164117_5bf794",
+        self.assertIsNone(remote)
+        self.assertEqual(local["request"]["extra_headers"], {
+            "existing": "kept",
+            "x-hermes-profile": "project-manager",
+            "x-hermes-session": "20261003_164117_5bf794",
         })
+        self.assertEqual(local["source"], "llamacpp")
 
     def test_plugin_hook_uses_context_local_profile_home(self) -> None:
         entrypoint = Path(__file__).parent / "__init__.py"
@@ -101,28 +89,15 @@ class LlamaCppManagerTests(unittest.TestCase):
         ):
             self.assertEqual(plugin._profile_name(), "project-manager")
 
-    def test_plugin_hook_uses_context_local_session_id(self) -> None:
+    def test_plugin_middleware_prefers_request_local_session_over_cached_agent_session(self) -> None:
         entrypoint = Path(__file__).parent / "__init__.py"
         spec = importlib.util.spec_from_file_location("llamacpp_plugin_session_override", entrypoint)
         assert spec and spec.loader
         plugin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(plugin)
 
-        opened = []
-
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-        def open_request(request, timeout):
-            opened.append((request, timeout))
-            return Response()
-
         current_session = "20261006_001122_current"
-        stale_agent_session = "20261005_235039_841a9f"
+        stale_agent_session = "20261005_235039_stale"
         gateway = types.ModuleType("gateway")
         session_context = types.ModuleType("gateway.session_context")
         session_context.get_session_env = lambda name, default="": (
@@ -133,17 +108,16 @@ class LlamaCppManagerTests(unittest.TestCase):
         with patch.dict(sys.modules, {
             "gateway": gateway,
             "gateway.session_context": session_context,
-        }), patch.object(plugin, "urlopen", side_effect=open_request):
-            plugin._publish_request_context(
+        }):
+            result = plugin._tag_request_context(
+                request={"model": "main-local", "messages": []},
                 provider="custom",
                 base_url="http://127.0.0.1:18380/v1",
                 model="main-local",
                 session_id=stale_agent_session,
             )
 
-        self.assertEqual(len(opened), 1)
-        request, _timeout = opened[0]
-        self.assertEqual(json.loads(request.data)["session"], current_session)
+        self.assertEqual(result["request"]["extra_headers"]["x-hermes-session"], current_session)
 
     def test_auxiliary_hook_uses_parent_turn_session_id(self) -> None:
         entrypoint = Path(__file__).parent / "__init__.py"
@@ -158,6 +132,10 @@ class LlamaCppManagerTests(unittest.TestCase):
         class Context:
             @staticmethod
             def register_hook(name, callback):
+                hooks[name] = callback
+
+            @staticmethod
+            def register_middleware(name, callback):
                 hooks[name] = callback
 
         class Response:
@@ -240,11 +218,13 @@ class LlamaCppManagerTests(unittest.TestCase):
         if "register_tool" not in registration:
             self.assertNotIn("provides_tools:", manifest)
 
-    def test_manifest_declares_registered_auxiliary_hook(self) -> None:
+    def test_manifest_declares_only_registered_observer_hook(self) -> None:
         root = Path(__file__).parent
         manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
         normalized = manifest.replace(chr(13) + chr(10), chr(10))
-        self.assertIn("provides_hooks:\n  - pre_api_request\n  - pre_auxiliary_call", normalized)
+        self.assertIn("provides_hooks:\n  - pre_auxiliary_call", normalized)
+        self.assertIn("provides_middleware:\n  - llm_request", normalized)
+        self.assertNotIn("pre_api_request", normalized)
 
 
     def test_stopped_backend_serves_model_inventory_and_presets_without_coordinator(self) -> None:
@@ -1717,7 +1697,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertEqual(rewritten["model"], "large")
         self.assertEqual(rewritten["reasoning_effort"], "medium")
 
-    def test_proxy_drops_hermes_reasoning_effort_when_model_has_no_override(self) -> None:
+    def test_proxy_preserves_hermes_reasoning_effort_when_model_has_no_override(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
 
         body = b'{"model":"main-local","reasoning_effort":"high","messages":[]}'
@@ -1731,7 +1711,7 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         rewritten = json.loads(rewrite_logical_model(body, state))
 
-        self.assertNotIn("reasoning_effort", rewritten)
+        self.assertEqual(rewritten["reasoning_effort"], "high")
 
     def test_native_router_preserves_alias_and_applies_model_reasoning_effort(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
@@ -1749,6 +1729,82 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertEqual(rewritten["model"], "main-local")
         self.assertEqual(rewritten["reasoning_effort"], "medium")
+
+    def test_proxy_forwards_resolved_reasoning_effort_to_worker_wire_body(self) -> None:
+        from starlette.requests import Request
+        from dashboard import inference_proxy
+
+        async def forward(saved_effort: str | None) -> dict[str, object]:
+            captured: dict[str, object] = {}
+
+            class FakeUpstream:
+                status_code = 200
+                headers = {"content-type": "application/json"}
+
+                async def aiter_raw(self):
+                    if False:
+                        yield b""
+
+                async def aclose(self) -> None:
+                    return
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    return
+
+                def build_request(self, method, url, headers, content):
+                    captured["method"] = method
+                    captured["url"] = url
+                    captured["body"] = json.loads(content)
+                    return object()
+
+                async def send(self, _request, stream):
+                    self.assert_stream = stream
+                    return FakeUpstream()
+
+                async def aclose(self) -> None:
+                    return
+
+            async def receive():
+                return {
+                    "type": "http.request",
+                    "body": b'{"model":"main-local","reasoning_effort":"high","messages":[]}',
+                    "more_body": False,
+                }
+
+            async def begin_execution(_role):
+                return None
+
+            state = {
+                "port": 18434,
+                "active_model_id": "large",
+                "model_settings": {"large": {"reasoning-effort": saved_effort}},
+                "execution_profiles": {
+                    "main": {"runtime_kind": "official", "model_id": "large"},
+                },
+            }
+            request = Request({
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/chat/completions",
+                "query_string": b"",
+                "headers": [],
+                "server": ("127.0.0.1", 18380),
+                "scheme": "http",
+            }, receive)
+            with patch.object(inference_proxy.httpx, "AsyncClient", FakeClient), \
+                    patch.object(inference_proxy, "_worker_state", return_value=state), \
+                    patch.object(inference_proxy, "_worker_url", return_value="http://127.0.0.1:18434/v1/chat/completions"), \
+                    patch.object(inference_proxy, "_begin_execution", side_effect=begin_execution):
+                response = await inference_proxy.proxy_inference(request, "chat/completions")
+                _ = [chunk async for chunk in response.body_iterator]
+            return captured["body"]
+
+        preserved = asyncio.run(forward(None))
+        overridden = asyncio.run(forward("medium"))
+
+        self.assertEqual(preserved["reasoning_effort"], "high")
+        self.assertEqual(overridden["reasoning_effort"], "medium")
 
     def test_proxy_request_context_is_written_as_privacy_safe_activity_event(self) -> None:
         import tempfile
