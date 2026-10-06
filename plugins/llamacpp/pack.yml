@@ -5,6 +5,6 @@ version: 0.3.10
 plugins:
   - repo: metDaisy/hermes-plugins
     subdir: plugins/llamacpp
-    ref: 07c5eb07367cd253039cbfe9056da10062188f2b
+    ref: 749fd4d3f25b409770cdad0582a31cb0ac7e629a
 config: {}
 skills: []
