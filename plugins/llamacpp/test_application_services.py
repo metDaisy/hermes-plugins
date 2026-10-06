@@ -340,6 +340,54 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         self.assertIn('        "compression-local":', updated)
         self.assertIn('          context_length: 8192', updated)
 
+    def test_remove_preserves_a_preexisting_empty_providers_root(self) -> None:
+        from dashboard.application.profile_endpoint import ManagedEndpointConfig
+
+        config = ManagedEndpointConfig(
+            key="llamacpp-local",
+            begin="# BEGIN llamacpp endpoint (managed)",
+            end="# END llamacpp endpoint (managed)",
+        )
+        original = "providers:\n"
+
+        updated = config.upsert(original, "http://127.0.0.1:18380/v1", "main-local", 32768)
+        removed, changed = config.remove(updated)
+
+        self.assertTrue(changed)
+        self.assertEqual(removed, original)
+
+    def test_remove_deletes_only_an_explicitly_owned_empty_providers_root(self) -> None:
+        from dashboard.application.profile_endpoint import ManagedEndpointConfig
+
+        config = ManagedEndpointConfig(
+            key="llamacpp-local",
+            begin="# BEGIN llamacpp endpoint (managed)",
+            end="# END llamacpp endpoint (managed)",
+        )
+        original = "model:\n  default: remote\n"
+
+        updated = config.upsert(original, "http://127.0.0.1:18380/v1", "main-local", 32768)
+        removed, changed = config.remove(updated)
+
+        self.assertTrue(changed)
+        self.assertEqual(removed, original)
+
+    def test_remove_keeps_owned_root_after_another_provider_is_added(self) -> None:
+        from dashboard.application.profile_endpoint import ManagedEndpointConfig
+
+        config = ManagedEndpointConfig(
+            key="llamacpp-local",
+            begin="# BEGIN llamacpp endpoint (managed)",
+            end="# END llamacpp endpoint (managed)",
+        )
+        updated = config.upsert("", "http://127.0.0.1:18380/v1", "main-local", 32768)
+        updated += "  other:\n    api: https://example.test\n"
+
+        removed, changed = config.remove(updated)
+
+        self.assertTrue(changed)
+        self.assertEqual(removed, "providers:\n  other:\n    api: https://example.test\n")
+
 
 class ServerOptionCatalogTests(unittest.TestCase):
     def test_parses_toggle_aliases_and_numeric_defaults(self) -> None:

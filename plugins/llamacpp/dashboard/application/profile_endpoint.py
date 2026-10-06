@@ -9,6 +9,8 @@ from pathlib import Path
 class ManagedEndpointConfig:
     """Owns only the plugin-managed YAML block, preserving all other config."""
 
+    _ROOT_MARKER = "# llamacpp providers root (managed)"
+
     def __init__(self, key: str, begin: str, end: str) -> None:
         self._key = key
         self._begin = begin
@@ -33,7 +35,11 @@ class ManagedEndpointConfig:
         if providers is None:
             if lines and lines[-1].strip():
                 lines.append("")
-            lines.extend(["providers:", *self._model_lines(base_url, default_model, models, "  ")])
+            lines.extend([
+                self._ROOT_MARKER,
+                "providers:",
+                *self._model_lines(base_url, default_model, models, "  "),
+            ])
         else:
             if any(line.startswith(f"  {self._key}:") for line in lines[providers + 1 :]):
                 raise RuntimeError("a non-plugin provider already owns the llamacpp endpoint key")
@@ -49,9 +55,27 @@ class ManagedEndpointConfig:
         if managed is None:
             return text, False
         begin, end = managed
-        root_created = begin >= 1 and lines[begin - 1].strip() == "providers:" and not lines[begin - 1].startswith((" ", "\t"))
-        start = begin - 1 if root_created else begin
-        if root_created and start > 0 and not lines[start - 1].strip():
+        root_marker = begin - 2
+        root_created = (
+            root_marker >= 0
+            and lines[root_marker].strip() == self._ROOT_MARKER
+            and lines[begin - 1].strip() == "providers:"
+            and not lines[begin - 1].startswith((" ", "\t"))
+        )
+        remove_root = False
+        if root_created:
+            section_end = next(
+                (index for index in range(end + 1, len(lines))
+                 if lines[index].strip() and not lines[index].startswith((" ", "\t"))),
+                len(lines),
+            )
+            remove_root = not any(line.strip() for line in lines[end + 1:section_end])
+            if not remove_root:
+                del lines[root_marker]
+                begin -= 1
+                end -= 1
+        start = root_marker if remove_root else begin
+        if remove_root and start > 0 and not lines[start - 1].strip():
             start -= 1
         del lines[start : end + 1]
         while start < len(lines) and not lines[start].strip() and (start == 0 or not lines[start - 1].strip()):

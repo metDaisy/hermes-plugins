@@ -538,7 +538,7 @@ class ResourceMetricsTests(unittest.TestCase):
         slot_context.assert_called_once_with(18434, model_alias="main-local")
 
 
-class ProfileModelRoutingTests(unittest.TestCase):
+class CoreOwnedProfilePolicyTests(unittest.TestCase):
     BASE = """model:\n  provider: openai-codex\n  default: gpt-5.6-luna\n  base_url: https://chatgpt.com/backend-api/codex\n  api_mode: codex_responses\n  reasoning_effort: high\nfallback_providers: []\nagent:\n  max_turns: 90\nauxiliary:\n  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna\n    reasoning_effort: medium\n"""
 
     def test_endpoint_sync_preserves_core_owned_model_policy(self) -> None:
@@ -567,7 +567,7 @@ class ProfileModelRoutingTests(unittest.TestCase):
         )
 
 class ProductionIntegrationTests(unittest.TestCase):
-    def test_unexpected_worker_exit_unregisters_local_models_and_restores_remote_policy(self) -> None:
+    def test_unexpected_worker_exit_unregisters_the_managed_endpoint(self) -> None:
         import threading
         from dashboard.application.server_lifecycle import ServerLifecycleService
 
@@ -843,7 +843,7 @@ class ProductionIntegrationTests(unittest.TestCase):
             )]
             for path in profiles:
                 path.parent.mkdir(parents=True)
-                path.write_text(ProfileModelRoutingTests.BASE, encoding="utf-8")
+                path.write_text(CoreOwnedProfilePolicyTests.BASE, encoding="utf-8")
 
             with patch.object(api, "_profile_config_paths", return_value=profiles), \
                     patch.object(api, "_profile_provider_models", return_value={
@@ -868,7 +868,7 @@ class ProductionIntegrationTests(unittest.TestCase):
             root = Path(raw_root)
             profiles = [root / name / "config.yaml" for name in ("coder", "main", "comfy-master")]
             configured = api._config_with_execution_profiles(
-                ProfileModelRoutingTests.BASE, "http://127.0.0.1:18380/v1", "main-local",
+                CoreOwnedProfilePolicyTests.BASE, "http://127.0.0.1:18380/v1", "main-local",
                 {"main-local": 32768},
             )
             for path in profiles:
@@ -881,7 +881,7 @@ class ProductionIntegrationTests(unittest.TestCase):
             for path in profiles:
                 restored = path.read_text(encoding="utf-8")
                 self.assertNotIn("# BEGIN llamacpp endpoint (managed)", restored, path.parent.name)
-                self.assertEqual(restored, ProfileModelRoutingTests.BASE)
+                self.assertEqual(restored, CoreOwnedProfilePolicyTests.BASE)
 
 
 if __name__ == "__main__":
