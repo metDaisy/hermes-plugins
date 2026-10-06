@@ -2,24 +2,27 @@ manifest_version: 2
 api_version: 1
 name: kanban-workflow-controller
 label: Kanban Workflow Controller
-version: 0.1.0
-description: Routes actionable Kanban events to the existing Project Manager workflow session.
+version: 0.5.0
+description: Routes native Kanban workflow events and KWC-owned comment conversations to Profile sessions.
 author: metDaisy
 license: MIT
 kind: standalone
 provides_hooks:
   - pre_llm_call
+  - kanban_task_completed
+  - kanban_task_blocked
+  - on_kanban_worker_exited
+  - on_kanban_worker_stale_claim
   - on_kanban_dispatch_tick
+provides_tools:
+  - kwc_comment
+  - kwc_reply
 tags:
   - kanban
   - workflow
   - orchestration
   - events
 config_schema:
-  board:
-    type: string
-    required: true
-    description: Kanban board slug monitored by the controller.
   coordinator_profile:
     type: string
     default: project-manager
@@ -28,3 +31,7 @@ config_schema:
     type: string
     default: dashboard
     description: Exact Kanban comment author treated as the human response on blocked Decision cards.
+  comment_profiles:
+    type: string
+    default: project-manager,coder,reviewer
+    description: Comma-separated Profiles whose latest top-level session can receive KWC comment wakeups.
