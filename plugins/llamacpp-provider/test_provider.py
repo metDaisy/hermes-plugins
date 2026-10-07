@@ -30,6 +30,7 @@ def test_manifest_and_profile_declare_loopback_no_auth_provider():
     assert profile.base_url == "http://127.0.0.1:18380/v1"
     assert profile.default_aux_model == "compression-local"
     assert profile.fallback_models == ("main-local",)
+    assert _module.is_loopback_no_auth_profile(profile) is True
 
 
 def test_profile_fetches_dynamic_catalog_without_authorization_header():

@@ -4,7 +4,7 @@ import json
 from urllib.request import Request, urlopen
 
 from providers import register_provider
-from providers.base import ProviderProfile
+from providers.base import ProviderProfile, is_loopback_no_auth_profile
 
 
 class LlamaCppLocalProfile(ProviderProfile):
