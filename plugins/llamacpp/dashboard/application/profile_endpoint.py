@@ -119,6 +119,95 @@ class ManagedEndpointConfig:
         return begin, end
 
 
+def apply_worker_model_policy(text: str) -> str:
+    """Assign managed local Main/Aux routes for worker Profiles only."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+
+    def section(key: str, indent: int, start: int = 0,
+                stop: int | None = None) -> tuple[int, int] | None:
+        prefix = " " * indent + key + ":"
+        upper = len(lines) if stop is None else stop
+        begin = next((index for index in range(start, upper) if lines[index] == prefix), None)
+        if begin is None:
+            return None
+        end = next(
+            (index for index in range(begin + 1, upper)
+             if lines[index].strip() and len(lines[index]) - len(lines[index].lstrip()) <= indent),
+            upper,
+        )
+        return begin, end
+
+    def update_scalars(bounds: tuple[int, int], indent: int,
+                       values: dict[str, str], remove: set[str]) -> None:
+        begin, end = bounds
+        child_prefix = " " * (indent + 2)
+        deleted = 0
+        for index in range(end - 1, begin, -1):
+            line = lines[index]
+            if not line.startswith(child_prefix) or line.startswith(child_prefix + " ") or ":" not in line:
+                continue
+            key = line[len(child_prefix):].split(":", 1)[0].strip()
+            if key in remove:
+                del lines[index]
+                deleted += 1
+        end -= deleted
+        while end > begin + 1 and not lines[end - 1].strip():
+            end -= 1
+        found: dict[str, int] = {}
+        for index in range(begin + 1, end):
+            line = lines[index]
+            if not line.startswith(child_prefix) or line.startswith(child_prefix + " ") or ":" not in line:
+                continue
+            key = line[len(child_prefix):].split(":", 1)[0].strip()
+            if key in values:
+                found[key] = index
+        for key, value in values.items():
+            encoded = json.dumps(value, ensure_ascii=False)
+            if key in found:
+                lines[found[key]] = f"{child_prefix}{key}: {encoded}"
+            else:
+                lines.insert(end, f"{child_prefix}{key}: {encoded}")
+                end += 1
+
+    model = section("model", 0)
+    if model is None:
+        lines[0:0] = [
+            "model:", '  provider: "llamacpp-local"', '  default: "main-local"',
+            '  reasoning_effort: "high"',
+        ]
+    else:
+        update_scalars(
+            model, 0,
+            {"provider": "llamacpp-local", "default": "main-local", "reasoning_effort": "high"},
+            {"base_url", "api_base", "api_mode"},
+        )
+
+    auxiliary = section("auxiliary", 0)
+    if auxiliary is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend([
+            "auxiliary:", "  compression:", '    provider: "llamacpp-local"',
+            '    model: "compression-local"', '    reasoning_effort: "none"',
+        ])
+    else:
+        compression = section("compression", 2, auxiliary[0] + 1, auxiliary[1])
+        if compression is None:
+            lines[auxiliary[1]:auxiliary[1]] = [
+                "  compression:", '    provider: "llamacpp-local"',
+                '    model: "compression-local"', '    reasoning_effort: "none"',
+            ]
+        else:
+            update_scalars(
+                compression, 2,
+                {"provider": "llamacpp-local", "model": "compression-local", "reasoning_effort": "none"},
+                {"base_url", "api_base", "api_mode"},
+            )
+
+    return newline.join(lines) + (newline if text.endswith(("\n", "\r")) else "")
+
+
 def write_text_atomically(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".llamacpp.tmp")

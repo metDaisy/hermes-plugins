@@ -1518,11 +1518,11 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertEqual(first.read_text(encoding="utf-8"), original)
             self.assertEqual(second.read_text(encoding="utf-8"), original)
 
-    def test_provider_descriptor_preserves_profile_policy(self) -> None:
+    def test_server_start_registers_local_models_for_all_profiles_and_assigns_worker_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
-            config_path = Path(raw_root) / "project-manager" / "config.yaml"
-            config_path.parent.mkdir(parents=True)
-            config_path.write_text(
+            root = Path(raw_root)
+            paths = []
+            original = (
                 "model:\n"
                 "  provider: openai-codex\n"
                 "  default: gpt-5.6-luna\n"
@@ -1530,25 +1530,48 @@ class LlamaCppManagerTests(unittest.TestCase):
                 "auxiliary:\n"
                 "  compression:\n"
                 "    provider: openai-codex\n"
-                "    model: gpt-5.6-luna\n",
-                encoding="utf-8",
+                "    model: gpt-5.6-luna\n"
             )
+            for profile_name in ("main", "project-manager", "coder", "reviewer", "comfy-master"):
+                config_path = root / profile_name / "config.yaml"
+                config_path.parent.mkdir(parents=True)
+                config_path.write_text(original, encoding="utf-8")
+                paths.append(config_path)
 
-            original = config_path.read_text(encoding="utf-8")
-            with patch.object(api, "_profile_provider_models", return_value={
+            with patch.object(api, "_profile_config_paths", return_value=paths), \
+                    patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768,
                         "compression-local": 8192,
                     }):
                 endpoint = api._sync_execution_profile_endpoint()
 
-            updated = config_path.read_text(encoding="utf-8")
-            self.assertEqual(updated, original)
             self.assertEqual(endpoint["provider"], "llamacpp-local")
             self.assertEqual(endpoint["model"], "main-local")
             self.assertEqual(endpoint["models"], {
                 "main-local": 32768,
                 "compression-local": 8192,
             })
+            for config_path in paths:
+                updated = config_path.read_text(encoding="utf-8")
+                managed = updated.split("# BEGIN llamacpp endpoint (managed)", 1)[1].split(
+                    "# END llamacpp endpoint (managed)", 1,
+                )[0]
+                self.assertIn('"main-local":', managed)
+                self.assertIn('"compression-local":', managed)
+                if config_path.parent.name in {"project-manager", "coder", "reviewer"}:
+                    self.assertIn(
+                        'model:\n  provider: "llamacpp-local"\n  default: "main-local"\n'
+                        '  reasoning_effort: "high"',
+                        updated,
+                    )
+                    self.assertIn(
+                        '  compression:\n    provider: "llamacpp-local"\n'
+                        '    model: "compression-local"\n    reasoning_effort: "none"',
+                        updated,
+                    )
+                else:
+                    self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", updated)
+                    self.assertIn("    provider: openai-codex\n    model: gpt-5.6-luna\n", updated)
 
 
     def test_profile_endpoint_sync_surfaces_rollback_write_failure(self) -> None:
