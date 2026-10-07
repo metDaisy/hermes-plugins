@@ -672,6 +672,13 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
     """Register local Main/Aux models everywhere and assign worker defaults."""
     base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
     execution_models = _profile_provider_models()
+    profile_snapshot = execution_profiles()
+    profiles = profile_snapshot.get("profiles") if isinstance(profile_snapshot, dict) else None
+    main_profile = profiles.get("main") if isinstance(profiles, dict) else None
+    main_model_id = (
+        str(main_profile.get("model_id") or fallback_model or "")
+        if isinstance(main_profile, dict) else str(fallback_model or "")
+    )
     if "main-local" not in execution_models and fallback_model:
         stored_options = _load_options().get(fallback_model, {})
         try:
@@ -693,7 +700,7 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
             text = path.read_text(encoding="utf-8")
             updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
             if path.parent.name in {"project-manager", "coder", "reviewer"}:
-                updated = apply_worker_model_policy(updated)
+                updated = apply_worker_model_policy(updated, main_model_id)
             if updated != text:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)

@@ -119,10 +119,13 @@ class ManagedEndpointConfig:
         return begin, end
 
 
-def apply_worker_model_policy(text: str) -> str:
-    """Assign managed local Main/Aux routes for worker Profiles only."""
-    newline = "\r\n" if "\r\n" in text else "\n"
+def apply_worker_model_policy(text: str, main_model_id: str) -> str:
+    """Assign managed local Main/Aux routes and model-specific reasoning defaults."""
+    newline = chr(13) + chr(10) if chr(13) + chr(10) in text else chr(10)
     lines = text.splitlines()
+    main_reasoning_effort = (
+        "xhigh" if "ternary-bonsai-2" in str(main_model_id or "").lower() else "high"
+    )
 
     def section(key: str, indent: int, start: int = 0,
                 stop: int | None = None) -> tuple[int, int] | None:
@@ -234,12 +237,13 @@ def apply_worker_model_policy(text: str) -> str:
     if model is None:
         lines[0:0] = [
             "model:", '  provider: "llamacpp-local"', '  default: "main-local"',
-            '  reasoning_effort: "xhigh"',
+            f'  reasoning_effort: "{main_reasoning_effort}"',
         ]
     else:
         update_scalars(
             model, 0,
-            {"provider": "llamacpp-local", "default": "main-local", "reasoning_effort": "xhigh"},
+            {"provider": "llamacpp-local", "default": "main-local",
+             "reasoning_effort": main_reasoning_effort},
             {"base_url", "api_base", "api_mode"},
         )
 

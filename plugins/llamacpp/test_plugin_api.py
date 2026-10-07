@@ -1547,6 +1547,11 @@ class LlamaCppManagerTests(unittest.TestCase):
                     patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768,
                         "compression-local": 8192,
+                    }), patch.object(api, "execution_profiles", return_value={
+                        "profiles": {
+                            "main": {"model_id": "Ternary-Bonsai-2-27B-PQ2_0"},
+                            "compression": {"model_id": "Qwen3.5-4B-UD-Q6_K_XL"},
+                        },
                     }):
                 endpoint = api._sync_execution_profile_endpoint()
 
@@ -1580,6 +1585,33 @@ class LlamaCppManagerTests(unittest.TestCase):
                     self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", updated)
                     self.assertIn("    provider: openai-codex\n    model: gpt-5.6-luna\n", updated)
 
+
+    def test_worker_reasoning_policy_uses_xhigh_only_for_bonsai2_and_disables_compression(self) -> None:
+        from dashboard.application.profile_endpoint import apply_worker_model_policy
+
+        original = (
+            "model:\n"
+            "  provider: openai-codex\n"
+            "  default: gpt-5.6-luna\n"
+            "  reasoning_effort: high\n"
+            "auxiliary:\n"
+            "  compression:\n"
+            "    provider: openai-codex\n"
+            "    model: gpt-5.6-luna\n"
+            "    reasoning_effort: high\n"
+        )
+
+        bonsai = apply_worker_model_policy(original, "Ternary-Bonsai-2-27B-PQ2_0")
+        generic = apply_worker_model_policy(original, "Qwen3.5-4B-UD-Q6_K_XL")
+
+        self.assertIn('  reasoning_effort: "xhigh"', bonsai)
+        self.assertIn('  reasoning_effort: "high"', generic)
+        for configured in (bonsai, generic):
+            self.assertIn(
+                '  compression:\n    provider: "llamacpp-local"\n'
+                '    model: "compression-local"\n    reasoning_effort: "none"',
+                configured,
+            )
 
     def test_profile_endpoint_sync_surfaces_rollback_write_failure(self) -> None:
         first = Path("first.yaml")
