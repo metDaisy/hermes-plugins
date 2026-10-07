@@ -156,18 +156,20 @@ class LlamaCppManagerTests(unittest.TestCase):
         )
         gateway.session_context = session_context
 
-        plugin.register(Context())
-        with patch.dict(sys.modules, {
-            "gateway": gateway,
-            "gateway.session_context": session_context,
-        }), patch.object(plugin, "urlopen", side_effect=open_request):
-            hooks["pre_auxiliary_call"](
-                provider="custom",
-                base_url="http://127.0.0.1:18380/v1",
-                model="compression-local",
-                aux_task="compression",
-                session_id="20261006_parent_turn",
-            )
+        with patch.dict(os.environ, {"HERMES_PROFILE": "main"}):
+            plugin.register(Context())
+            with patch.dict(sys.modules, {
+                "gateway": gateway,
+                "gateway.session_context": session_context,
+            }), patch.object(plugin, "urlopen", side_effect=open_request), \
+                    patch.object(plugin, "_profile_name", return_value="main"):
+                hooks["pre_auxiliary_call"](
+                    provider="custom",
+                    base_url="http://127.0.0.1:18380/v1",
+                    model="compression-local",
+                    aux_task="compression",
+                    session_id="20261006_parent_turn",
+                )
 
         self.assertEqual(len(opened), 1)
         request, _timeout = opened[0]
@@ -1481,7 +1483,7 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertEqual(first.read_text(encoding="utf-8"), "providers:\n")
             self.assertEqual(second.read_text(encoding="utf-8"), "providers:\n")
 
-    def test_profile_endpoint_registers_only_main_without_rewriting_auxiliary_policy(self) -> None:
+    def test_profile_endpoint_registers_main_and_compression_and_rewrites_worker_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             config_path = Path(raw_root) / "project-manager" / "config.yaml"
             config_path.parent.mkdir(parents=True)
@@ -1509,11 +1511,20 @@ class LlamaCppManagerTests(unittest.TestCase):
                 "# END llamacpp endpoint (managed)", 1,
             )[0]
             self.assertEqual(endpoint["model"], "main-local")
-            self.assertEqual(endpoint["models"], {"main-local": 32768})
+            self.assertEqual(endpoint["models"], {
+                "main-local": 32768,
+                "compression-local": 8192,
+            })
             self.assertIn('"main-local":', managed)
-            self.assertNotIn("compression-local", managed)
+            self.assertIn('"compression-local":', managed)
             self.assertIn(
-                "  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna",
+                'model:\n  provider: "llamacpp-local"\n  default: "main-local"\n'
+                '  reasoning_effort: "high"',
+                updated,
+            )
+            self.assertIn(
+                '  compression:\n    provider: "llamacpp-local"\n'
+                '    model: "compression-local"\n    reasoning_effort: "none"',
                 updated,
             )
 
