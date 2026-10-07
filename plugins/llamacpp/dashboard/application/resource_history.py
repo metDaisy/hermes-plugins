@@ -15,6 +15,45 @@ _ALLOWED_FIELDS = {
 _PEAK_FIELDS = {"workerRssBytes", "workerPrivateBytes", "active", "queued"}
 
 
+class ResourceSamplerSignal:
+    """Wake adaptive sampling on runtime transitions and stop it promptly."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._generation = 0
+        self._stopped = False
+
+    def wake(self) -> None:
+        with self._condition:
+            self._generation += 1
+            self._condition.notify_all()
+
+    def set(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify_all()
+
+    def is_set(self) -> bool:
+        with self._condition:
+            return self._stopped
+
+    def generation(self) -> int:
+        with self._condition:
+            return self._generation
+
+    def wait(self, timeout: float, *, after_generation: int | None = None) -> bool:
+        with self._condition:
+            generation = self._generation if after_generation is None else int(after_generation)
+            self._condition.wait_for(
+                lambda: self._stopped or self._generation != generation,
+                timeout=max(0.0, float(timeout)),
+            )
+            return self._stopped
+
+
+RESOURCE_SAMPLER_SIGNAL = ResourceSamplerSignal()
+
+
 def worker_memory_sample(pid: int | None, process_factory: Callable[[int], Any] | None = None) -> dict[str, Any]:
     """Read OS-reported working set and private bytes for the owned worker."""
     if not pid:
@@ -126,19 +165,32 @@ class ResourceHistoryStore:
 def start_resource_sampler(
     capture: Callable[[], Any],
     *,
-    interval_seconds: float = 10.0,
-) -> tuple[threading.Event, threading.Thread]:
-    """Run low-frequency telemetry capture inside the coordinator process."""
-    stopped = threading.Event()
+    interval_seconds: float | Callable[[Any], float] = 10.0,
+    signal: ResourceSamplerSignal | None = None,
+) -> tuple[ResourceSamplerSignal, threading.Thread]:
+    """Run adaptive telemetry capture inside the coordinator process."""
+    stopped = signal or ResourceSamplerSignal()
 
     def sample_loop() -> None:
         while not stopped.is_set():
+            generation = stopped.generation()
+            sample = None
             try:
-                capture()
+                sample = capture()
             except Exception:  # noqa: BLE001 - telemetry must never stop model serving
                 pass
-            stopped.wait(max(1.0, float(interval_seconds)))
+            delay = interval_seconds(sample) if callable(interval_seconds) else interval_seconds
+            stopped.wait(max(1.0, float(delay)), after_generation=generation)
 
     thread = threading.Thread(target=sample_loop, daemon=True, name="llamacpp-resource-sampler")
     thread.start()
     return stopped, thread
+
+
+def resource_sample_interval(sample: Any) -> float:
+    """Sample quickly during inference and back off while idle or stopped."""
+    if not isinstance(sample, dict) or not sample.get("workerPid"):
+        return 30.0
+    if int(sample.get("active") or 0) > 0 or int(sample.get("queued") or 0) > 0:
+        return 2.0
+    return 10.0

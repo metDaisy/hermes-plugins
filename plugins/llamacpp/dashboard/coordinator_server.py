@@ -24,12 +24,12 @@ try:  # noqa: E402
     from application.coordinator_lock import MachineFileLock
     from application.desktop_leases import DesktopLeaseRegistry
     from application.event_bus import EVENT_BUS
-    from application.resource_history import start_resource_sampler
+    from application.resource_history import RESOURCE_SAMPLER_SIGNAL, resource_sample_interval, start_resource_sampler
 except ImportError:  # pragma: no cover - package import fallback
     from .application.coordinator_lock import MachineFileLock
     from .application.desktop_leases import DesktopLeaseRegistry
     from .application.event_bus import EVENT_BUS
-    from .application.resource_history import start_resource_sampler
+    from .application.resource_history import RESOURCE_SAMPLER_SIGNAL, resource_sample_interval, start_resource_sampler
 
 RUNTIME_ROOT = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes" / "runtimes" / "llamacpp"
 COORDINATOR_PORT = int(os.environ.get("LLAMACPP_COORDINATOR_PORT") or 18380)
@@ -74,6 +74,12 @@ def release_desktop_lease(body: dict[str, Any]) -> dict[str, Any]:
 
 @app.websocket("/events")
 async def coordinator_events(websocket: WebSocket) -> None:
+    client_id = str(websocket.query_params.get("client_id") or "")
+    try:
+        _desktop_leases.touch(client_id)
+    except ValueError:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     cursor = EVENT_BUS.latest_id()
     await websocket.send_json({
@@ -83,7 +89,8 @@ async def coordinator_events(websocket: WebSocket) -> None:
     })
     try:
         while True:
-            batch = await asyncio.to_thread(EVENT_BUS.wait_after, cursor, 15.0)
+            batch = await asyncio.to_thread(EVENT_BUS.wait_after, cursor, 3.0)
+            _desktop_leases.touch(client_id)
             if batch["gap"]:
                 await websocket.send_json({
                     "id": batch["cursor"],
@@ -135,7 +142,11 @@ if __name__ == "__main__":
 
         watchdog = threading.Thread(target=stop_after_last_desktop, daemon=True, name="llamacpp-desktop-lease")
         watchdog.start()
-        telemetry_stop, _telemetry_thread = start_resource_sampler(record_resource_sample, interval_seconds=2.0)
+        telemetry_stop, _telemetry_thread = start_resource_sampler(
+            record_resource_sample,
+            interval_seconds=resource_sample_interval,
+            signal=RESOURCE_SAMPLER_SIGNAL,
+        )
         server.run()
     finally:
         if "telemetry_stop" in locals():

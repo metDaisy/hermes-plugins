@@ -8,6 +8,22 @@ class ThreadLike(Protocol):
     def start(self) -> None: ...
 
 
+class _ObservableJob(dict[str, Any]):
+    """Publish one invalidation whenever existing workflow code mutates a job."""
+
+    def __init__(self, value: dict[str, Any], notify: Callable[[dict[str, Any]], None]) -> None:
+        super().__init__(value)
+        self._notify = notify
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        super().__setitem__(key, value)
+        self._notify(self)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        super().update(*args, **kwargs)
+        self._notify(self)
+
+
 class JobManager:
     """Hide job creation, terminal transitions, ordering, and thread failures."""
 
@@ -18,21 +34,24 @@ class JobManager:
         new_id: Callable[[], str],
         now: Callable[[], float],
         thread_factory: Callable[..., ThreadLike],
+        notify: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._jobs = jobs
         self._lock = lock
         self._new_id = new_id
         self._now = now
         self._thread_factory = thread_factory
+        self._notify = notify or (lambda _job: None)
 
     def create(self, kind: str, detail: str) -> dict[str, Any]:
-        job = {
+        job = _ObservableJob({
             "job_id": self._new_id(), "kind": kind, "detail": detail,
             "status": "running", "phase": "starting", "percent": None,
             "created_at": self._now(),
-        }
+        }, self._notify)
         with self._lock:
             self._jobs[job["job_id"]] = job
+        self._notify(job)
         return job
 
     @staticmethod

@@ -5,6 +5,7 @@ import unittest
 import threading
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 
 class ManagedEndpointConfigTests(unittest.TestCase):
@@ -681,6 +682,75 @@ class CoordinatorEventBusTests(unittest.TestCase):
 
 
 class ResourceHistoryTests(unittest.TestCase):
+    def test_resource_sampler_does_not_lose_wake_during_capture(self) -> None:
+        from dashboard.application.resource_history import ResourceSamplerSignal, start_resource_sampler
+
+        signal = ResourceSamplerSignal()
+        capture_started = threading.Event()
+        release_capture = threading.Event()
+        captured_twice = threading.Event()
+        calls = 0
+
+        def capture() -> dict[str, int]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                capture_started.set()
+                release_capture.wait(1)
+            if calls >= 2:
+                captured_twice.set()
+            return {"workerPid": 1, "active": 0, "queued": 0}
+
+        stopped, thread = start_resource_sampler(
+            capture,
+            interval_seconds=lambda _sample: 30.0,
+            signal=signal,
+        )
+        try:
+            self.assertTrue(capture_started.wait(1))
+            signal.wake()
+            release_capture.set()
+            self.assertTrue(captured_twice.wait(1), "wake during capture was lost")
+        finally:
+            stopped.set()
+            thread.join(1)
+
+    def test_resource_sampler_wakes_immediately_when_runtime_activity_changes(self) -> None:
+        from dashboard.application.resource_history import ResourceSamplerSignal, start_resource_sampler
+
+        signal = ResourceSamplerSignal()
+        captured = threading.Event()
+        calls: list[int] = []
+
+        def capture() -> dict[str, int]:
+            calls.append(len(calls))
+            if len(calls) >= 2:
+                captured.set()
+            return {"workerPid": 1, "active": 0, "queued": 0}
+
+        stopped, thread = start_resource_sampler(
+            capture,
+            interval_seconds=lambda _sample: 30.0,
+            signal=signal,
+        )
+        try:
+            self.assertEqual(len(calls), 1)
+            signal.wake()
+            self.assertTrue(captured.wait(1), "sampler did not wake on activity transition")
+        finally:
+            stopped.set()
+            thread.join(1)
+
+        self.assertFalse(thread.is_alive())
+
+    def test_resource_sampler_uses_adaptive_intervals(self) -> None:
+        from dashboard.application.resource_history import resource_sample_interval
+
+        self.assertEqual(resource_sample_interval(None), 30.0)
+        self.assertEqual(resource_sample_interval({"workerPid": 1, "active": 0, "queued": 0}), 10.0)
+        self.assertEqual(resource_sample_interval({"workerPid": 1, "active": 1, "queued": 0}), 2.0)
+        self.assertEqual(resource_sample_interval({"workerPid": 1, "active": 0, "queued": 1}), 2.0)
+
     def test_keeps_and_reads_two_second_samples_for_fourteen_days(self) -> None:
         import json
         import tempfile
@@ -1055,6 +1125,26 @@ class DeviceDiscoveryServiceTests(unittest.TestCase):
 
 
 class JobManagerTests(unittest.TestCase):
+    def test_publishes_every_job_state_transition(self) -> None:
+        from dashboard.application.job_manager import JobManager
+
+        jobs: dict[str, dict[str, object]] = {}
+        published: list[tuple[str, str]] = []
+        manager = JobManager(
+            jobs=jobs,
+            lock=threading.RLock(),
+            new_id=lambda: "job-1",
+            now=lambda: 1.0,
+            thread_factory=threading.Thread,
+            notify=lambda job: published.append((str(job["job_id"]), str(job["status"]))),
+        )
+
+        job = manager.create("download", "starting")
+        manager.finish(job, "done")
+        manager.fail(job, RuntimeError("boom"))
+
+        self.assertEqual(published, [("job-1", "running"), ("job-1", "done"), ("job-1", "error")])
+
     def test_tracks_recent_jobs_and_converts_background_failures_to_terminal_state(self) -> None:
         from dashboard.application.job_manager import JobManager
 
@@ -1328,6 +1418,36 @@ class OfficialRuntimeServiceTests(unittest.TestCase):
 
 
 class ServerLifecycleServiceTests(unittest.TestCase):
+    def test_unexpected_worker_exit_publishes_state_change(self) -> None:
+        from dashboard.application.server_lifecycle import ServerLifecycleService
+
+        import tempfile
+
+        state: dict[str, object] = {"pid": 42, "custom_endpoint": {"key": "llamacpp-local"}}
+        changed = threading.Event()
+
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def wait() -> None:
+                return
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            service = ServerLifecycleService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                pid_alive=lambda _pid: False,
+                terminate=lambda _pid: None,
+                unregister_endpoint=lambda: None,
+                log_path=Path(raw_root) / "server.log",
+                on_state_change=changed.set,
+            )
+            service.watch(Process())
+
+            self.assertTrue(changed.wait(1), "worker exit did not publish a state change")
+            self.assertIsNone(state["pid"])
+
     def test_stop_clears_owned_state_unregisters_endpoint_and_removes_log(self) -> None:
         from dashboard.application.server_lifecycle import ServerLifecycleService
 
@@ -2234,6 +2354,34 @@ class MmprojAutoTests(unittest.TestCase):
             cmd = self._command({"mmproj-auto": ""}, model)
             self.assertNotIn("--mmproj", cmd)
             self.assertNotIn("--mmproj-auto", cmd)
+
+
+class ExecutionTransitionTests(unittest.TestCase):
+    def test_sync_transition_wait_is_notified_when_main_becomes_idle(self) -> None:
+        from dashboard import backend_impl
+
+        state = {"active_main_requests": 1}
+        observed_active = threading.Event()
+
+        def read_state() -> dict[str, int]:
+            if state["active_main_requests"]:
+                observed_active.set()
+            return dict(state)
+
+        def mutate_state(change) -> None:
+            change(state)
+
+        with patch.object(backend_impl, "_state", side_effect=read_state), \
+                patch.object(backend_impl, "_mutate_state", side_effect=mutate_state), \
+                patch.object(backend_impl, "publish_event"):
+            waiter = threading.Thread(target=backend_impl._wait_for_main_idle)
+            waiter.start()
+            self.assertTrue(observed_active.wait(1))
+            self.assertTrue(waiter.is_alive())
+            backend_impl.update_execution_queue(0, 0)
+            waiter.join(1)
+
+        self.assertFalse(waiter.is_alive())
 
 
 class _FakeProcess:

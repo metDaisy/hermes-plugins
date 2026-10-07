@@ -27,6 +27,7 @@ class ServerLifecycleService:
         unregister_endpoint: Callable[[], None],
         log_path: Path,
         mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None,
+        on_state_change: Callable[[], None] | None = None,
     ) -> None:
         self._load_state = load_state
         self._save_state = save_state
@@ -35,6 +36,7 @@ class ServerLifecycleService:
         self._unregister_endpoint = unregister_endpoint
         self._log_path = log_path
         self._mutate_state = mutate_state
+        self._on_state_change = on_state_change or (lambda: None)
         self._lifecycle_lock = _PROCESS_LIFECYCLE_LOCK
 
     def stop(self, preserve_log: bool = False, keep_endpoint: bool = False) -> None:
@@ -71,6 +73,7 @@ class ServerLifecycleService:
                     return
                 self._clear_owned_state(state, process.pid, clear_endpoint=True)
                 self._unregister_endpoint()
+                self._on_state_change()
 
         threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
 

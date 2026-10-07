@@ -29,6 +29,8 @@ _CONTEXT_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _activity_log_lock = threading.Lock()
 _transition_lock = asyncio.Lock()
 _counter_lock = asyncio.Lock()
+_main_idle_event = asyncio.Event()
+_main_idle_event.set()
 _active_main_requests = 0
 _queued_main_requests = 0
 
@@ -333,6 +335,7 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
                 _queued_main_requests -= 1
                 queued = False
                 _active_main_requests += 1
+                _main_idle_event.clear()
                 active = True
                 await _publish_counts()
         except BaseException:
@@ -344,6 +347,8 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
                     changed = True
                 if active:
                     _active_main_requests = max(0, _active_main_requests - 1)
+                    if _active_main_requests == 0:
+                        _main_idle_event.set()
                     active = False
                     changed = True
                 if changed:
@@ -361,6 +366,8 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
             global _active_main_requests
             async with counter_lock:
                 _active_main_requests = max(0, _active_main_requests - 1)
+                if _active_main_requests == 0:
+                    _main_idle_event.set()
                 await _publish_counts()
 
         return finish_main
@@ -372,7 +379,7 @@ async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | 
             async with counter_lock:
                 if _active_main_requests == 0:
                     break
-            await asyncio.sleep(0.02)
+            await _main_idle_event.wait()
         await _ensure_role("compression")
     except BaseException as original_error:
         try:

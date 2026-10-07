@@ -45,7 +45,7 @@ try:
     from .application.preset_store import PresetStore
     from .application.activity_log_projection import compression_call_page, contextual_activity_tail, project_activity_lines
     from .application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
-    from .application.resource_history import ResourceHistoryStore, worker_memory_sample
+    from .application.resource_history import RESOURCE_SAMPLER_SIGNAL, ResourceHistoryStore, worker_memory_sample
     from .application.event_bus import publish_event, start_activity_pump
     from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from .application.prism_runtime import PrismRuntimeInstaller
@@ -94,7 +94,7 @@ except ImportError:
     from application.preset_store import PresetStore
     from application.activity_log_projection import compression_call_page, contextual_activity_tail, project_activity_lines
     from application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
-    from application.resource_history import ResourceHistoryStore, worker_memory_sample
+    from application.resource_history import RESOURCE_SAMPLER_SIGNAL, ResourceHistoryStore, worker_memory_sample
     from application.event_bus import publish_event, start_activity_pump
     from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
@@ -156,6 +156,7 @@ _option_catalog_cache: tuple[tuple[str, str, str, str, int, int], list[dict[str,
 _job_store: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.RLock()
 _state_lock = threading.RLock()
+_execution_counts_condition = threading.Condition()
 _option_cache_lock = threading.RLock()
 _model_policy = ModelPolicyService()
 _download_progress = DownloadProgressTracker()
@@ -322,7 +323,12 @@ def _register_model(model_id: str, paths: list[Path], owned: bool,
 
 
 def _job_manager() -> JobManager:
-    return JobManager(_job_store, _jobs_lock, lambda: uuid.uuid4().hex[:12], time.time, threading.Thread)
+    return JobManager(
+        _job_store, _jobs_lock, lambda: uuid.uuid4().hex[:12], time.time, threading.Thread,
+        notify=lambda job: publish_event(
+            "job_updated", refresh=["jobs"], job_id=str(job.get("job_id") or ""),
+        ),
+    )
 
 
 def _job(kind: str, detail: str) -> dict[str, Any]:
@@ -529,6 +535,11 @@ def _terminate_server(pid: int) -> bool:
     return True
 
 
+def _publish_worker_state_change() -> None:
+    RESOURCE_SAMPLER_SIGNAL.wake()
+    publish_event("worker_exited", refresh=["status", "metrics"])
+
+
 def _server_lifecycle(log_path: Path = SERVER_LOG_PATH) -> ServerLifecycleService:
     return ServerLifecycleService(
         load_state=_state,
@@ -538,6 +549,7 @@ def _server_lifecycle(log_path: Path = SERVER_LOG_PATH) -> ServerLifecycleServic
         unregister_endpoint=_unregister_custom_endpoint,
         log_path=log_path,
         mutate_state=_mutate_state,
+        on_state_change=_publish_worker_state_change,
     )
 
 
@@ -1094,6 +1106,7 @@ def _transition_log(event: str, **details: Any) -> None:
     with TRANSITION_LOG_PATH.open("a", encoding="utf-8") as stream:
         stream.write("[transition] " + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     publish_event("transition", refresh=["status", "metrics", "logs"], event=event)
+    RESOURCE_SAMPLER_SIGNAL.wake()
 
 
 def update_execution_queue(queued_main: int, active_main: int) -> None:
@@ -1101,8 +1114,17 @@ def update_execution_queue(queued_main: int, active_main: int) -> None:
         current["queued_main_requests"] = max(0, int(queued_main))
         current["active_main_requests"] = max(0, int(active_main))
 
-    _mutate_state(update)
+    with _execution_counts_condition:
+        _mutate_state(update)
+        _execution_counts_condition.notify_all()
     publish_event("request_counts", refresh=["status", "metrics"])
+    RESOURCE_SAMPLER_SIGNAL.wake()
+
+
+def _wait_for_main_idle() -> None:
+    with _execution_counts_condition:
+        while int(_state().get("active_main_requests") or 0) > 0:
+            _execution_counts_condition.wait()
 
 
 def ensure_execution_role(role: str) -> dict[str, Any]:
@@ -1130,9 +1152,8 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
         return {"role": role, "model_id": model_id, "already_running": True}
 
     if role == "main":
-        while int(state.get("active_main_requests") or 0) > 0:
-            time.sleep(0.02)
-            state = _state()
+        _wait_for_main_idle()
+        state = _state()
 
     _transition_log("transition-start", role=role, model_id=model_id, runtime_kind=runtime_kind)
 

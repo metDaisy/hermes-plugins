@@ -10,6 +10,9 @@ const ID = 'llamacpp'
 const LOG_NEWLINE = String.fromCharCode(10)
 let pluginCtx
 let desktopLeaseDispose
+let desktopLeaseClientId = ''
+let coordinatorPushConnected = false
+let touchDesktopLeaseNow = () => {}
 const card = 'rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)'
 const muted = 'text-sm text-(--ui-text-secondary)'
 const button = 'rounded-md border border-(--ui-stroke-secondary) px-3 py-2 text-sm transition hover:bg-(--ui-bg-tertiary) disabled:cursor-not-allowed disabled:opacity-50'
@@ -64,6 +67,7 @@ function useCoordinatorPush() {
   const activeProfile = useValue(host.state.profile)
   useEffect(() => {
     setPushConnected(false)
+    coordinatorPushConnected = false
     const timers = new Map()
     let lastFrameAt = 0
     const keys = {
@@ -85,20 +89,28 @@ function useCoordinatorPush() {
     }
     let disposeSocket = () => {}
     try {
-      disposeSocket = pluginCtx.socket('/events', frame => {
+      disposeSocket = pluginCtx.socket(`/events?client_id=${encodeURIComponent(desktopLeaseClientId)}`, frame => {
         if (!frame || typeof frame !== 'object') return
         lastFrameAt = Date.now()
+        coordinatorPushConnected = true
         setPushConnected(true)
         if (frame.type === 'resource_sample') applyResourceMetricFrame(frame)
+        if (frame.job_id) queryClient.invalidateQueries({ queryKey: [ID, 'job', frame.job_id] })
         for (const name of Array.isArray(frame.refresh) ? frame.refresh : []) schedule(name)
       })
     } catch {
+      coordinatorPushConnected = false
       setPushConnected(false)
     }
     const stopHealthCheck = pluginCtx.setInterval(() => {
-      if (lastFrameAt && Date.now() - lastFrameAt > 25000) setPushConnected(false)
-    }, 5000)
+      if (lastFrameAt && Date.now() - lastFrameAt > 5000) {
+        coordinatorPushConnected = false
+        setPushConnected(false)
+        touchDesktopLeaseNow()
+      }
+    }, 1000)
     return () => {
+      coordinatorPushConnected = false
       disposeSocket()
       stopHealthCheck()
       for (const timer of timers.values()) window.clearTimeout(timer)
@@ -110,22 +122,26 @@ function useCoordinatorPush() {
 
 function startDesktopLease(ctx) {
   const clientId = globalThis.crypto?.randomUUID?.() || `desktop-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  desktopLeaseClientId = clientId
   let stopped = false
   let sending = false
   let stopTimer = () => {}
   let stopPagehide = () => {}
   let stopBeforeUnload = () => {}
   const touch = async () => {
+    if (coordinatorPushConnected) return
     if (stopped || sending) return
     sending = true
     try { await ctx.rest('/lifecycle/lease', { method: 'POST', body: { client_id: clientId } }) } catch { /* expiry handles backend/app shutdown races */ } finally { sending = false }
   }
+  touchDesktopLeaseNow = touch
   const release = () => {
     if (stopped) return
     stopped = true
     stopTimer()
     stopPagehide()
     stopBeforeUnload()
+    touchDesktopLeaseNow = () => {}
     ctx.rest('/lifecycle/lease', { method: 'DELETE', body: { client_id: clientId } }).catch(() => {})
   }
   stopTimer = ctx.setInterval(touch, 2500)
@@ -841,7 +857,7 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
     ] }) : null
 }
 
-function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' }) {
+function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download', pushConnected = false }) {
   const [queryText, setQueryText] = useState('')
   const [searched, setSearched] = useState(false)
   const [repo, setRepo] = useState(initialRepo)
@@ -858,7 +874,7 @@ function RegisterWizard({ close, refresh, initialRepo = '', mode = 'download' })
     queryKey: [ID, 'job', jobId],
     queryFn: () => api(`/jobs/${encodeURIComponent(jobId)}`),
     enabled: Boolean(jobId),
-    refetchInterval: query => query.state.data?.status === 'running' ? 1000 : false,
+    refetchInterval: query => pushConnected ? false : query.state.data?.status === 'running' ? 1000 : false,
     refetchOnWindowFocus: false
   })
   useEffect(() => { if (job.data?.status === 'done') refresh() }, [job.data?.status])
@@ -921,7 +937,7 @@ function Page() {
   const [tab, setTab] = useState('runtime')
   const pushConnected = useCoordinatorPush()
   const status = useQuery({ queryKey: [ID, 'status'], queryFn: () => api('/status'), refetchInterval: query => query.state.data?.coordinator?.stopped ? false : query.state.data?.coordinator?.ok === false ? false : pushConnected ? false : query.state.data?.server_running ? 1500 : 3000, refetchOnWindowFocus: query => query.state.data?.coordinator?.ok !== false })
-  const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
+  const jobs = useQuery({ queryKey: [ID, 'jobs'], queryFn: () => api('/jobs'), refetchInterval: query => pushConnected ? false : query.state.data?.jobs?.some(job => job.status === 'running') ? 1000 : false, refetchOnWindowFocus: false })
   const hfModels = useQuery({ queryKey: [ID, 'hf-models'], queryFn: () => api('/hf-models'), enabled: Boolean(status.data), refetchOnWindowFocus: false })
   const data = status.data; const models = data?.models || []; const localModels = hfModels.data?.models || []; const runtimeJobs = jobs.data?.jobs || []
   useEffect(() => { if (runtimeJobs.some(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && job.status === 'done')) queryClient.invalidateQueries({ queryKey: [ID, 'status'] }) }, [runtimeJobs])
@@ -933,7 +949,7 @@ function Page() {
   const deleteDownloaded = async repoId => { if (!window.confirm(`'${repoId}' HF cache를 삭제할까요?`)) return; try { await api('/hf-models/delete', { method: 'POST', body: { repo_id: repoId } }); await hfModels.refetch() } catch (cause) { window.alert(`모델 삭제 실패: ${cause?.message || String(cause)}`) } }
   const activeModel = models.find(model => model.id === data?.active_model_id)
   return jsxs('main', { className: 'mx-auto max-w-5xl p-4 sm:p-6', children: [jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus, pushConnected }) : null,
-    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '등록 모델과 다운받은 HF cache 모델을 runtime 종류와 관계없이 모두 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode }) : null, jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
+    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '등록 모델과 다운받은 HF cache 모델을 runtime 종류와 관계없이 모두 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode, pushConnected }) : null, jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
     tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: '파라미터와 preset' }), jsx('p', { className: `mt-1 ${muted}`, children: '모델을 선택한 뒤 parameter를 검색·추가하고 현재 설정을 preset으로 저장합니다.' }), activeModel ? jsx(ModelSettingsEditor, { modelId: activeModel.id, appliedPresetId: data?.model_presets?.[activeModel.id] || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '먼저 모델 탭에서 사용할 모델을 선택하세요.' })] }) : null
   ] })
 }

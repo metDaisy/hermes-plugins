@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -352,9 +353,13 @@ async def proxy_events(websocket: WebSocket) -> None:
         await websocket.close(code=1013)
         return
     await websocket.accept()
+    client_id = str(websocket.query_params.get("client_id") or "")
+    upstream_url = COORDINATOR_WS_URL
+    if client_id:
+        upstream_url += "?" + urllib.parse.urlencode({"client_id": client_id})
     try:
         async with websockets.connect(
-            COORDINATOR_WS_URL,
+            upstream_url,
             open_timeout=5,
             close_timeout=2,
             ping_interval=20,

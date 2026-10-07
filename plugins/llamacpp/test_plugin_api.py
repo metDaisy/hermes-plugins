@@ -36,6 +36,8 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         inference_proxy._transition_lock = asyncio.Lock()
         inference_proxy._counter_lock = asyncio.Lock()
+        inference_proxy._main_idle_event = asyncio.Event()
+        inference_proxy._main_idle_event.set()
         inference_proxy._active_main_requests = 0
         inference_proxy._queued_main_requests = 0
 
@@ -1412,7 +1414,7 @@ class LlamaCppManagerTests(unittest.TestCase):
                 worker.start()
                 time.sleep(0.05)
                 self.assertFalse(started.is_set())
-                api._mutate_state(lambda state: state.update({"active_main_requests": 0}))
+                api.update_execution_queue(0, 0)
                 worker.join(timeout=1)
 
             self.assertTrue(started.is_set())
@@ -1914,7 +1916,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("stopped: true", source)
         self.assertIn("query.state.data?.coordinator?.ok === false ? false", source)
         self.assertIn("query.state.data?.coordinator?.stopped ? false", source)
-        self.assertIn("pluginCtx.socket('/events'", source)
+        self.assertIn("pluginCtx.socket(`/events?client_id=", source)
         self.assertIn("const activeProfile = useValue(host.state.profile)", source)
         push_hook = source[source.index("function useCoordinatorPush"):source.index("function startDesktopLease")]
         self.assertIn("}, [activeProfile])", push_hook)
@@ -2336,7 +2338,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         from dashboard import coordinator_server
 
         client = TestClient(coordinator_server.app)
-        with client.websocket_connect("/events") as websocket:
+        with client.websocket_connect("/events?client_id=test-client") as websocket:
             connected = websocket.receive_json()
             coordinator_server.EVENT_BUS.publish("probe", refresh=["metrics"])
             event = websocket.receive_json()
@@ -2549,10 +2551,51 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("disposeSocket()", desktop_source)
         self.assertIn("stopHealthCheck()", desktop_source)
         self.assertIn("timers.clear()", desktop_source)
+        self.assertIn("coordinatorPushConnected", desktop_source)
+        self.assertIn("if (coordinatorPushConnected) return", desktop_source)
+        self.assertIn("client_id=${encodeURIComponent(desktopLeaseClientId)}", desktop_source)
+        self.assertIn("let touchDesktopLeaseNow = () => {}", desktop_source)
+        self.assertIn("touchDesktopLeaseNow()", desktop_source)
+        self.assertIn("Date.now() - lastFrameAt > 5000", desktop_source)
+        self.assertIn("pushConnected ? false : query.state.data?.jobs", desktop_source)
+        self.assertIn("queryKey: [ID, 'job', frame.job_id]", desktop_source)
+        self.assertIn("RegisterWizard, { close:", desktop_source)
+        self.assertIn("pushConnected })", desktop_source)
+        self.assertIn('websocket.query_params.get("client_id")', source)
+        self.assertIn("_desktop_leases.touch(client_id)", source)
         self.assertIn("_desktop_leases.should_shutdown()", source)
         self.assertNotIn("_desktop_leases.should_shutdown(execution_busy())", source)
         self.assertNotIn("reset_profile_model_policy()", source)
         self.assertIn("_server_lifecycle().stop(preserve_log=True, keep_endpoint=False)", backend_source)
+
+    def test_compression_waits_for_main_idle_event_without_sleep_polling(self) -> None:
+        from dashboard import inference_proxy
+
+        class Backend:
+            @staticmethod
+            def execution_role_configured(_role: str) -> bool:
+                return False
+
+            @staticmethod
+            def ensure_execution_role(_role: str) -> None:
+                return
+
+        async def exercise() -> None:
+            original_sleep = asyncio.sleep
+            inference_proxy._active_main_requests = 1
+            inference_proxy._main_idle_event.clear()
+            with patch.object(inference_proxy, "_execution_backend", return_value=Backend()), \
+                    patch.object(inference_proxy.asyncio, "sleep", side_effect=AssertionError("sleep polling used")):
+                waiting = asyncio.create_task(inference_proxy._begin_execution("compression"))
+                await original_sleep(0)
+                self.assertFalse(waiting.done())
+                inference_proxy._active_main_requests = 0
+                inference_proxy._main_idle_event.set()
+                finish = await asyncio.wait_for(waiting, timeout=1)
+                self.assertIsNotNone(finish)
+                await finish()
+
+        asyncio.run(exercise())
 
     def test_resource_sample_updates_desktop_cache_without_two_second_refetch(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
@@ -2578,7 +2621,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("window must be between 5 and 1209600 seconds", backend_source)
         self.assertIn('result["series"] = RESOURCE_HISTORY.read', backend_source)
         self.assertIn("worker_memory_sample", backend_source)
-        self.assertIn("start_resource_sampler(record_resource_sample, interval_seconds=2.0)", coordinator_source)
+        self.assertIn("interval_seconds=resource_sample_interval", coordinator_source)
         self.assertIn("telemetry_stop.set()", coordinator_source)
 
     def test_worker_spawn_is_bound_to_coordinator_lifetime(self) -> None:
