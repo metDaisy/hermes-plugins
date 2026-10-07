@@ -35,6 +35,13 @@ _STATE_SCHEMA = "kanban-workflow-controller-state-v1"
 _WAKE_SCHEMA = "kanban-workflow-wakeup-v1"
 _COMMENT_WAKE_SCHEMA = "kanban-comment-wakeup-v1"
 _DECISION_SCHEMA = "policy-decision-card-v1"
+_IMPLEMENTATION_SCHEMAS = {
+    "backend-implementation-card-v2",
+    "backend-implementation-card-v3",
+}
+_REVIEW_SCHEMA = "aggregate-review-card-v3"
+_IMPLEMENTATION_PROFILE = "coder"
+_REVIEW_PROFILE = "reviewer"
 _PROFILE_MENTION = re.compile(r"@\{([A-Za-z0-9][A-Za-z0-9._-]*)\}")
 _RUN_WORKFLOW_MARKER = 'The user has invoked the "run-workflow" skill'
 _CONTEXT: Any = None
@@ -651,16 +658,31 @@ def _on_pre_llm_call(**kwargs: Any) -> None:
 
 
 def _is_actionable(
-    event: dict[str, Any], coordinator_profile: str, decision_comment_author: str
+    event: dict[str, Any],
+    coordinator_profile: str,
+    decision_comment_author: str,
 ) -> bool:
     kind = event.get("kind")
-    if kind in {"blocked", "completed"}:
-        event_profile = str(event.get("event_profile") or "").strip()
-        return bool(event_profile) and event_profile != coordinator_profile
+    event_profile = str(event.get("event_profile") or "").strip()
+    task_body = event.get("task_body") if isinstance(event.get("task_body"), dict) else {}
+    task_schema = task_body.get("schema")
+    if kind == "blocked":
+        if event_profile == coordinator_profile:
+            return False
+        return (
+            event_profile == _IMPLEMENTATION_PROFILE and task_schema in _IMPLEMENTATION_SCHEMAS
+        ) or (
+            event_profile == _REVIEW_PROFILE and task_schema == _REVIEW_SCHEMA
+        )
+    if kind == "completed":
+        return (
+            event_profile != coordinator_profile
+            and event_profile == _REVIEW_PROFILE
+            and task_schema == _REVIEW_SCHEMA
+        )
     if kind != "commented":
         return False
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    task_body = event.get("task_body") if isinstance(event.get("task_body"), dict) else {}
     author = str(payload.get("author") or "").strip()
     return (
         event.get("status") == "blocked"
@@ -699,7 +721,11 @@ def _process_pending_events(board: str) -> None:
         _CONTEXT.get_config("decision_comment_author", "dashboard") or "dashboard"
     ).strip()
     for event in _read_events(board, int(state["last_event_id"])):
-        actionable = _is_actionable(event, coordinator_profile, decision_comment_author)
+        actionable = _is_actionable(
+            event,
+            coordinator_profile,
+            decision_comment_author,
+        )
         wake_message = _wake_message(board, event) if actionable else None
         if not _process_event(state, event, actionable, wake_message):
             break

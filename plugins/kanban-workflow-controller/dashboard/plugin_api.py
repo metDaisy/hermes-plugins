@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sqlite3
 import sys
 import time
@@ -44,6 +45,16 @@ def _state_path() -> Path:
     return get_default_hermes_root() / "plugin-data" / "kanban-workflow-controller" / "state.db"
 
 
+def _plugin_version(manifest_path: Path | None = None) -> str:
+    path = manifest_path or Path(__file__).resolve().parents[1] / "plugin.yaml"
+    try:
+        manifest = path.read_text(encoding="utf-8")
+    except OSError:
+        return "unknown"
+    match = re.search(r"(?m)^version:\s*([^\s#]+)", manifest)
+    return match.group(1) if match else "unknown"
+
+
 def _read_heartbeats() -> list[dict[str, object]]:
     try:
         conn = sqlite3.connect(_state_path(), timeout=1.0)
@@ -74,7 +85,7 @@ def status() -> dict[str, object]:
     return {
         "plugin": "kanban-workflow-controller",
         "running": bool(active),
-        "version": "0.5.0",
+        "version": _plugin_version(),
         "board": active[0]["board"] if active else None,
         "boards": [item["board"] for item in active],
         "last_dispatch_tick_at": last_tick or None,

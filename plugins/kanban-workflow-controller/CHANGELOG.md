@@ -2,6 +2,16 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.6.0] - 2026-10-07
+
+### Changed
+
+- Aligned lifecycle routing with the PM workflow contract: native Hermes dispatch owns ready-card execution and implementation `review_requested` handoff.
+- Restricted implementation-card wakeups to blocked Coder runs on `backend-implementation-card-v2` or `backend-implementation-card-v3`.
+- Restricted aggregate Review wakeups to blocked or completed Reviewer runs on `aggregate-review-card-v3`.
+- Kept lifecycle actors fail-closed to the canonical `coder` and `reviewer` Profile identities and prevented coordinator self-wake through overlapping role configuration.
+- Stopped treating arbitrary non-PM worker completion as a coordinator event.
+
 ## [0.5.0] - 2026-10-06
 
 ### Added

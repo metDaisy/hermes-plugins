@@ -91,24 +91,33 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         with patch.object(PLUGIN, "_state_path", return_value=path):
             return PLUGIN._read_state("issue151")
 
-    def test_manifests_and_changelog_share_version_0_5_0(self) -> None:
+    def test_manifests_and_changelog_share_version(self) -> None:
         manifest = (_ROOT / "plugin.yaml").read_text(encoding="utf-8")
         dashboard_manifest = json.loads(
             (_ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")
         )
         changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertRegex(manifest, r"(?m)^name:\s*kanban-workflow-controller\s*$")
-        self.assertRegex(manifest, r"(?m)^version:\s*0\.5\.0\s*$")
+        manifest_version = re.search(r"(?m)^version:\s*([^\s#]+)", manifest)
+        self.assertIsNotNone(manifest_version)
+        version = manifest_version.group(1)
         self.assertNotIn("  - kanban_task_commented", manifest)
         self.assertIn("  - kwc_comment", manifest)
         self.assertIn("  - kwc_reply", manifest)
         self.assertNotRegex(manifest, r"(?m)^  board:\s*$")
         self.assertEqual(dashboard_manifest["name"], "kanban-workflow-controller")
-        self.assertEqual(dashboard_manifest["version"], "0.5.0")
+        self.assertEqual(dashboard_manifest["version"], version)
         self.assertEqual(dashboard_manifest["api"], "plugin_api.py")
         latest_release = re.search(r"(?m)^## \[([^]]+)\]", changelog)
         self.assertIsNotNone(latest_release)
-        self.assertEqual(latest_release.group(1), "0.5.0")
+        self.assertEqual(latest_release.group(1), version)
+
+    def test_status_api_reads_the_canonical_plugin_manifest_version(self) -> None:
+        self.assertTrue(hasattr(PLUGIN_API, "_plugin_version"))
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "plugin.yaml"
+            manifest.write_text("name: test\nversion: 9.8.7\n", encoding="utf-8")
+            self.assertEqual(PLUGIN_API._plugin_version(manifest), "9.8.7")
 
     def test_desktop_status_panel_contract(self) -> None:
         desktop = (_ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
@@ -130,6 +139,10 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         readme = (_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("built-in Kanban comment composer", readme)
         self.assertIn("does not call the KWC endpoint", readme)
+        self.assertIn("`review_requested` is not routed by KWC", readme)
+        self.assertIn("`aggregate-review-card-v3`", readme)
+        self.assertIn("Reviewer `completed`", readme)
+        self.assertIn("schema-tag-matched", readme)
 
     def test_activity_api_returns_privacy_safe_recent_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,7 +235,7 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
             ):
                 response = PLUGIN_API.status()
         self.assertTrue(response["running"])
-        self.assertEqual(response["version"], "0.5.0")
+        self.assertEqual(response["version"], "0.6.0")
         self.assertEqual(set(response["boards"]), {"issue151", "issue152"})
         self.assertEqual(response["last_dispatch_tick_at"], 1000)
 
@@ -656,22 +669,43 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         )
         PLUGIN.register(ctx)
         decision_body = {"schema": "policy-decision-card-v1", "decision_owner": "user"}
+        implementation_body = {
+            "schema": "backend-implementation-card-v3",
+            "card_type": "implementation",
+        }
+        review_body = {"schema": "aggregate-review-card-v3"}
         events = [
             {"id": 42, "task_id": "t_impl", "kind": "commented", "payload": {"author": "coder"},
-             "status": "blocked", "assignee": "coder", "event_profile": None, "task_body": {}},
+             "status": "blocked", "assignee": "coder", "event_profile": None,
+             "task_body": implementation_body},
             {"id": 43, "task_id": "t_impl", "kind": "blocked", "payload": {},
-             "status": "done", "assignee": "project-manager", "event_profile": "coder", "task_body": {}},
+             "status": "blocked", "assignee": "coder", "event_profile": "coder",
+             "task_body": implementation_body},
             {"id": 44, "task_id": "t_impl", "kind": "completed", "payload": {},
-             "status": "done", "assignee": "project-manager", "event_profile": "coder", "task_body": {}},
-            {"id": 45, "task_id": "t_pm", "kind": "completed", "payload": {},
-             "status": "done", "assignee": "coder", "event_profile": "project-manager", "task_body": {}},
-            {"id": 46, "task_id": "t_generic", "kind": "commented", "payload": {"author": "dashboard"},
+             "status": "done", "assignee": "coder", "event_profile": "coder",
+             "task_body": implementation_body},
+            {"id": 45, "task_id": "t_impl", "kind": "review_requested", "payload": {},
+             "status": "review", "assignee": "project-manager", "event_profile": "coder",
+             "task_body": implementation_body},
+            {"id": 46, "task_id": "t_review", "kind": "completed", "payload": {},
+             "status": "done", "assignee": "reviewer", "event_profile": "reviewer",
+             "task_body": review_body},
+            {"id": 47, "task_id": "t_generic", "kind": "completed", "payload": {},
+             "status": "done", "assignee": "reviewer", "event_profile": "reviewer",
+             "task_body": {"schema": "other"}},
+            {"id": 48, "task_id": "t_pm", "kind": "completed", "payload": {},
+             "status": "done", "assignee": "project-manager", "event_profile": "project-manager",
+             "task_body": review_body},
+            {"id": 49, "task_id": "t_review", "kind": "blocked", "payload": {},
+             "status": "blocked", "assignee": "reviewer", "event_profile": "reviewer",
+             "task_body": review_body},
+            {"id": 50, "task_id": "t_generic", "kind": "commented", "payload": {"author": "dashboard"},
              "status": "blocked", "assignee": "project-manager", "event_profile": None,
              "task_body": {"schema": "other"}},
-            {"id": 47, "task_id": "t_decision", "kind": "commented", "payload": {"author": "coder"},
+            {"id": 51, "task_id": "t_decision", "kind": "commented", "payload": {"author": "coder"},
              "status": "blocked", "assignee": "project-manager", "event_profile": None,
              "task_body": decision_body},
-            {"id": 48, "task_id": "t_decision", "kind": "commented", "payload": {"author": "dashboard"},
+            {"id": 52, "task_id": "t_decision", "kind": "commented", "payload": {"author": "dashboard"},
              "status": "blocked", "assignee": "project-manager", "event_profile": None,
              "task_body": decision_body},
         ]
@@ -685,11 +719,39 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
                 ctx.hooks["on_kanban_dispatch_tick"](board="issue151", dry_run=False)
             state = self._read_state(state_path)
         routed = [json.loads(content) for _, content in ctx.injected]
-        self.assertEqual([item["event_kind"] for item in routed], ["blocked", "completed", "commented"])
-        self.assertEqual([item["source_task_id"] for item in routed], ["t_impl", "t_impl", "t_decision"])
+        self.assertEqual(
+            [item["event_kind"] for item in routed],
+            ["blocked", "completed", "blocked", "commented"],
+        )
+        self.assertEqual(
+            [item["source_task_id"] for item in routed],
+            ["t_impl", "t_review", "t_review", "t_decision"],
+        )
         self.assertTrue(all(session == "gateway-session" for session, _ in ctx.injected))
         self.assertTrue(all("comment" not in item for item in routed))
-        self.assertEqual(state["last_event_id"], 48)
+        self.assertEqual(state["last_event_id"], 52)
+
+    def test_coordinator_profile_cannot_route_its_own_run_as_a_worker_event(self) -> None:
+        ctx = FakeContext({"coordinator_profile": "coder"})
+        PLUGIN.register(ctx)
+        events = [
+            {"id": 42, "task_id": "t_impl", "kind": "blocked", "payload": {},
+             "status": "blocked", "assignee": "coder", "event_profile": "coder",
+             "task_body": {"schema": "backend-implementation-card-v3",
+                           "card_type": "implementation"}},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            self._seed_state(state_path)
+            with (
+                patch.object(PLUGIN, "_state_path", return_value=state_path),
+                patch.object(PLUGIN, "_read_events", return_value=events),
+            ):
+                ctx.hooks["on_kanban_dispatch_tick"](board="issue151", dry_run=False)
+            state = self._read_state(state_path)
+
+        self.assertEqual(ctx.injected, [])
+        self.assertEqual(state["last_event_id"], 42)
 
     def test_failed_session_injection_keeps_event_for_retry(self) -> None:
         class RejectingContext(FakeContext):
@@ -701,7 +763,8 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         PLUGIN.register(ctx)
         events = [{"id": 9, "task_id": "t_impl", "kind": "blocked", "payload": {},
                    "status": "blocked", "assignee": "coder", "event_profile": "coder",
-                   "task_body": {}}]
+                   "task_body": {"schema": "backend-implementation-card-v3",
+                                 "card_type": "implementation"}}]
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.db"
             self._seed_state(state_path, cursor=8)
@@ -735,9 +798,9 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
     def test_concurrent_dispatch_ticks_inject_event_once(self) -> None:
         ctx = FakeContext({"board": "issue151"})
         PLUGIN.register(ctx)
-        event = {"id": 9, "task_id": "t_impl", "kind": "completed", "payload": {},
-                 "status": "done", "assignee": "coder", "event_profile": "coder",
-                 "task_body": {}}
+        event = {"id": 9, "task_id": "t_review", "kind": "completed", "payload": {},
+                 "status": "done", "assignee": "reviewer", "event_profile": "reviewer",
+                 "task_body": {"schema": "aggregate-review-card-v3"}}
         barrier = threading.Barrier(2)
 
         def read_events(_board, _after_id):

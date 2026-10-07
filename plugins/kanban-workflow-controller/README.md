@@ -19,9 +19,20 @@ Lifecycle routing remains passive:
 ```text
 PM invokes /run-workflow
 → KWC binds the durable Project Manager session
-→ native completion/block hooks or dispatcher reconciliation read task_events
-→ actionable event wakes the bound Project Manager session
+→ native Hermes dispatch executes ready cards for their assignee
+→ Coder request-review enters the native same-card PM checkpoint lane
+→ Reviewer completes the aggregate Review card directly
+→ KWC routes only schema-tag-matched blocked/completed workflow events that require PM coordination
 ```
+
+The workflow boundary is explicit:
+
+- `backend-implementation-card-v2` and `backend-implementation-card-v3` are executed by the canonical `coder` Profile. A successful Coder run calls native `request-review`, and Hermes dispatch starts the Project Manager's same-card checkpoint run. `review_requested` is not routed by KWC.
+- `aggregate-review-card-v3` is executed by the canonical `reviewer` Profile. Reviewer `completed` wakes the Project Manager so it can validate the canonical aggregate result and route findings or Summary progression.
+- A blocked implementation or aggregate Review run wakes the Project Manager for canonical task/run/comment/event read-back. Workers use `blocked + needs_input`, not `request-review`, for problem escalation.
+- A valid human comment on a blocked PM-owned `policy-decision-card-v1` also wakes the Project Manager.
+
+Project Manager, Coder, and Reviewer keep independent Profile sessions and memory. KWC shares only native Kanban task, run, event, comment, and lifecycle locators; it does not merge Profile context or execute worker cards itself.
 
 Comment routing is KWC-owned and Core-independent:
 
@@ -138,6 +149,8 @@ The default coordinator Profile is `project-manager`. Override it only if the wo
 ```bash
 hermes -p main config set plugins.entries.kanban-workflow-controller.settings.coordinator_profile project-manager
 ```
+
+Lifecycle filtering is fail-closed to the workflow's canonical `coder` and `reviewer` Profile names. These worker identities are not aliases for the coordinator and are intentionally not configurable independently of the workflow contracts.
 
 Desktop Kanban writes a human comment with author `dashboard` by default. If the actual user-facing comment surface writes another stable author, configure the same literal value on the dispatcher host:
 
