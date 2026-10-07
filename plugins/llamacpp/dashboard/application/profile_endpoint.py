@@ -170,6 +170,66 @@ def apply_worker_model_policy(text: str) -> str:
                 lines.insert(end, f"{child_prefix}{key}: {encoded}")
                 end += 1
 
+    def update_plugin_list(key: str, *, include: bool) -> None:
+        plugins = section("plugins", 0)
+        if plugins is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend([
+                "plugins:",
+                "  enabled:",
+                "    - llamacpp" if include else "    - agent-audit",
+                "  disabled: []" if include else "  disabled:",
+            ])
+            return
+
+        begin, end = plugins
+        prefix = "  " + key + ":"
+        item_line = "    - llamacpp"
+        key_index = next(
+            (index for index in range(begin + 1, end) if lines[index].startswith(prefix)),
+            None,
+        )
+        if key_index is None:
+            if include:
+                lines[end:end] = [prefix, item_line]
+            return
+
+        inline_value = lines[key_index][len(prefix):].strip()
+        if inline_value:
+            values = []
+            if inline_value.startswith("[") and inline_value.endswith("]"):
+                values = [
+                    value.strip().strip("\"'")
+                    for value in inline_value[1:-1].split(",")
+                    if value.strip()
+                ]
+            if include and "llamacpp" not in values:
+                values.append("llamacpp")
+            if not include:
+                values = [value for value in values if value != "llamacpp"]
+            if values:
+                lines[key_index] = prefix + " [" + ", ".join(values) + "]"
+            else:
+                lines[key_index] = prefix + " []"
+            return
+
+        list_end = next(
+            (index for index in range(key_index + 1, end)
+             if lines[index].strip() and len(lines[index]) - len(lines[index].lstrip()) <= 2),
+            end,
+        )
+        existing = [lines[index].strip()[2:].strip().strip("\"'")
+                    for index in range(key_index + 1, list_end)
+                    if lines[index].strip().startswith("- ")]
+        if include and "llamacpp" not in existing:
+            lines.insert(list_end, item_line)
+        elif not include:
+            for index in range(list_end - 1, key_index, -1):
+                if lines[index].strip().startswith("- ") and \
+                        lines[index].strip()[2:].strip().strip("\"'") == "llamacpp":
+                    del lines[index]
+
     model = section("model", 0)
     if model is None:
         lines[0:0] = [
@@ -205,7 +265,10 @@ def apply_worker_model_policy(text: str) -> str:
                 {"base_url", "api_base", "api_mode"},
             )
 
-    return newline.join(lines) + (newline if text.endswith(("\n", "\r")) else "")
+    update_plugin_list("enabled", include=True)
+    update_plugin_list("disabled", include=False)
+
+    return newline.join(lines) + (newline if text.endswith((chr(10), chr(13))) else "")
 
 
 def write_text_atomically(path: Path, text: str) -> None:

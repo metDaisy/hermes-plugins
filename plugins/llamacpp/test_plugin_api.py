@@ -1527,6 +1527,11 @@ class LlamaCppManagerTests(unittest.TestCase):
                 "  provider: openai-codex\n"
                 "  default: gpt-5.6-luna\n"
                 "fallback_providers: []\n"
+                "plugins:\n"
+                "  enabled:\n"
+                "    - agent-audit\n"
+                "  disabled:\n"
+                "    - llamacpp\n"
                 "auxiliary:\n"
                 "  compression:\n"
                 "    provider: openai-codex\n"
@@ -1569,6 +1574,8 @@ class LlamaCppManagerTests(unittest.TestCase):
                         '    model: "compression-local"\n    reasoning_effort: "none"',
                         updated,
                     )
+                    self.assertIn("  enabled:\n    - agent-audit\n    - llamacpp\n", updated)
+                    self.assertNotIn("  disabled:\n    - llamacpp\n", updated)
                 else:
                     self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", updated)
                     self.assertIn("    provider: openai-codex\n    model: gpt-5.6-luna\n", updated)
