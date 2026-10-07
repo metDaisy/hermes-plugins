@@ -1236,6 +1236,7 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertEqual([model["id"] for model in payload["data"]], ["main-local"])
         self.assertEqual(payload["data"][0]["context_length"], 49152)
+        self.assertEqual(payload["data"][0]["reasoning_efforts"], ["medium", "xhigh"])
         self.assertEqual([model["model"] for model in payload["models"]], ["main-local"])
         self.assertNotIn("compression-local", json.dumps(payload))
         self.assertNotIn("Ternary-Bonsai-2-27B", json.dumps(payload))

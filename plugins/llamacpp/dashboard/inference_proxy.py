@@ -151,11 +151,13 @@ def logical_models_payload(state: dict[str, Any]) -> dict[str, Any]:
         context_length = int(settings.get("ctx-size") or 65536) if isinstance(settings, dict) else 65536
     except (TypeError, ValueError):
         context_length = 65536
+    reasoning_efforts = ["medium", "xhigh"] if "ternary-bonsai-2" in main_model.lower() else None
     return {
         "object": "list",
         "data": [
-            {"id": alias, "object": "model", "created": 0, "owned_by": "llamacpp",
-             "context_length": context_length}
+            {**{"id": alias, "object": "model", "created": 0, "owned_by": "llamacpp",
+                "context_length": context_length},
+             **({"reasoning_efforts": reasoning_efforts} if reasoning_efforts else {})}
             for alias in aliases
         ],
         "models": [

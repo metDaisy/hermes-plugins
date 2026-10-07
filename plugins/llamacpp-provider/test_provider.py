@@ -45,7 +45,11 @@ def test_profile_fetches_dynamic_catalog_without_authorization_header():
             return False
 
         def read(self):
-            return json.dumps({"data": [{"id": "main-local", "context_length": 49152}]}).encode()
+            return json.dumps({"data": [{
+                "id": "main-local",
+                "context_length": 49152,
+                "reasoning_efforts": ["medium", "xhigh"],
+            }]}).encode()
 
     def open_request(request, timeout):
         seen["request"] = request
@@ -57,6 +61,7 @@ def test_profile_fetches_dynamic_catalog_without_authorization_header():
 
     assert models == ["main-local"]
     assert profile.model_capabilities["main-local"]["context_window"] == 49152
+    assert profile.supported_reasoning_efforts("main-local") == ("medium", "xhigh")
     assert seen["request"].full_url == "http://127.0.0.1:18380/v1/models"
     assert seen["request"].get_header("Authorization") is None
 

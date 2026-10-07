@@ -19,6 +19,11 @@ class LlamaCppLocalProfile(ProviderProfile):
             return {}, {}
         return {}, {"reasoning_effort": effort}
 
+    def supported_reasoning_efforts(self, model):
+        capabilities = self.model_capabilities.get(str(model or ""), {})
+        efforts = capabilities.get("supported_reasoning_efforts")
+        return tuple(efforts) if isinstance(efforts, (list, tuple)) else None
+
     def fetch_models(self, *, api_key=None, base_url=None, timeout=8.0):
         del api_key
         root = str(base_url or self.base_url).rstrip("/")
@@ -40,8 +45,16 @@ class LlamaCppLocalProfile(ProviderProfile):
                 context_length = int(row.get("context_length") or 0)
             except (TypeError, ValueError):
                 context_length = 0
+            capabilities = {}
             if context_length > 0:
-                self.model_capabilities[model] = {"context_window": context_length}
+                capabilities["context_window"] = context_length
+            efforts = row.get("reasoning_efforts")
+            if isinstance(efforts, list):
+                capabilities["supported_reasoning_efforts"] = [
+                    str(value).strip() for value in efforts if str(value).strip()
+                ]
+            if capabilities:
+                self.model_capabilities[model] = capabilities
         return models
 
 
