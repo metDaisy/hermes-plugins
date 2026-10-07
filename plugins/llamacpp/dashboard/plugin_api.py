@@ -35,7 +35,7 @@ _HEALTH_PATH = "/__llamacpp_backend_health"
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
 COORDINATOR_SERVICE = "hermes-llamacpp-coordinator"
 COORDINATOR_PROTOCOL = 2
-COORDINATOR_BUILD = "0.3.16"
+COORDINATOR_BUILD = "0.3.17"
 _READ_ONLY_BACKEND_MODULE = "llamacpp_profile_read_only_backend"
 _read_only_backend_lock = threading.RLock()
 
