@@ -10,6 +10,15 @@ from providers.base import ProviderProfile, is_loopback_no_auth_profile
 class LlamaCppLocalProfile(ProviderProfile):
     """Stable Hermes provider identity backed by the machine-local coordinator."""
 
+    def build_api_kwargs_extras(self, *, reasoning_config=None, **context):
+        del context
+        if not isinstance(reasoning_config, dict) or not reasoning_config.get("enabled"):
+            return {}, {}
+        effort = str(reasoning_config.get("effort") or "").strip()
+        if not effort:
+            return {}, {}
+        return {}, {"reasoning_effort": effort}
+
     def fetch_models(self, *, api_key=None, base_url=None, timeout=8.0):
         del api_key
         root = str(base_url or self.base_url).rstrip("/")

@@ -59,3 +59,21 @@ def test_profile_fetches_dynamic_catalog_without_authorization_header():
     assert profile.model_capabilities["main-local"]["context_window"] == 49152
     assert seen["request"].full_url == "http://127.0.0.1:18380/v1/models"
     assert seen["request"].get_header("Authorization") is None
+
+
+def test_profile_forwards_explicit_reasoning_effort_as_top_level_kwarg():
+    _module, profile = _load_provider()
+
+    extra_body, top_level = profile.build_api_kwargs_extras(
+        reasoning_config={"enabled": True, "effort": "high"},
+    )
+
+    assert extra_body == {}
+    assert top_level == {"reasoning_effort": "high"}
+
+
+def test_profile_omits_reasoning_effort_when_not_explicitly_configured():
+    _module, profile = _load_provider()
+
+    assert profile.build_api_kwargs_extras(reasoning_config=None) == ({}, {})
+    assert profile.build_api_kwargs_extras(reasoning_config={"enabled": False}) == ({}, {})

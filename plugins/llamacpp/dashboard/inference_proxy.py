@@ -189,7 +189,8 @@ def rewrite_logical_model(body: bytes, state: dict[str, Any]) -> bytes:
     settings = model_settings.get(model_id) if isinstance(model_settings, dict) else None
     saved_effort = settings.get("reasoning-effort") if isinstance(settings, dict) else None
     normalized_effort = str(saved_effort).strip() if saved_effort is not None else ""
-    if normalized_effort:
+    request_effort = str(payload.get("reasoning_effort") or "").strip()
+    if not request_effort and normalized_effort:
         payload["reasoning_effort"] = normalized_effort
 
     if state.get("execution_mode") != "native_router":

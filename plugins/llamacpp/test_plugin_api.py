@@ -1716,7 +1716,7 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertIn(b'"model":"large"', rewritten)
 
-    def test_proxy_model_reasoning_effort_overrides_hermes_request_value(self) -> None:
+    def test_proxy_hermes_request_reasoning_effort_overrides_model_preset(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
 
         body = b'{"model":"main-local","reasoning_effort":"high","messages":[]}'
@@ -1731,6 +1731,22 @@ class LlamaCppManagerTests(unittest.TestCase):
         rewritten = json.loads(rewrite_logical_model(body, state))
 
         self.assertEqual(rewritten["model"], "large")
+        self.assertEqual(rewritten["reasoning_effort"], "high")
+
+    def test_proxy_uses_model_reasoning_effort_when_request_omits_it(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        body = b'{"model":"main-local","messages":[]}'
+        state = {
+            "active_model_id": "large",
+            "model_settings": {"large": {"reasoning-effort": "medium"}},
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "large"},
+            },
+        }
+
+        rewritten = json.loads(rewrite_logical_model(body, state))
+
         self.assertEqual(rewritten["reasoning_effort"], "medium")
 
     def test_proxy_preserves_hermes_reasoning_effort_when_model_has_no_override(self) -> None:
@@ -1749,7 +1765,7 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertEqual(rewritten["reasoning_effort"], "high")
 
-    def test_native_router_preserves_alias_and_applies_model_reasoning_effort(self) -> None:
+    def test_native_router_preserves_alias_and_request_reasoning_effort(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
 
         body = b'{"model":"main-local","reasoning_effort":"high","messages":[]}'
@@ -1764,7 +1780,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         rewritten = json.loads(rewrite_logical_model(body, state))
 
         self.assertEqual(rewritten["model"], "main-local")
-        self.assertEqual(rewritten["reasoning_effort"], "medium")
+        self.assertEqual(rewritten["reasoning_effort"], "high")
 
     def test_proxy_forwards_resolved_reasoning_effort_to_worker_wire_body(self) -> None:
         from starlette.requests import Request
@@ -1837,10 +1853,10 @@ class LlamaCppManagerTests(unittest.TestCase):
             return captured["body"]
 
         preserved = asyncio.run(forward(None))
-        overridden = asyncio.run(forward("medium"))
+        request_wins = asyncio.run(forward("medium"))
 
         self.assertEqual(preserved["reasoning_effort"], "high")
-        self.assertEqual(overridden["reasoning_effort"], "medium")
+        self.assertEqual(request_wins["reasoning_effort"], "high")
 
     def test_proxy_request_context_is_written_as_privacy_safe_activity_event(self) -> None:
         import tempfile
