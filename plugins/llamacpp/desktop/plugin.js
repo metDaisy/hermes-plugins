@@ -377,7 +377,7 @@ function CompressionCallsSummary({ calls, canPrevious, canNext, onPrevious, onNe
       ] })
     ] }),
     jsx('p', { className: 'mt-1 text-[10px] text-(--ui-text-tertiary)', children: '호출별 입력 context 크기와 전체 compression 소요 시간을 표시합니다.' }),
-    rows.length ? jsx('div', { className: 'mt-2 overflow-x-auto', children: jsxs('table', { className: 'w-full min-w-[32rem] text-[11px]', children: [
+    rows.length ? jsx('div', { className: 'mt-2 overflow-x-auto', children: jsxs('table', { className: 'w-full min-w-[32rem] select-text cursor-text text-[11px]', style: { userSelect: 'text', WebkitUserSelect: 'text' }, children: [
       jsx('thead', { children: jsxs('tr', { className: 'text-left text-(--ui-text-tertiary)', children: [
         jsx('th', { className: 'pb-2 font-medium', scope: 'col', children: '시각' }),
         jsx('th', { className: 'pb-2 font-medium', scope: 'col', children: 'Profile / session' }),

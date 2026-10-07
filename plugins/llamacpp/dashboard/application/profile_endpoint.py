@@ -234,12 +234,12 @@ def apply_worker_model_policy(text: str) -> str:
     if model is None:
         lines[0:0] = [
             "model:", '  provider: "llamacpp-local"', '  default: "main-local"',
-            '  reasoning_effort: "high"',
+            '  reasoning_effort: "xhigh"',
         ]
     else:
         update_scalars(
             model, 0,
-            {"provider": "llamacpp-local", "default": "main-local", "reasoning_effort": "high"},
+            {"provider": "llamacpp-local", "default": "main-local", "reasoning_effort": "xhigh"},
             {"base_url", "api_base", "api_mode"},
         )
 

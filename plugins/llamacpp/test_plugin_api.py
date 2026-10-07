@@ -1566,7 +1566,7 @@ class LlamaCppManagerTests(unittest.TestCase):
                 if config_path.parent.name in {"project-manager", "coder", "reviewer"}:
                     self.assertIn(
                         'model:\n  provider: "llamacpp-local"\n  default: "main-local"\n'
-                        '  reasoning_effort: "high"',
+                        '  reasoning_effort: "xhigh"',
                         updated,
                     )
                     self.assertIn(
@@ -2045,8 +2045,14 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("children: '입력 context'", source)
         self.assertIn("children: '소요 시간'", source)
         compression_summary = source[source.index("function CompressionCallsSummary"):source.index("function ResourceMetricsPanel")]
-        self.assertIn("className: 'select-text cursor-text'", compression_summary)
-        self.assertIn("style: { userSelect: 'text', WebkitUserSelect: 'text' }", compression_summary)
+        self.assertIn(
+            "className: 'w-full min-w-[32rem] select-text cursor-text text-[11px]'",
+            compression_summary,
+        )
+        self.assertIn(
+            "style: { userSelect: 'text', WebkitUserSelect: 'text' }",
+            compression_summary[compression_summary.index("jsxs('table'"):],
+        )
         self.assertIn("'aria-label': `Session ${call.session || '없음'}`", compression_summary)
         self.assertIn("'aria-label': '이전 Aux 호출'", compression_summary)
         self.assertIn("'aria-label': '다음 Aux 호출'", compression_summary)
