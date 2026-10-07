@@ -25,6 +25,8 @@ PM invokes /run-workflow
 → KWC routes only schema-tag-matched blocked/completed workflow events that require PM coordination
 ```
 
+Delivery is hybrid rather than a universal push callback. Native completed/blocked/worker lifecycle hooks provide an immediate reconciliation hint in the hook caller, while `on_kanban_dispatch_tick` scans the durable event cursor as recovery. Ordinary comments created outside KWC have no Core comment hook; the supported blocked-Decision comment is discovered by that periodic scan. The gateway dispatch interval is configurable through `kanban.dispatch_interval_seconds` and defaults to 60 seconds.
+
 The workflow boundary is explicit:
 
 - `backend-implementation-card-v2` and `backend-implementation-card-v3` are executed by the canonical `coder` Profile. A successful Coder run calls native `request-review`, and Hermes dispatch starts the Project Manager's same-card checkpoint run. `review_requested` is not routed by KWC.
@@ -47,7 +49,7 @@ Desktop calls POST /api/plugins/kanban-workflow-controller/comments
 → kwc_reply persists a native comment but suppresses automatic re-routing
 ```
 
-The endpoint schedules an immediate native dispatcher nudge after the write. Regular dispatcher ticks process any delivery that was missed, rejected, or waiting for a target Profile session, so reconciliation remains the recovery path rather than the primary latency mechanism.
+KWC-owned comment creation is asynchronous at the delivery boundary. The HTTP endpoint schedules a FastAPI background dispatcher nudge, and `kwc_comment` starts a process-local delivery attempt after the durable request is recorded. Both are latency optimizations, not the correctness boundary: regular dispatcher ticks retry any delivery that was missed, interrupted, rejected, or waiting for a target Profile session.
 
 ## Comment API and tools
 
