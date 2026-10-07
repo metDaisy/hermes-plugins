@@ -140,13 +140,20 @@ def logical_models_payload(state: dict[str, Any]) -> dict[str, Any]:
     """Advertise only the user-selectable Main alias; Compression is auxiliary-only."""
     profiles = state.get("execution_profiles")
     configured = profiles if isinstance(profiles, dict) else {}
-    aliases = ["main-local"] if (
-        isinstance(configured.get("main"), dict) and configured["main"].get("model_id")
-    ) else []
+    main_profile = configured.get("main")
+    main_model = str(main_profile.get("model_id") or "") if isinstance(main_profile, dict) else ""
+    aliases = ["main-local"] if main_model else []
+    model_settings = state.get("model_settings")
+    settings = model_settings.get(main_model) if isinstance(model_settings, dict) else None
+    try:
+        context_length = int(settings.get("ctx-size") or 65536) if isinstance(settings, dict) else 65536
+    except (TypeError, ValueError):
+        context_length = 65536
     return {
         "object": "list",
         "data": [
-            {"id": alias, "object": "model", "created": 0, "owned_by": "llamacpp"}
+            {"id": alias, "object": "model", "created": 0, "owned_by": "llamacpp",
+             "context_length": context_length}
             for alias in aliases
         ],
         "models": [

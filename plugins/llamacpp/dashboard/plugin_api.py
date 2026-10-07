@@ -426,6 +426,11 @@ def _streaming_response(client: httpx.AsyncClient, upstream: httpx.Response) -> 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
 async def proxy(request: Request, path: str) -> StreamingResponse:
     body = await request.body()
+    normalized = path.strip("/")
+    if request.method == "POST" and normalized == "migrations/provider-profile":
+        backend = _read_only_backend()
+        result = await asyncio.to_thread(backend.remove_legacy_profile_endpoints)
+        return JSONResponse(result)
     if COORDINATOR_STOP_MARKER.exists():
         stopped_payload = await asyncio.to_thread(
             _stopped_payload, path, request.query_params, request.method, body,

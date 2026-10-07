@@ -292,6 +292,33 @@ class LlamaCppManagerTests(unittest.TestCase):
         })
         ensure.assert_not_called()
 
+    def test_explicit_provider_migration_removes_legacy_endpoints_without_starting_coordinator(self) -> None:
+        from starlette.requests import Request
+
+        class Backend:
+            calls = 0
+
+            @classmethod
+            def remove_legacy_profile_endpoints(cls) -> dict[str, object]:
+                cls.calls += 1
+                return {"ok": True, "profiles_updated": 2}
+
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        request = Request({
+            "type": "http", "method": "POST", "path": "/migrations/provider-profile",
+            "query_string": b"", "headers": [],
+        }, receive)
+        with patch.object(profile_proxy, "_read_only_backend", return_value=Backend()), \
+                patch.object(profile_proxy, "_ensure_coordinator") as ensure:
+            response = asyncio.run(profile_proxy.proxy(request, "migrations/provider-profile"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body), {"ok": True, "profiles_updated": 2})
+        self.assertEqual(Backend.calls, 1)
+        ensure.assert_not_called()
+
     def test_hf_cache_removal_uses_typed_repository_id(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch.object(api.shutil, "which", return_value="hf"), \
@@ -1193,6 +1220,9 @@ class LlamaCppManagerTests(unittest.TestCase):
                 "main": {"model_id": "Ternary-Bonsai-2-27B"},
                 "compression": {"model_id": "Qwen3.5-4B-UD-Q6_K_XL"},
             },
+            "model_settings": {
+                "Ternary-Bonsai-2-27B": {"ctx-size": "49152"},
+            },
         }
         app = FastAPI()
         app.include_router(inference_proxy.router)
@@ -1203,6 +1233,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         payload = response.json()
 
         self.assertEqual([model["id"] for model in payload["data"]], ["main-local"])
+        self.assertEqual(payload["data"][0]["context_length"], 49152)
         self.assertEqual([model["model"] for model in payload["models"]], ["main-local"])
         self.assertNotIn("compression-local", json.dumps(payload))
         self.assertNotIn("Ternary-Bonsai-2-27B", json.dumps(payload))
@@ -1458,13 +1489,15 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertEqual(state["pid"], 99)
         self.assertEqual(state["execution_profiles"]["main"], old)
 
-    def test_profile_endpoint_sync_rolls_back_files_after_partial_write_failure(self) -> None:
+    def test_explicit_legacy_endpoint_cleanup_rolls_back_after_partial_write_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             first = root / "main.yaml"
             second = root / "coder.yaml"
-            first.write_text("providers:\n", encoding="utf-8")
-            second.write_text("providers:\n", encoding="utf-8")
+            original = api._config_with_execution_profiles(
+                "providers:\n", "http://127.0.0.1:18380/v1", "main-local", {"main-local": 8192})
+            first.write_text(original, encoding="utf-8")
+            second.write_text(original, encoding="utf-8")
             writes = 0
 
             def flaky_write(path: Path, text: str) -> None:
@@ -1475,15 +1508,14 @@ class LlamaCppManagerTests(unittest.TestCase):
                 path.write_text(text, encoding="utf-8")
 
             with patch.object(api, "_profile_config_paths", return_value=[first, second]), \
-                    patch.object(api, "_profile_provider_models", return_value={"main-local": 8192}), \
                     patch.object(api, "_write_profile_config", side_effect=flaky_write):
                 with self.assertRaisesRegex(OSError, "second profile"):
-                    api._sync_execution_profile_endpoint()
+                    api.remove_legacy_profile_endpoints()
 
-            self.assertEqual(first.read_text(encoding="utf-8"), "providers:\n")
-            self.assertEqual(second.read_text(encoding="utf-8"), "providers:\n")
+            self.assertEqual(first.read_text(encoding="utf-8"), original)
+            self.assertEqual(second.read_text(encoding="utf-8"), original)
 
-    def test_profile_endpoint_registers_main_and_compression_and_rewrites_worker_policy(self) -> None:
+    def test_provider_descriptor_preserves_profile_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             config_path = Path(raw_root) / "project-manager" / "config.yaml"
             config_path.parent.mkdir(parents=True)
@@ -1499,34 +1531,22 @@ class LlamaCppManagerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch.object(api, "_profile_config_paths", return_value=[config_path]), \
-                    patch.object(api, "_profile_provider_models", return_value={
+            original = config_path.read_text(encoding="utf-8")
+            with patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768,
                         "compression-local": 8192,
                     }):
                 endpoint = api._sync_execution_profile_endpoint()
 
             updated = config_path.read_text(encoding="utf-8")
-            managed = updated.split("# BEGIN llamacpp endpoint (managed)", 1)[1].split(
-                "# END llamacpp endpoint (managed)", 1,
-            )[0]
+            self.assertEqual(updated, original)
+            self.assertEqual(endpoint["provider"], "llamacpp-local")
             self.assertEqual(endpoint["model"], "main-local")
             self.assertEqual(endpoint["models"], {
                 "main-local": 32768,
                 "compression-local": 8192,
             })
-            self.assertIn('"main-local":', managed)
-            self.assertIn('"compression-local":', managed)
-            self.assertIn(
-                'model:\n  provider: "llamacpp-local"\n  default: "main-local"\n'
-                '  reasoning_effort: "high"',
-                updated,
-            )
-            self.assertIn(
-                '  compression:\n    provider: "llamacpp-local"\n'
-                '    model: "compression-local"\n    reasoning_effort: "none"',
-                updated,
-            )
+
 
     def test_profile_endpoint_sync_surfaces_rollback_write_failure(self) -> None:
         first = Path("first.yaml")
@@ -2331,7 +2351,7 @@ class LlamaCppManagerTests(unittest.TestCase):
                 patch.object(api, "_profile_config_paths", return_value=[]), \
                 patch.object(api, "_load_options", return_value={}):
             endpoint = api._register_custom_endpoint(18434, "bonsai")
-            self.assertEqual(endpoint["provider"], "custom")
+            self.assertEqual(endpoint["provider"], "llamacpp-local")
             self.assertEqual(endpoint["base_url"], "http://127.0.0.1:18380/v1")
             self.assertEqual(endpoint["worker_base_url"], "http://127.0.0.1:18434/v1")
 

@@ -47,7 +47,7 @@ try:
     from .application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
     from .application.resource_history import ResourceHistoryStore, worker_memory_sample
     from .application.event_bus import publish_event, start_activity_pump
-    from .application.profile_endpoint import ManagedEndpointConfig, apply_worker_model_policy, write_text_atomically
+    from .application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from .application.prism_runtime import PrismRuntimeInstaller
     from .application.runtime_inspector import RuntimeInspector
     from .application.runtime_management import RuntimeManagementWorkflow
@@ -96,7 +96,7 @@ except ImportError:
     from application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
     from application.resource_history import ResourceHistoryStore, worker_memory_sample
     from application.event_bus import publish_event, start_activity_pump
-    from application.profile_endpoint import ManagedEndpointConfig, apply_worker_model_policy, write_text_atomically
+    from application.profile_endpoint import ManagedEndpointConfig, write_text_atomically
     from application.prism_runtime import PrismRuntimeInstaller
     from application.runtime_inspector import RuntimeInspector
     from application.runtime_management import RuntimeManagementWorkflow
@@ -657,6 +657,7 @@ def _profile_provider_models() -> dict[str, int]:
 
 
 def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]:
+    """Project the stable Core provider descriptor without editing any Profile config."""
     base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
     execution_models = _profile_provider_models()
     if "main-local" not in execution_models and fallback_model:
@@ -674,22 +675,18 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
         if logical_model in execution_models
     }
     default_model = "main-local"
-    with _custom_endpoint_lock:
-        updates: list[tuple[Path, str, str]] = []
-        for path in _profile_config_paths():
-            text = path.read_text(encoding="utf-8")
-            updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
-            if path.parent.name in {"project-manager", "coder", "reviewer"}:
-                updated = apply_worker_model_policy(updated)
-            if updated != text:
-                updates.append((path, text, updated))
-        _apply_profile_updates(updates)
-    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "custom", "base_url": base_url,
+    return {"key": CUSTOM_ENDPOINT_KEY, "provider": "llamacpp-local", "base_url": base_url,
             "model": default_model,
             "models": provider_models, "context_length": provider_models[default_model]}
 
 
 def _unregister_custom_endpoint() -> None:
+    """Provider registration is declarative and remains stable while the runtime is stopped."""
+    return
+
+
+def remove_legacy_profile_endpoints() -> dict[str, Any]:
+    """Explicit migration cleanup for endpoint blocks written by pre-provider releases."""
     with _custom_endpoint_lock:
         updates: list[tuple[Path, str, str]] = []
         for path in _profile_config_paths():
@@ -698,16 +695,12 @@ def _unregister_custom_endpoint() -> None:
             if changed:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
+    return {"ok": True, "profiles_updated": len(updates)}
 
 
 def _stop_server(*, preserve_log: bool = False, keep_endpoint: bool = False) -> None:
     # The activity log spans coordinator and many sequential model workers.
     _server_lifecycle().stop(True, keep_endpoint)
-
-
-def reset_profile_model_policy() -> None:
-    """Remove the legacy managed endpoint without changing Core-owned routing."""
-    _unregister_custom_endpoint()
 
 
 def shutdown_machine_runtime() -> None:

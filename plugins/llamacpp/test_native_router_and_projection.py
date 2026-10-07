@@ -541,7 +541,7 @@ class ResourceMetricsTests(unittest.TestCase):
 class ManagedProfilePolicyTests(unittest.TestCase):
     BASE = """model:\n  provider: openai-codex\n  default: gpt-5.6-luna\n  base_url: https://chatgpt.com/backend-api/codex\n  api_mode: codex_responses\n  reasoning_effort: high\nfallback_providers: []\nagent:\n  max_turns: 90\nauxiliary:\n  compression:\n    provider: openai-codex\n    model: gpt-5.6-luna\n    reasoning_effort: medium\n"""
 
-    def test_endpoint_sync_assigns_local_main_and_compression_to_worker_profile(self) -> None:
+    def test_endpoint_sync_exposes_provider_descriptor_without_mutating_profile(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
 
@@ -550,27 +550,20 @@ class ManagedProfilePolicyTests(unittest.TestCase):
             config_path.parent.mkdir(parents=True)
             config_path.write_text(self.BASE, encoding="utf-8")
 
-            with patch.object(api, "_profile_config_paths", return_value=[config_path]), \
-                    patch.object(api, "_profile_provider_models", return_value={
-                        "main-local": 32768, "compression-local": 8192,
-                    }):
-                api._sync_execution_profile_endpoint()
+            original = config_path.read_text(encoding="utf-8")
+            with patch.object(api, "_profile_provider_models", return_value={
+                         "main-local": 32768, "compression-local": 8192,
+                     }):
+                endpoint = api._sync_execution_profile_endpoint()
 
             updated = config_path.read_text(encoding="utf-8")
 
-        self.assertIn("# BEGIN llamacpp endpoint (managed)", updated)
-        self.assertIn('default_model: "main-local"', updated)
-        self.assertIn('"compression-local":', updated)
-        self.assertIn('model:\n  provider: "llamacpp-local"\n  default: "main-local"', updated)
-        self.assertIn('  reasoning_effort: "high"', updated)
-        self.assertNotIn("base_url: https://chatgpt.com/backend-api/codex", updated)
-        self.assertNotIn("api_mode: codex_responses", updated)
-        self.assertIn("fallback_providers: []", updated)
-        self.assertIn(
-            'auxiliary:\n  compression:\n    provider: "llamacpp-local"\n'
-            '    model: "compression-local"\n    reasoning_effort: "none"',
-            updated,
-        )
+        self.assertEqual(updated, original)
+        self.assertEqual(endpoint["provider"], "llamacpp-local")
+        self.assertEqual(endpoint["models"], {
+            "main-local": 32768,
+            "compression-local": 8192,
+        })
 
     def test_endpoint_sync_preserves_non_worker_profile_policy(self) -> None:
         import tempfile
@@ -862,7 +855,7 @@ class ProductionIntegrationTests(unittest.TestCase):
         self.assertEqual(len(result["raw_lines"]), 3)
         self.assertNotIn("PRIVATE", "\n".join(result["lines"]))
 
-    def test_endpoint_sync_assigns_policy_only_to_worker_profiles(self) -> None:
+    def test_endpoint_sync_preserves_every_profile_policy(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
 
@@ -875,32 +868,16 @@ class ProductionIntegrationTests(unittest.TestCase):
                 path.parent.mkdir(parents=True)
                 path.write_text(ManagedProfilePolicyTests.BASE, encoding="utf-8")
 
-            with patch.object(api, "_profile_config_paths", return_value=profiles), \
-                    patch.object(api, "_profile_provider_models", return_value={
+            with patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768, "compression-local": 8192,
                     }):
                 api._sync_execution_profile_endpoint()
 
             for path in profiles:
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("fallback_providers: []", text)
-                self.assertIn('default_model: "main-local"', text, path.parent.name)
-                self.assertIn('"main-local":', text, path.parent.name)
-                self.assertIn('"compression-local":', text, path.parent.name)
-                if path.parent.name in {"project-manager", "coder", "reviewer"}:
-                    self.assertIn('  provider: "llamacpp-local"\n  default: "main-local"', text)
-                    self.assertIn(
-                        '  compression:\n    provider: "llamacpp-local"\n'
-                        '    model: "compression-local"\n    reasoning_effort: "none"', text,
-                    )
-                else:
-                    self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna", text)
-                    self.assertIn(
-                        "  compression:\n    provider: openai-codex\n"
-                        "    model: gpt-5.6-luna\n    reasoning_effort: medium", text,
-                    )
+                self.assertEqual(text, ManagedProfilePolicyTests.BASE, path.parent.name)
 
-    def test_endpoint_removal_preserves_every_profile_model_policy(self) -> None:
+    def test_runtime_unregister_keeps_declarative_provider_and_profile_policy(self) -> None:
         import tempfile
         from dashboard import backend_impl as api
 
@@ -920,8 +897,7 @@ class ProductionIntegrationTests(unittest.TestCase):
 
             for path in profiles:
                 restored = path.read_text(encoding="utf-8")
-                self.assertNotIn("# BEGIN llamacpp endpoint (managed)", restored, path.parent.name)
-                self.assertEqual(restored, ManagedProfilePolicyTests.BASE)
+                self.assertEqual(restored, configured, path.parent.name)
 
 
 if __name__ == "__main__":

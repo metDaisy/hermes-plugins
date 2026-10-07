@@ -1,0 +1,4 @@
+name: llamacpp-local
+version: 0.1.0
+description: Hermes model-provider adapter for the local llama.cpp Manager coordinator.
+kind: model-provider
