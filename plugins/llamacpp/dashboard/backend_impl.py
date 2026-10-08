@@ -28,7 +28,7 @@ from fastapi import APIRouter, HTTPException
 try:
     from .backends import backend_view, get_backend
     from .application.device_discovery import DeviceDiscoveryService
-    from .application.execution_profiles import ExecutionProfileService
+    from .application.execution_profiles import ExecutionProfileCoordinator, ExecutionProfileService
     from .application.download_progress import DownloadProgressTracker
     from .application.huggingface_cache import HuggingFaceCacheService
     from .application.huggingface_download import HuggingFaceDownloadService
@@ -77,7 +77,7 @@ except ImportError:
         sys.path.insert(0, _DASHBOARD_DIR)
     from backends import backend_view, get_backend
     from application.device_discovery import DeviceDiscoveryService
-    from application.execution_profiles import ExecutionProfileService
+    from application.execution_profiles import ExecutionProfileCoordinator, ExecutionProfileService
     from application.download_progress import DownloadProgressTracker
     from application.huggingface_cache import HuggingFaceCacheService
     from application.huggingface_download import HuggingFaceDownloadService
@@ -1066,55 +1066,22 @@ def execution_profiles() -> dict[str, Any]:
     return _execution_profiles_service().snapshot()
 
 
-def save_execution_profile(role: str, body: dict[str, Any]) -> dict[str, Any]:
-    previous = _state()
-    previous_profiles = previous.get("execution_profiles")
-    previous_role = (
-        dict(previous_profiles.get(role))
-        if isinstance(previous_profiles, dict) and isinstance(previous_profiles.get(role), dict)
-        else None
+def _execution_profile_coordinator() -> ExecutionProfileCoordinator:
+    return ExecutionProfileCoordinator(
+        load_state=_state,
+        mutate_state=_mutate_state,
+        profiles=_execution_profiles_service,
+        sync_endpoint=_sync_execution_profile_endpoint,
+        unregister_endpoint=_unregister_custom_endpoint,
     )
-    result = _execution_profiles_service().save(role, body)
-    written_profile = result.get("profiles", {}).get(role, {})
-    written_fields = {
-        key: str(written_profile.get(key) or "")
-        for key in ("runtime_kind", "model_id", "preset_id")
-    }
-    try:
-        configured = any(
-            isinstance(profile, dict) and profile.get("configured")
-            for profile in result.get("profiles", {}).values()
-        )
-        if configured:
-            endpoint = _sync_execution_profile_endpoint()
-        else:
-            _unregister_custom_endpoint()
-            endpoint = None
-    except Exception:
-        def rollback(current: dict[str, Any]) -> None:
-            profiles = current.get("execution_profiles")
-            next_profiles = dict(profiles) if isinstance(profiles, dict) else {}
-            current_role = next_profiles.get(role)
-            current_fields = {
-                key: str(current_role.get(key) or "")
-                for key in ("runtime_kind", "model_id", "preset_id")
-            } if isinstance(current_role, dict) else {}
-            if current_fields != written_fields:
-                return
-            if previous_role is None:
-                next_profiles.pop(role, None)
-            else:
-                next_profiles[role] = previous_role
-            current["execution_profiles"] = next_profiles
 
-        _mutate_state(rollback)
-        raise
 
-    def record(current: dict[str, Any]) -> None:
-        current["custom_endpoint"] = endpoint
+def save_execution_profile(role: str, body: dict[str, Any]) -> dict[str, Any]:
+    return _execution_profile_coordinator().save(role, body)
 
-    _mutate_state(record)
-    return result
+
+def save_execution_profiles(bindings: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return _execution_profile_coordinator().save_many(bindings)
 
 
 def _transition_log(event: str, **details: Any) -> None:
@@ -1383,8 +1350,8 @@ router.include_router(create_server_router(ServerRouteContext(
     logs=_server_log_tail, metrics=_resource_metrics, shutdown=request_coordinator_shutdown,
 )))
 router.include_router(create_execution_profile_router(ExecutionProfileRouteContext(
-    snapshot=execution_profiles, save=save_execution_profile, start=ensure_execution_role,
-    create_job=_job, launch=_spawn, finish=_finish,
+    snapshot=execution_profiles, save=save_execution_profile, save_many=save_execution_profiles,
+    start=ensure_execution_role, create_job=_job, launch=_spawn, finish=_finish,
 )))
 def status() -> dict[str, Any]:
     return _status()

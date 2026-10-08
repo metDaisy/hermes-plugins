@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import anyio
 import websockets
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -254,83 +254,49 @@ def _read_only_backend():
         return backend
 
 
-def _stopped_payload(
-    path: str,
-    query: object,
-    method: str = "GET",
-    body: bytes = b"",
-) -> dict[str, object] | None:
-    """Serve snapshots and safe parameter persistence while the coordinator is stopped."""
+async def _stopped_response(request: Request, path: str) -> JSONResponse | None:
+    """Dispatch stopped-safe operations through the coordinator's real router."""
     normalized = path.strip("/")
-    backend = _read_only_backend()
-    getter = getattr(query, "get", lambda *_args: None)
-    if method == "GET":
-        if normalized == "status":
-            payload = backend.status()
-            payload["server_running"] = False
-            payload["coordinator"] = {
-                "ok": False,
-                "stopped": True,
-                "port": COORDINATOR_PORT,
-                "singleton": True,
-                "inference_base_url": f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
-                "cancellation_propagation": True,
-            }
-            return payload
-        if normalized == "logs":
-            return backend.activity_logs(max(1, min(int(getter("limit") or 250), 1000)))
-        if normalized == "metrics":
-            return backend.resource_metrics(int(getter("window") or 60))
-        if normalized == "jobs":
-            return {"jobs": []}
-        if normalized == "hf-models":
-            return backend._local_hf_models()
-        if normalized == "presets":
-            return backend.presets(str(getter("model_id") or ""))
-        if normalized == "settings":
-            query_text = str(getter("q") or "").strip().lower()
-            limit = max(1, min(int(getter("limit") or 50), 100))
-            options = [
-                option for option in backend._option_list()
-                if query_text and (
-                    query_text in option["key"].lower()
-                    or query_text in option["name"].lower()
-                    or query_text in option["description"].lower()
-                )
-            ]
-            return {
-                "editable": True,
-                "query": str(getter("q") or ""),
-                "options": options[:limit],
-                "runtime": str(backend._server_executable() or ""),
-                "message": "plugin이 관리하는 llama-server --help에서 검색합니다.",
-            }
-        if normalized.startswith("settings/"):
-            return backend.model_settings(normalized.removeprefix("settings/"))
+    parts = normalized.split("/") if normalized else []
+    method = request.method
+    allowed = (
+        (method == "GET" and (
+            normalized in {"status", "logs", "metrics", "jobs", "hf-models", "presets", "settings"}
+            or normalized.startswith("settings/")
+        ))
+        or (method == "PUT" and normalized.startswith("settings/"))
+        or (method == "POST" and (
+            normalized == "presets"
+            or (len(parts) == 3 and parts[0] == "presets" and parts[2] == "apply")
+        ))
+        or (method in {"PATCH", "DELETE"} and len(parts) == 2 and parts[0] == "presets")
+    )
+    if not allowed:
         return None
 
-    try:
-        payload = json.loads(body.decode("utf-8")) if body else {}
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="JSON body must be an object")
-
-    if method == "PUT" and normalized.startswith("settings/"):
-        return backend.save_model_settings(normalized.removeprefix("settings/"), payload)
-    if method == "POST" and normalized == "presets":
-        return backend.create_preset(payload)
-
-    parts = normalized.split("/")
-    if len(parts) >= 2 and parts[0] == "presets":
-        preset_id = parts[1]
-        if method == "POST" and len(parts) == 3 and parts[2] == "apply":
-            return backend.apply_preset(preset_id, payload)
-        if method == "PATCH" and len(parts) == 2:
-            return backend.rename_preset(preset_id, payload)
-        if method == "DELETE" and len(parts) == 2:
-            return backend.delete_preset(preset_id)
-    return None
+    backend = _read_only_backend()
+    app = getattr(backend, "_stopped_asgi_app", None)
+    if app is None:
+        app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+        app.include_router(backend.router)
+        setattr(backend, "_stopped_asgi_app", app)
+    target = "/" + normalized
+    if request.url.query:
+        target += "?" + request.url.query
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://llamacpp-stopped") as client:
+        upstream = await client.request(
+            method, target, headers=_filtered_headers(request.headers), content=await request.body(),
+        )
+    payload = upstream.json()
+    if normalized == "status" and isinstance(payload, dict):
+        payload["server_running"] = False
+        payload["coordinator"] = {
+            "ok": False, "stopped": True, "port": COORDINATOR_PORT, "singleton": True,
+            "inference_base_url": f"http://127.0.0.1:{COORDINATOR_PORT}/v1",
+            "cancellation_propagation": True,
+        }
+    return JSONResponse(payload, status_code=upstream.status_code)
 
 
 def _ws_upgrade_authorized(websocket: WebSocket) -> bool:
@@ -437,11 +403,9 @@ async def proxy(request: Request, path: str) -> StreamingResponse:
         result = await asyncio.to_thread(backend.remove_legacy_profile_endpoints)
         return JSONResponse(result)
     if COORDINATOR_STOP_MARKER.exists():
-        stopped_payload = await asyncio.to_thread(
-            _stopped_payload, path, request.query_params, request.method, body,
-        )
-        if stopped_payload is not None:
-            return JSONResponse(stopped_payload)
+        stopped_response = await _stopped_response(request, path)
+        if stopped_response is not None:
+            return stopped_response
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=120.0, pool=5.0),
         trust_env=False,

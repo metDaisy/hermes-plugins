@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 class ExecutionProfileRouteContext:
     snapshot: Callable[[], dict[str, Any]]
     save: Callable[[str, dict[str, Any]], dict[str, Any]]
+    save_many: Callable[[dict[str, dict[str, Any]]], dict[str, Any]]
     start: Callable[[str], dict[str, Any]]
     create_job: Callable[[str, str], dict[str, Any]]
     launch: Callable[[dict[str, Any], Callable[[], None], str], None]
@@ -38,8 +39,10 @@ def create_router(context: ExecutionProfileRouteContext) -> APIRouter:
         if not main_model_id and not compression_model_id:
             raise HTTPException(status_code=422, detail="Main 또는 Auxiliary 모델을 하나 이상 선택해야 합니다.")
         try:
-            context.save("main", {"model_id": main_model_id})
-            context.save("compression", {"model_id": compression_model_id})
+            context.save_many({
+                "main": {"model_id": main_model_id},
+                "compression": {"model_id": compression_model_id},
+            })
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         role = "main" if main_model_id else "compression"

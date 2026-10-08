@@ -7,6 +7,11 @@ from typing import Any, Callable
 import os
 import re
 
+try:
+    from .owned_process import capture_process_identity, terminate_owned_process
+except ImportError:  # pragma: no cover - direct module loading fallback
+    from application.owned_process import capture_process_identity, terminate_owned_process
+
 
 def _quant_base(stem: str) -> str:
     """Return the language-model base name, with a trailing -<quant> suffix stripped."""
@@ -40,21 +45,30 @@ def _find_mmproj_near(model_path: Path | None) -> Path | None:
         return None
 
 
-def _terminate_owned_process(process: Any) -> bool:
-    try:
-        process.terminate()
-        process.wait(timeout=10)
-        return True
-    except Exception:  # noqa: BLE001
-        try:
-            process.kill()
-            process.wait(timeout=5)
-            return True
-        except Exception:  # noqa: BLE001
-            try:
-                return process.poll() is not None
-            except Exception:  # noqa: BLE001
-                return False
+def _startup_failure_detail(payload: dict[str, Any]) -> str:
+    """Return bounded native failure evidence without prompts, credentials, or machine paths."""
+    raw_lines = payload.get("raw_lines")
+    candidates: list[str] = []
+    failure_markers = (
+        "error", "fatal", "failed", "failure", "exception", "cuda", "out of memory", "cannot", "invalid",
+    )
+    secret_markers = ("prompt", "authorization", "api key", "api_key", "x-api-key", "bearer ")
+    if isinstance(raw_lines, list):
+        for raw_line in raw_lines[-80:]:
+            line = str(raw_line or "").strip()
+            lowered = line.lower()
+            if not line or any(marker in lowered for marker in secret_markers):
+                continue
+            if not any(marker in lowered for marker in failure_markers):
+                continue
+            line = re.sub(r"[A-Za-z]:[\\/][^\s\"']+", "[PATH]", line)
+            line = re.sub(r"(?<!:)\/(?:[^\s\"'/]+\/)+[^\s\"']+", "[PATH]", line)
+            candidates.append(line[-500:])
+    if not candidates:
+        projected = payload.get("lines")
+        if isinstance(projected, list):
+            candidates = [str(line)[-500:] for line in projected[-10:] if str(line).strip()]
+    return "\n".join(candidates[-10:])
 
 
 class ServerStartupService:
@@ -120,14 +134,10 @@ class ServerStartupService:
         except OSError as exc:
             log.write(f"llama-server spawn failed: {exc}\n".encode(errors="replace")); log.close(); raise
         log.close()
-        identity: dict[str, Any] = {"pid": process.pid, "executable": str(executable.resolve())}
         try:
-            import psutil
-            worker = psutil.Process(process.pid)
-            identity["create_time"] = worker.create_time()
-            identity["executable"] = str(Path(worker.exe()).resolve())
+            identity = capture_process_identity(process)
         except Exception as exc:  # noqa: BLE001 - the owned Popen handle is safe to terminate directly
-            if not _terminate_owned_process(process):
+            if not terminate_owned_process(process):
                 raise RuntimeError(
                     "could not verify llama-server process identity or terminate the owned process"
                 ) from exc
@@ -139,7 +149,7 @@ class ServerStartupService:
             current["execution_mode"] = "native_router" if native_router is not None else "exclusive_swap"
 
         def terminate_and_clear_worker() -> None:
-            if not _terminate_owned_process(process):
+            if not terminate_owned_process(process):
                 raise RuntimeError(
                     "could not terminate the owned llama-server; retaining worker ownership state"
                 )
@@ -172,7 +182,7 @@ class ServerStartupService:
         while self._now() < deadline:
             if process.poll() is not None:
                 self._stop(preserve_log=True, keep_endpoint=True)
-                detail = "\n".join(self._log_tail(40).get("lines", [])[-40:])
+                detail = _startup_failure_detail(self._log_tail(80))
                 raise RuntimeError("llama-server exited during startup" + (f"\n{detail}" if detail else ""))
             if self._health(port):
                 if native_router is not None and self._router_ready is not None and not self._router_ready(port, serving_model):
@@ -206,4 +216,8 @@ class ServerStartupService:
                 return
             self._sleep(0.5)
         self._stop(preserve_log=True, keep_endpoint=True)
-        raise RuntimeError("llama-server did not become healthy within 60 seconds")
+        detail = _startup_failure_detail(self._log_tail(80))
+        raise RuntimeError(
+            "llama-server did not become healthy within 60 seconds"
+            + (f"\n{detail}" if detail else "")
+        )

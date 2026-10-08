@@ -74,45 +74,45 @@ class ExecutionProfileService:
                 "profiles": normalized}
 
     def save(self, role: str, body: dict[str, Any]) -> dict[str, Any]:
-        role = str(role or "").strip().lower()
-        if role not in ROLES:
-            raise ValueError("role은 main 또는 compression이어야 합니다")
-        model_id = str(body.get("model_id") or "").strip()
-        state = self.load_state()
-        if not model_id:
-            def clear(current: dict[str, Any]) -> None:
-                stored = current.get("execution_profiles")
-                profiles = dict(stored) if isinstance(stored, dict) else {}
-                previous = profiles.pop(role, None)
-                previous_model = str(previous.get("model_id") or "") if isinstance(previous, dict) else ""
-                current["execution_mode"] = "exclusive_swap"
-                current["execution_profiles"] = profiles
-                if previous_model and current.get("active_model_id") == previous_model:
-                    current["active_model_id"] = None
+        return self.save_many({role: body})
 
-            if self.mutate_state is not None:
-                self.mutate_state(clear)
-            else:
-                clear(state)
-                self.save_state(state)
-            return self.snapshot()
+    def save_many(self, bindings: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        state = self.load_state()
         models = state.get("models") if isinstance(state.get("models"), dict) else {}
-        if model_id not in models:
-            raise ValueError("등록된 model_id를 선택해야 합니다")
-        entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
-        stored_runtime = str(entry.get("runtime_kind") or "")
-        runtime_kind = stored_runtime if stored_runtime in {"official", "prism_ml"} else self._runtime_for_model(model_id)
-        if not self.accepts(runtime_kind, model_id):
-            raise ValueError("선택한 모델은 해당 runtime과 호환되지 않습니다")
-        profile = {
-            "runtime_kind": runtime_kind,
-            "model_id": model_id,
-            "preset_id": str(body.get("preset_id") or "").strip(),
-        }
+        prepared: dict[str, dict[str, str] | None] = {}
+        for raw_role, body in bindings.items():
+            role = str(raw_role or "").strip().lower()
+            if role not in ROLES:
+                raise ValueError("role은 main 또는 compression이어야 합니다")
+            model_id = str(body.get("model_id") or "").strip()
+            if not model_id:
+                prepared[role] = None
+                continue
+            if model_id not in models:
+                raise ValueError("등록된 model_id를 선택해야 합니다")
+            entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+            stored_runtime = str(entry.get("runtime_kind") or "")
+            runtime_kind = stored_runtime if stored_runtime in {"official", "prism_ml"} else self._runtime_for_model(model_id)
+            if not self.accepts(runtime_kind, model_id):
+                raise ValueError("선택한 모델은 해당 runtime과 호환되지 않습니다")
+            prepared[role] = {
+                "runtime_kind": runtime_kind,
+                "model_id": model_id,
+                "preset_id": str(body.get("preset_id") or "").strip(),
+            }
+
         def apply(current: dict[str, Any]) -> None:
             stored = current.get("execution_profiles")
             profiles = dict(stored) if isinstance(stored, dict) else {}
-            profiles[role] = profile
+            for role, profile in prepared.items():
+                previous = profiles.get(role)
+                previous_model = str(previous.get("model_id") or "") if isinstance(previous, dict) else ""
+                if profile is None:
+                    profiles.pop(role, None)
+                    if previous_model and current.get("active_model_id") == previous_model:
+                        current["active_model_id"] = None
+                else:
+                    profiles[role] = profile
             current["execution_mode"] = "exclusive_swap"
             current["execution_profiles"] = profiles
 
@@ -139,3 +139,75 @@ class ExecutionProfileService:
             "preset_id": str(profile.get("preset_id") or ""),
             "configured": bool(model_id),
         }
+
+
+@dataclass(frozen=True)
+class ExecutionProfileCoordinator:
+    """Commit role bindings and project their managed endpoint as one operation."""
+
+    load_state: Callable[[], dict[str, Any]]
+    mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]]
+    profiles: Callable[[], Any]
+    sync_endpoint: Callable[[], dict[str, Any]]
+    unregister_endpoint: Callable[[], None]
+
+    @staticmethod
+    def _stored_profiles(value: Any) -> dict[str, dict[str, str]]:
+        profiles = value if isinstance(value, dict) else {}
+        return {
+            role: {
+                key: str(profile.get(key) or "")
+                for key in ("runtime_kind", "model_id", "preset_id")
+            }
+            for role, profile in profiles.items()
+            if isinstance(profile, dict)
+        }
+
+    def save(self, role: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self.save_many({role: body})
+
+    def save_many(self, bindings: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        previous = self.load_state()
+        previous_profiles = previous.get("execution_profiles")
+        previous_snapshot = dict(previous_profiles) if isinstance(previous_profiles, dict) else {}
+        previous_runtime = {
+            key: (key in previous, previous.get(key))
+            for key in ("active_model_id", "execution_mode", "custom_endpoint")
+        }
+        profile_service = self.profiles()
+        save_many = getattr(profile_service, "save_many", None)
+        if save_many is not None:
+            result = save_many(bindings)
+        elif len(bindings) == 1:
+            role, body = next(iter(bindings.items()))
+            result = profile_service.save(role, body)
+        else:
+            raise RuntimeError("execution profile service does not support atomic multi-role saves")
+
+        written_profiles = self._stored_profiles({
+            role: profile
+            for role, profile in result.get("profiles", {}).items()
+            if isinstance(profile, dict) and profile.get("configured")
+        })
+        try:
+            if "main" in written_profiles:
+                endpoint = self.sync_endpoint()
+            else:
+                self.unregister_endpoint()
+                endpoint = None
+        except Exception:
+            def rollback(current: dict[str, Any]) -> None:
+                if self._stored_profiles(current.get("execution_profiles")) != written_profiles:
+                    return
+                current["execution_profiles"] = previous_snapshot
+                for key, (existed, value) in previous_runtime.items():
+                    if existed:
+                        current[key] = value
+                    else:
+                        current.pop(key, None)
+
+            self.mutate_state(rollback)
+            raise
+
+        self.mutate_state(lambda current: current.__setitem__("custom_endpoint", endpoint))
+        return result

@@ -234,36 +234,60 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("pre_api_request", normalized)
 
 
-    def test_stopped_backend_serves_model_inventory_and_presets_without_coordinator(self) -> None:
-        class Backend:
-            @staticmethod
-            def _local_hf_models():
-                return {"models": [{"repo_id": "owner/repo"}]}
-
-            @staticmethod
-            def presets(model_id=""):
-                return {"presets": [{"id": "preset-1"}], "model_id": model_id}
-
-        query = {"model_id": "registered-model"}
-        with patch.object(profile_proxy, "_read_only_backend", return_value=Backend()):
-            inventory = profile_proxy._stopped_payload("hf-models", {})
-            presets = profile_proxy._stopped_payload("presets", query)
-
-        self.assertEqual(inventory, {"models": [{"repo_id": "owner/repo"}]})
-        self.assertEqual(presets, {"presets": [{"id": "preset-1"}], "model_id": "registered-model"})
-
-    def test_stopped_backend_applies_preset_without_starting_coordinator(self) -> None:
+    def test_stopped_backend_reuses_the_coordinator_router_contract(self) -> None:
+        from fastapi import APIRouter
         from starlette.requests import Request
 
+        router = APIRouter()
+
+        @router.get("/hf-models")
+        def inventory() -> dict[str, object]:
+            return {"models": [{"repo_id": "owner/repo"}]}
+
+        @router.get("/presets")
+        def presets(model_id: str = "") -> dict[str, object]:
+            return {"presets": [{"id": "preset-1"}], "model_id": model_id}
+
         class Backend:
-            @staticmethod
-            def apply_preset(preset_id: str, body: dict[str, object]) -> dict[str, object]:
-                return {
-                    "preset_id": preset_id,
-                    "model_id": body["model_id"],
-                    "options": {"ctx-size": "8192"},
-                    "requires_restart": False,
-                }
+            pass
+
+        Backend.router = router
+
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        request = Request({
+            "type": "http", "method": "GET", "path": "/presets",
+            "query_string": b"model_id=registered-model", "headers": [],
+        }, receive)
+        with patch.object(profile_proxy, "_read_only_backend", return_value=Backend()):
+            response = asyncio.run(profile_proxy._stopped_response(request, "presets"))
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body), {
+            "presets": [{"id": "preset-1"}], "model_id": "registered-model",
+        })
+
+    def test_stopped_backend_applies_preset_without_starting_coordinator(self) -> None:
+        from fastapi import APIRouter
+        from starlette.requests import Request
+
+        router = APIRouter()
+
+        @router.post("/presets/{preset_id}/apply")
+        def apply_preset(preset_id: str, body: dict[str, object]) -> dict[str, object]:
+            return {
+                "preset_id": preset_id,
+                "model_id": body["model_id"],
+                "options": {"ctx-size": "8192"},
+                "requires_restart": False,
+            }
+
+        class Backend:
+            pass
+
+        Backend.router = router
 
         body = json.dumps({"model_id": "registered-model"}).encode("utf-8")
         delivered = False
@@ -1335,25 +1359,44 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertFalse(profile_proxy._coordinator_start_requested("GET", "status", b""))
 
     def test_intentionally_stopped_coordinator_serves_read_only_snapshots_without_503(self) -> None:
-        from dashboard import plugin_api as profile_proxy
+        from fastapi import APIRouter
+        from starlette.requests import Request
+
+        router = APIRouter()
+
+        @router.get("/status")
+        def status_route() -> dict[str, object]:
+            return {"server_running": True, "models": [{"id": "main"}]}
+
+        @router.get("/logs")
+        def logs_route(limit: int = 250) -> dict[str, object]:
+            return {"lines": [f"limit={limit}"]}
+
+        @router.get("/metrics")
+        def metrics_route(window: int = 60) -> dict[str, object]:
+            return {"window_seconds": window, "series": []}
 
         class Backend:
-            @staticmethod
-            def status() -> dict[str, object]:
-                return {"server_running": True, "models": [{"id": "main"}]}
+            pass
 
-            @staticmethod
-            def activity_logs(limit: int) -> dict[str, object]:
-                return {"lines": [f"limit={limit}"]}
+        Backend.router = router
 
-            @staticmethod
-            def resource_metrics(window: int) -> dict[str, object]:
-                return {"window_seconds": window, "series": []}
+        def call(path: str, query: bytes = b"") -> dict[str, object]:
+            async def receive() -> dict[str, object]:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            request = Request({
+                "type": "http", "method": "GET", "path": f"/{path}",
+                "query_string": query, "headers": [],
+            }, receive)
+            response = asyncio.run(profile_proxy._stopped_response(request, path))
+            self.assertIsNotNone(response)
+            return json.loads(response.body)
 
         with patch.object(profile_proxy, "_read_only_backend", return_value=Backend):
-            status = profile_proxy._stopped_payload("status", {})
-            logs = profile_proxy._stopped_payload("logs", {"limit": "25"})
-            metrics = profile_proxy._stopped_payload("metrics", {"window": "1800"})
+            status = call("status")
+            logs = call("logs", b"limit=25")
+            metrics = call("metrics", b"window=1800")
 
         self.assertFalse(status["server_running"])
         self.assertTrue(status["coordinator"]["stopped"])

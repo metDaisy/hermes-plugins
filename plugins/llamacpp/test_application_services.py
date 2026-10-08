@@ -138,6 +138,159 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         self.assertNotIn("main", state["execution_profiles"])
         self.assertIsNone(state["active_model_id"])
 
+    def test_execution_profiles_validate_all_roles_before_atomic_write(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "models": {"main-model": {"runtime_kind": "official"}},
+            "execution_profiles": {
+                "main": {"runtime_kind": "official", "model_id": "old-main", "preset_id": ""},
+            },
+        }
+        writes: list[dict[str, object]] = []
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: writes.append(dict(value)) or state.update(value),
+            accepts=lambda _kind, _model_id: True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "등록된 model_id"):
+            service.save_many({
+                "main": {"model_id": "main-model"},
+                "compression": {"model_id": "missing-model"},
+            })
+
+        self.assertEqual(writes, [])
+        self.assertEqual(state["execution_profiles"]["main"]["model_id"], "old-main")
+        self.assertNotIn("compression", state["execution_profiles"])
+
+    def test_compression_only_profile_skips_main_endpoint_projection(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileCoordinator
+
+        state: dict[str, object] = {}
+        projection_calls: list[str] = []
+
+        class Profiles:
+            @staticmethod
+            def save_many(_bindings):
+                state["execution_profiles"] = {
+                    "compression": {"runtime_kind": "official", "model_id": "small", "preset_id": ""},
+                }
+                return {
+                    "profiles": {
+                        "main": {"configured": False},
+                        "compression": {
+                            "runtime_kind": "official", "model_id": "small", "preset_id": "", "configured": True,
+                        },
+                    }
+                }
+
+        def mutate(callback):
+            callback(state)
+            return state
+
+        coordinator = ExecutionProfileCoordinator(
+            load_state=lambda: dict(state), mutate_state=mutate, profiles=lambda: Profiles(),
+            sync_endpoint=lambda: projection_calls.append("sync") or {},
+            unregister_endpoint=lambda: projection_calls.append("unregister"),
+        )
+
+        result = coordinator.save_many({"main": {"model_id": ""}, "compression": {"model_id": "small"}})
+
+        self.assertTrue(result["profiles"]["compression"]["configured"])
+        self.assertEqual(state["execution_profiles"]["compression"]["model_id"], "small")
+        self.assertEqual(projection_calls, ["unregister"])
+        self.assertIsNone(state["custom_endpoint"])
+
+    def test_execution_profile_projection_failure_restores_related_runtime_state(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileCoordinator
+
+        old_profiles = {"main": {"runtime_kind": "official", "model_id": "old", "preset_id": ""}}
+        state: dict[str, object] = {
+            "execution_profiles": dict(old_profiles),
+            "active_model_id": "old",
+            "execution_mode": "native_router",
+        }
+
+        class Profiles:
+            @staticmethod
+            def save_many(_bindings):
+                state["execution_profiles"] = {
+                    "compression": {"runtime_kind": "official", "model_id": "small", "preset_id": ""},
+                }
+                state["active_model_id"] = None
+                state["execution_mode"] = "exclusive_swap"
+                return {
+                    "profiles": {
+                        "main": {"configured": False},
+                        "compression": {
+                            "runtime_kind": "official", "model_id": "small", "preset_id": "", "configured": True,
+                        },
+                    }
+                }
+
+        def mutate(callback):
+            callback(state)
+            return state
+
+        coordinator = ExecutionProfileCoordinator(
+            load_state=lambda: dict(state), mutate_state=mutate, profiles=lambda: Profiles(),
+            sync_endpoint=lambda: (_ for _ in ()).throw(RuntimeError("projection failed")),
+            unregister_endpoint=lambda: (_ for _ in ()).throw(RuntimeError("projection failed")),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "projection failed"):
+            coordinator.save_many({"main": {"model_id": ""}, "compression": {"model_id": "small"}})
+
+        self.assertEqual(state["execution_profiles"], old_profiles)
+        self.assertEqual(state["active_model_id"], "old")
+        self.assertEqual(state["execution_mode"], "native_router")
+
+    def test_execution_profile_coordinator_rolls_back_all_written_profiles_when_projection_fails(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileCoordinator
+
+        old_profiles = {
+            "main": {"runtime_kind": "official", "model_id": "old-main", "preset_id": ""},
+        }
+        new_profiles = {
+            "main": {"runtime_kind": "official", "model_id": "new-main", "preset_id": ""},
+            "compression": {"runtime_kind": "official", "model_id": "small", "preset_id": ""},
+        }
+        state: dict[str, object] = {"pid": 10, "execution_profiles": dict(old_profiles)}
+
+        class Profiles:
+            @staticmethod
+            def save_many(_bindings):
+                state["execution_profiles"] = dict(new_profiles)
+                return {
+                    "profiles": {
+                        role: {**profile, "configured": True}
+                        for role, profile in new_profiles.items()
+                    }
+                }
+
+        def mutate(callback):
+            callback(state)
+            return state
+
+        def fail_projection():
+            state["pid"] = 99
+            raise RuntimeError("projection failed")
+
+        coordinator = ExecutionProfileCoordinator(
+            load_state=lambda: dict(state),
+            mutate_state=mutate,
+            profiles=lambda: Profiles(),
+            sync_endpoint=fail_projection,
+            unregister_endpoint=lambda: None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "projection failed"):
+            coordinator.save_many({"main": {"model_id": "new-main"}, "compression": {"model_id": "small"}})
+
+        self.assertEqual(state["pid"], 99)
+        self.assertEqual(state["execution_profiles"], old_profiles)
+
     def test_execution_profile_start_route_uses_main_or_aux_from_one_server_action(self) -> None:
         from fastapi import HTTPException
         from dashboard.routes.execution_profile_routes import ExecutionProfileRouteContext, create_router
@@ -147,6 +300,7 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         context = ExecutionProfileRouteContext(
             snapshot=lambda: {},
             save=lambda role, body: events.append(("save", role, body)) or {},
+            save_many=lambda bindings: events.append(("save_many", bindings)) or {},
             start=lambda role: events.append(("start", role)),
             create_job=lambda kind, detail: events.append(("job", kind, detail)) or job,
             launch=lambda _job, run, _name: run(),
@@ -159,14 +313,16 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         result = endpoint({"main_model_id": "large-model", "compression_model_id": "small-model"})
 
         self.assertEqual(result["job_id"], "job-1")
-        self.assertEqual(events[0], ("save", "main", {"model_id": "large-model"}))
-        self.assertEqual(events[1], ("save", "compression", {"model_id": "small-model"}))
-        self.assertEqual(events[3], ("start", "main"))
+        self.assertEqual(events[0], (
+            "save_many",
+            {"main": {"model_id": "large-model"}, "compression": {"model_id": "small-model"}},
+        ))
+        self.assertEqual(events[2], ("start", "main"))
 
         events.clear()
         result = endpoint({"main_model_id": "", "compression_model_id": "small-model"})
         self.assertEqual(result["job_id"], "job-1")
-        self.assertEqual(events[3], ("start", "compression"))
+        self.assertEqual(events[2], ("start", "compression"))
 
         with self.assertRaises(HTTPException) as rejected:
             endpoint({"main_model_id": "", "compression_model_id": ""})
@@ -175,6 +331,43 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as rejected:
             direct("compression", {"model_id": "small-model"})
         self.assertEqual(rejected.exception.status_code, 409)
+
+    def test_profile_selection_survives_startup_failure_and_job_exposes_reason(self) -> None:
+        from dashboard.routes.execution_profile_routes import ExecutionProfileRouteContext, create_router
+
+        selected: dict[str, dict[str, object]] = {}
+        job = {"job_id": "job-failed", "status": "running"}
+
+        def save_many(bindings):
+            selected.update(bindings)
+            return {"profiles": bindings}
+
+        def launch(_job, run, _name):
+            try:
+                run()
+            except Exception as exc:  # noqa: BLE001 - mirrors JobManager failure projection
+                job.update({"status": "error", "error": str(exc)})
+
+        context = ExecutionProfileRouteContext(
+            snapshot=lambda: {"profiles": selected},
+            save=lambda role, body: save_many({role: body}),
+            save_many=save_many,
+            start=lambda _role: (_ for _ in ()).throw(RuntimeError("CUDA allocation failed")),
+            create_job=lambda _kind, _detail: job,
+            launch=launch,
+            finish=lambda _job, _detail: None,
+        )
+        endpoint = next(
+            route.endpoint for route in create_router(context).routes
+            if route.path == "/profiles/start"
+        )
+
+        endpoint({"main_model_id": "main-model", "compression_model_id": "small-model"})
+
+        self.assertEqual(selected["main"]["model_id"], "main-model")
+        self.assertEqual(selected["compression"]["model_id"], "small-model")
+        self.assertEqual(job["status"], "error")
+        self.assertEqual(job["error"], "CUDA allocation failed")
 
     def test_legacy_active_model_is_persisted_as_main_execution_profile(self) -> None:
         from dashboard.application.execution_profiles import ExecutionProfileService
@@ -1901,7 +2094,78 @@ class HuggingFaceDownloadServiceTests(unittest.TestCase):
             self.assertEqual(progress, [42])
 
 
+class ExecutionLeaseCoordinatorTests(unittest.TestCase):
+    def test_main_lease_publishes_queue_and_active_transitions(self) -> None:
+        import asyncio
+        from dashboard.application.execution_lease import ExecutionLeaseCoordinator
+
+        counts: list[tuple[int, int]] = []
+        roles: list[str] = []
+
+        async def exercise() -> None:
+            coordinator = ExecutionLeaseCoordinator(
+                ensure_role=lambda role: _record_async(roles, role),
+                role_configured=lambda _role: True,
+                abort_transition=lambda _role, _error: _noop_async(),
+                publish_counts=lambda queued, active: _record_async(counts, (queued, active)),
+            )
+            finish = await coordinator.begin("main")
+            self.assertEqual(counts, [(1, 0), (0, 1)])
+            await finish()
+
+        async def _record_async(target: list, value: object) -> None:
+            target.append(value)
+
+        async def _noop_async() -> None:
+            return None
+
+        asyncio.run(exercise())
+        self.assertEqual(roles, ["main"])
+        self.assertEqual(counts[-1], (0, 0))
+
+
+class OwnedProcessTests(unittest.TestCase):
+    def test_termination_escalates_to_kill_and_confirms_exit(self) -> None:
+        from dashboard.application.owned_process import terminate_owned_process
+
+        events: list[object] = []
+
+        class Process:
+            def terminate(self) -> None:
+                events.append("terminate")
+
+            def wait(self, timeout: int) -> None:
+                events.append(("wait", timeout))
+                if timeout == 10:
+                    raise TimeoutError("still running")
+
+            def kill(self) -> None:
+                events.append("kill")
+
+            def poll(self) -> int | None:
+                return 0
+
+        self.assertTrue(terminate_owned_process(Process()))
+        self.assertEqual(events, ["terminate", ("wait", 10), "kill", ("wait", 5)])
+
+
 class ServerStartupServiceTests(unittest.TestCase):
+    def test_startup_failure_detail_prefers_safe_raw_native_error(self) -> None:
+        from dashboard.application.server_startup import _startup_failure_detail
+
+        detail = _startup_failure_detail({
+            "raw_lines": [
+                "prompt: secret user text",
+                "error: CUDA allocation failed for C:/models/private/model.gguf",
+            ],
+            "lines": ["[Main] 서버 초기화 중"],
+        })
+
+        self.assertIn("CUDA allocation failed", detail)
+        self.assertIn("[PATH]", detail)
+        self.assertNotIn("secret user text", detail)
+        self.assertNotIn("C:/models/private", detail)
+
     def test_requires_an_active_model_before_resolving_runtime(self) -> None:
         from dashboard.application.server_startup import ServerStartupService
 
@@ -1959,6 +2223,52 @@ class ServerStartupServiceTests(unittest.TestCase):
 
             self.assertEqual(backend.command[-2:], ["--alias", "Ternary-Bonsai-2-27B"])
             self.assertEqual(endpoint_models, ["Ternary-Bonsai-2-27B"])
+
+    def test_worker_early_exit_surfaces_native_failure_reason(self) -> None:
+        import sys
+        import tempfile
+        from dashboard.application.server_startup import ServerStartupService
+
+        class Backend:
+            @staticmethod
+            def build_command(*_args, **_kwargs):
+                return [sys.executable]
+
+        class Process:
+            pid = os.getpid()
+
+            @staticmethod
+            def poll():
+                return 1
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            state = {"active_model_id": "model", "models": {"model": {}}}
+
+            def mutate(callback):
+                callback(state)
+                return state
+
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda value: state.update(value),
+                executable=lambda: Path(sys.executable), stop=lambda **_kwargs: None,
+                active_path=lambda _model_id: model, load_options=lambda: {"model": {}},
+                runtime_kind=lambda _state: "official", backend=lambda _kind: Backend(),
+                serving_model_name=lambda _model_id: "served", option_args=lambda _options: [],
+                watch=lambda _process: None, health=lambda _port: False,
+                register_endpoint=lambda _port, _model: {},
+                log_tail=lambda _limit: {
+                    "raw_lines": ["error: CUDA allocation failed"],
+                    "lines": ["[Main] 서버 초기화 중"],
+                },
+                log_path=root / "server.log", spawn=lambda *_args: Process(),
+                now=lambda: 0.0, sleep=lambda _seconds: None, mutate_state=mutate,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "CUDA allocation failed"):
+                service.start()
 
     def test_identity_capture_failure_terminates_owned_process_before_state_write(self) -> None:
         import sys

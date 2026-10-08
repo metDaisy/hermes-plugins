@@ -17,6 +17,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
+try:
+    from .application.execution_lease import ExecutionLeaseCoordinator
+except ImportError:  # pragma: no cover - direct module loading fallback
+    from application.execution_lease import ExecutionLeaseCoordinator
+
 router = APIRouter()
 
 COORDINATOR_PORT = 18380
@@ -316,101 +321,34 @@ async def _abort_transition(role: str, error: BaseException) -> None:
         await _await_uncancelled(operation)
 
 
+def _record_execution_state(queued: int, active: int) -> None:
+    global _queued_main_requests, _active_main_requests
+    _queued_main_requests = queued
+    _active_main_requests = active
+
+
+_execution_leases = ExecutionLeaseCoordinator(
+    ensure_role=lambda role: _ensure_role(role),
+    role_configured=lambda role: _role_configured(role),
+    abort_transition=lambda role, error: _abort_transition(role, error),
+    publish_counts=lambda _queued, _active: _publish_counts(),
+    state_changed=_record_execution_state,
+    refresh_state=lambda: (_queued_main_requests, _active_main_requests),
+)
+
+
+def _sync_execution_lease_compatibility() -> None:
+    """Keep the legacy test/debug fields as a thin adapter during migration."""
+    _execution_leases.transition_lock = _transition_lock
+    _execution_leases.counter_lock = _counter_lock
+    _execution_leases.main_idle_event = _main_idle_event
+    _execution_leases.queued_main_requests = _queued_main_requests
+    _execution_leases.active_main_requests = _active_main_requests
+
+
 async def _begin_execution(role: str | None) -> Callable[[], Awaitable[None]] | None:
-    global _active_main_requests, _queued_main_requests
-    transition_lock = _transition_lock
-    counter_lock = _counter_lock
-    if role is None:
-        return None
-    if role == "main":
-        queued = False
-        active = False
-        acquired = False
-        try:
-            async with counter_lock:
-                _queued_main_requests += 1
-                queued = True
-                await _publish_counts()
-            await transition_lock.acquire()
-            acquired = True
-            await _ensure_role("main")
-            async with counter_lock:
-                _queued_main_requests -= 1
-                queued = False
-                _active_main_requests += 1
-                _main_idle_event.clear()
-                active = True
-                await _publish_counts()
-        except BaseException:
-            async with counter_lock:
-                changed = False
-                if queued:
-                    _queued_main_requests = max(0, _queued_main_requests - 1)
-                    queued = False
-                    changed = True
-                if active:
-                    _active_main_requests = max(0, _active_main_requests - 1)
-                    if _active_main_requests == 0:
-                        _main_idle_event.set()
-                    active = False
-                    changed = True
-                if changed:
-                    try:
-                        with anyio.CancelScope(shield=True):
-                            await _await_uncancelled(_publish_counts(), propagate_cancel=False)
-                    except BaseException:  # noqa: BLE001 - preserve the original request failure
-                        pass
-            if acquired:
-                transition_lock.release()
-            raise
-        transition_lock.release()
-
-        async def finish_main() -> None:
-            global _active_main_requests
-            async with counter_lock:
-                _active_main_requests = max(0, _active_main_requests - 1)
-                if _active_main_requests == 0:
-                    _main_idle_event.set()
-                await _publish_counts()
-
-        return finish_main
-
-    restore_main = _role_configured("main")
-    await transition_lock.acquire()
-    try:
-        while True:
-            async with counter_lock:
-                if _active_main_requests == 0:
-                    break
-            await _main_idle_event.wait()
-        await _ensure_role("compression")
-    except BaseException as original_error:
-        try:
-            if restore_main:
-                await _ensure_role("main")
-        except asyncio.CancelledError:
-            pass
-        except BaseException as restore_error:
-            await _abort_transition("compression", restore_error)
-            original_error.add_note(f"Main restoration also failed: {restore_error}")
-        finally:
-            transition_lock.release()
-        raise
-
-    async def finish_compression() -> None:
-        try:
-            if restore_main:
-                try:
-                    await _ensure_role("main")
-                except asyncio.CancelledError:
-                    raise
-                except BaseException as restore_error:
-                    await _abort_transition("compression", restore_error)
-                    raise
-        finally:
-            transition_lock.release()
-
-    return finish_compression
+    _sync_execution_lease_compatibility()
+    return await _execution_leases.begin(role)
 
 
 @router.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
