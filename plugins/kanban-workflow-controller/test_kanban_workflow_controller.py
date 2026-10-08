@@ -123,6 +123,8 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         desktop = (_ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn("id: 'controller-status'", desktop)
         self.assertIn("area: 'statusBar.right'", desktop)
+        self.assertIn("ctx.rest('/runtime/lease'", desktop)
+        self.assertIn("method: 'POST'", desktop)
         self.assertIn("ctx.rest('/status'", desktop)
         self.assertIn("children: 'KWC'", desktop)
         self.assertIn("children: `(${label})`", desktop)
@@ -234,8 +236,9 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
                 patch.object(PLUGIN_API, "_now", return_value=1010),
             ):
                 response = PLUGIN_API.status()
-        self.assertTrue(response["running"])
-        self.assertEqual(response["version"], "0.6.0")
+        self.assertTrue(response["dispatcher_running"])
+        self.assertFalse(response["running"])
+        self.assertEqual(response["version"], "0.7.0")
         self.assertEqual(set(response["boards"]), {"issue151", "issue152"})
         self.assertEqual(response["last_dispatch_tick_at"], 1000)
 

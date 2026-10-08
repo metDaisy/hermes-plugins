@@ -2,6 +2,20 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.7.0] - 2026-10-08
+
+### Added
+
+- Added a machine-wide singleton KWC Runtime child launched through the Desktop plugin API and owned by the active `desktop-serve` process.
+- Added durable runtime generation, PID, parent PID, heartbeat, stop-request, and exit-reason state in the plugin SQLite database.
+- Added `POST /runtime/lease` and `POST /runtime/stop` control endpoints, with the Desktop status contribution renewing the runtime lease every 10 seconds.
+- Added parent-process death detection, stale/orphan takeover, generation-safe shutdown, and a non-destructive Windows process-liveness probe.
+
+### Changed
+
+- Split `/status` into Desktop-owned runtime health (`running`) and native dispatcher health (`dispatcher_running`).
+- Kept native Kanban dispatch on its existing Gateway/Core path; this release does not switch `dispatch_in_gateway` or modify Hermes Core.
+
 ## [0.6.0] - 2026-10-07
 
 ### Changed

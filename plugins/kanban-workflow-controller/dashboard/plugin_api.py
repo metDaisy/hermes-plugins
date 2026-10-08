@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,6 +32,27 @@ except ImportError:
         raise ImportError("KWC comment service module name is already bound to another path")
     _create_kwc_comment_request = _service_module.create_comment_request
     _nudge_dispatch = _service_module.nudge_dispatch
+
+try:
+    from ..runtime_service import ensure_runtime as _ensure_runtime
+    from ..runtime_service import read_runtime_status as _read_runtime_status
+    from ..runtime_service import request_runtime_stop as _request_runtime_stop
+except ImportError:
+    _runtime_path = Path(__file__).resolve().parents[1] / "runtime_service.py"
+    _runtime_name = "_hermes_kanban_workflow_controller_runtime_service"
+    _runtime_module = sys.modules.get(_runtime_name)
+    if _runtime_module is None:
+        _runtime_spec = importlib.util.spec_from_file_location(_runtime_name, _runtime_path)
+        if _runtime_spec is None or _runtime_spec.loader is None:
+            raise ImportError(f"cannot load KWC runtime service from {_runtime_path}")
+        _runtime_module = importlib.util.module_from_spec(_runtime_spec)
+        sys.modules[_runtime_name] = _runtime_module
+        _runtime_spec.loader.exec_module(_runtime_module)
+    elif Path(_runtime_module.__file__).resolve() != _runtime_path:
+        raise ImportError("KWC runtime service module name is already bound to another path")
+    _ensure_runtime = _runtime_module.ensure_runtime
+    _read_runtime_status = _runtime_module.read_runtime_status
+    _request_runtime_stop = _runtime_module.request_runtime_stop
 
 router = APIRouter()
 _HEARTBEAT_MAX_AGE_SECONDS = 180
@@ -71,9 +94,38 @@ def _read_heartbeats() -> list[dict[str, object]]:
     return [dict(row) for row in rows]
 
 
+@router.post("/runtime/lease")
+def runtime_lease() -> dict[str, Any]:
+    """Start or reuse the singleton runtime owned by this desktop-serve process."""
+    try:
+        return _ensure_runtime(
+            state_path=_state_path(),
+            plugin_root=Path(__file__).resolve().parents[1],
+            parent_pid=os.getpid(),
+        )
+    except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/runtime/stop")
+def runtime_stop() -> dict[str, Any]:
+    """Request a graceful stop of the currently owned runtime generation."""
+    state_path = _state_path()
+    current = _read_runtime_status(state_path=state_path)
+    generation = current.get("generation")
+    if generation is None:
+        return current
+    return _request_runtime_stop(
+        state_path=state_path,
+        generation=generation,
+    )
+
+
 @router.get("/status")
 def status() -> dict[str, object]:
-    """Report whether any Kanban board received a recent live dispatcher tick."""
+    """Report Desktop-owned runtime health separately from native dispatcher health."""
+    state_path = _state_path()
+    runtime = _read_runtime_status(state_path=state_path)
     heartbeats = _read_heartbeats()
     now = _now()
     active = [
@@ -84,8 +136,10 @@ def status() -> dict[str, object]:
     last_tick = max((int(item["last_dispatch_tick_at"]) for item in heartbeats), default=0)
     return {
         "plugin": "kanban-workflow-controller",
-        "running": bool(active),
+        "running": bool(runtime["running"]),
         "version": _plugin_version(),
+        "runtime": runtime,
+        "dispatcher_running": bool(active),
         "board": active[0]["board"] if active else None,
         "boards": [item["board"] for item in active],
         "last_dispatch_tick_at": last_tick or None,

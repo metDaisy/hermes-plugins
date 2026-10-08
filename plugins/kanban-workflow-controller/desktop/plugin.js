@@ -8,7 +8,10 @@ const PAGE_PATH = '/kwc-logs'
 function ControllerStatus({ ctx }) {
   const status = useQuery({
     queryKey: [ID, 'status'],
-    queryFn: () => ctx.rest('/status', { timeoutMs: 3_000 }),
+    queryFn: async () => {
+      await ctx.rest('/runtime/lease', { method: 'POST', timeoutMs: 3_000 })
+      return ctx.rest('/status', { timeoutMs: 3_000 })
+    },
     refetchInterval: REFRESH_MS,
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,

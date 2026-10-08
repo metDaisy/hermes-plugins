@@ -14,6 +14,21 @@ Every functional change must update `plugin.yaml` and add the matching newest re
 
 ## Runtime model
 
+### Desktop-owned runtime lifecycle
+
+The Desktop status contribution renews a machine-wide singleton KWC Runtime lease through `POST /runtime/lease` every 10 seconds. The namespaced API starts `runtime_service.py` with the same Python interpreter as `desktop-serve`, records the runtime generation and process ownership in KWC's SQLite database, and reuses the live process across Profile backends.
+
+```text
+Hermes Desktop
+└─ desktop-serve
+   └─ KWC Runtime child
+      └─ heartbeat + parent/stop monitoring
+```
+
+The child is intentionally an execution-plane foundation in `0.7.0`: it owns lifecycle, singleton, heartbeat, stale-owner takeover, and graceful stop only. It does **not** yet run the WorkflowEngine or native Kanban dispatcher. Native dispatch therefore remains on the existing Hermes Core/Gateway path, and this release neither changes `kanban.dispatch_in_gateway` nor modifies Hermes Core.
+
+The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership. `/status` reports Runtime health as `running` and native dispatch-tick health separately as `dispatcher_running`.
+
 Lifecycle routing remains passive:
 
 ```text
@@ -166,7 +181,7 @@ Message injection is capability-gated by Hermes and must be explicitly allowed o
 hermes -p main config set plugins.entries.kanban-workflow-controller.allow_gateway_injection true
 ```
 
-The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, comment delivery ledger, and activity log are stored machine-wide under:
+The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, comment delivery ledger, and activity log are stored machine-wide under:
 
 ```text
 $HERMES_ROOT/plugin-data/kanban-workflow-controller/state.db
@@ -194,10 +209,10 @@ The authenticated endpoint is `/api/plugins/kanban-workflow-controller/activity?
 The unified Desktop half contributes a compact item to `statusBar.right`, the right side of the bottom status bar, plus a **KWC logs** sidebar page.
 
 - `KWC` uses the normal status-bar text color.
-- `(running)` uses the Hermes success-green token while at least one board has a current dispatcher heartbeat.
-- `(stopped)` uses the Hermes danger-red token when the API is unavailable or every board heartbeat is stale.
+- `(running)` uses the Hermes success-green token while the Desktop-owned KWC Runtime child is alive, its parent `desktop-serve` process is alive, and its heartbeat is fresh.
+- `(stopped)` uses the Hermes danger-red token when the API is unavailable or Runtime ownership is absent, stale, stopping, or dead.
 
-The indicator checks the namespaced `/api/plugins/kanban-workflow-controller/status` endpoint every 10 seconds. `running` requires a live dispatcher tick for at least one board within the last 180 seconds; the response also lists every active board. This reports dispatcher-side controller health, not whether a PM workflow session is currently bound.
+The indicator first renews `POST /api/plugins/kanban-workflow-controller/runtime/lease`, then checks the namespaced `/status` endpoint every 10 seconds. The response exposes native dispatcher health independently as `dispatcher_running`, `boards`, and `last_dispatch_tick_at`; a live Runtime does not imply that Gateway-hosted native dispatch is currently active.
 
 ## Retry behavior
 
@@ -215,6 +230,9 @@ From the repository root:
 
 ```bash
 python plugins/kanban-workflow-controller/test_kanban_workflow_controller.py -v
-python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py
+python plugins/kanban-workflow-controller/test_runtime_service.py -v
+python plugins/kanban-workflow-controller/test_plugin_runtime_api.py -v
+python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
+node --check plugins/kanban-workflow-controller/desktop/plugin.js
 hermes plugins doctor plugins/kanban-workflow-controller --ci
 ```

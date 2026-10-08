@@ -2,8 +2,8 @@ manifest_version: 2
 api_version: 1
 name: kanban-workflow-controller
 label: Kanban Workflow Controller
-version: 0.6.0
-description: Routes schema-tag-filtered Kanban workflow events and KWC-owned comment conversations to Profile sessions.
+version: 0.7.0
+description: Runs a Desktop-owned KWC runtime and routes schema-tag-filtered Kanban workflow events and comments.
 author: metDaisy
 license: MIT
 kind: standalone
