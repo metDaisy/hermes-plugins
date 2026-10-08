@@ -2,6 +2,21 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.8.0] - 2026-10-08
+
+### Added
+
+- Added a pure, non-mutating WorkflowEngine that validates PM/Coder/Reviewer task contracts and computes one deterministic next action or a fail-closed error.
+- Added canonical read-only Kanban snapshot normalization for task schemas, graph links, forced Skills, run provenance, review results, and claimed source status.
+- Added Runtime reconciliation of every monitored board and persisted only compact privacy-safe decisions in the plugin SQLite database.
+- Added `GET /runtime/decisions` for latest per-board dry-run decision read-back without task bodies, comments, logs, prompts, or session content.
+- Added privacy-safe reconciliation health (`attempted_at`, `succeeded_at`, and exception-type error code) to `/status`, so Runtime import/database failures do not remain invisible.
+
+### Changed
+
+- The Desktop-owned Runtime now evaluates workflow state on each owned tick, but still performs no Kanban mutation and does not replace the native Core/Gateway dispatcher.
+- Latest aggregate Review selection is based on canonical run ID instead of task list order.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added

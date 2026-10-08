@@ -22,12 +22,15 @@ The Desktop status contribution renews a machine-wide singleton KWC Runtime leas
 Hermes Desktop
 └─ desktop-serve
    └─ KWC Runtime child
-      └─ heartbeat + parent/stop monitoring
+      ├─ heartbeat + parent/stop monitoring
+      └─ canonical snapshot → pure WorkflowEngine → compact dry-run decision
 ```
 
-The child is intentionally an execution-plane foundation in `0.7.0`: it owns lifecycle, singleton, heartbeat, stale-owner takeover, and graceful stop only. It does **not** yet run the WorkflowEngine or native Kanban dispatcher. Native dispatch therefore remains on the existing Hermes Core/Gateway path, and this release neither changes `kanban.dispatch_in_gateway` nor modifies Hermes Core.
+Starting with `0.8.0`, the Runtime performs read-only reconciliation for every board previously observed through KWC's durable `board_heartbeat` rows. It reads tasks, direct graph links, runs, and events through canonical Hermes Kanban functions, normalizes only the fields needed by the workflow contract, and asks the pure WorkflowEngine for exactly one next action or a fail-closed error. The latest compact decision is persisted per board; task bodies, comments, prompts, logs, session keys, and reasoning are not copied into KWC state.
 
-The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership. `/status` reports Runtime health as `running` and native dispatch-tick health separately as `dispatcher_running`.
+The Runtime still performs **no Kanban mutation** and does not run the native dispatcher. Native dispatch remains on the existing Hermes Core/Gateway path, and this release neither changes `kanban.dispatch_in_gateway` nor modifies Hermes Core. `GET /runtime/decisions` exposes the latest dry-run decisions, while `/status` reports Runtime health, privacy-safe reconciliation attempt/success/error state, and native dispatch-tick health separately as `dispatcher_running`.
+
+The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership.
 
 Lifecycle routing remains passive:
 
@@ -181,13 +184,13 @@ Message injection is capability-gated by Hermes and must be explicitly allowed o
 hermes -p main config set plugins.entries.kanban-workflow-controller.allow_gateway_injection true
 ```
 
-The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, comment delivery ledger, and activity log are stored machine-wide under:
+The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, comment delivery ledger, and activity log are stored machine-wide under:
 
 ```text
 $HERMES_ROOT/plugin-data/kanban-workflow-controller/state.db
 ```
 
-This file is only a routing/delivery index and privacy-safe activity log. It stores no comment body; Kanban remains the comment, workflow, and lifecycle authority.
+This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, and activity log. Workflow decisions contain only board/time, fixed phase/action/reason/error codes, task ID, Profile, and Skill. They contain no task body, comment body, prompt, session key, reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
 
 ## Activity log
 
@@ -212,7 +215,7 @@ The unified Desktop half contributes a compact item to `statusBar.right`, the ri
 - `(running)` uses the Hermes success-green token while the Desktop-owned KWC Runtime child is alive, its parent `desktop-serve` process is alive, and its heartbeat is fresh.
 - `(stopped)` uses the Hermes danger-red token when the API is unavailable or Runtime ownership is absent, stale, stopping, or dead.
 
-The indicator first renews `POST /api/plugins/kanban-workflow-controller/runtime/lease`, then checks the namespaced `/status` endpoint every 10 seconds. The response exposes native dispatcher health independently as `dispatcher_running`, `boards`, and `last_dispatch_tick_at`; a live Runtime does not imply that Gateway-hosted native dispatch is currently active.
+The indicator first renews `POST /api/plugins/kanban-workflow-controller/runtime/lease`, then checks the namespaced `/status` endpoint every 10 seconds. The response exposes native dispatcher health independently as `dispatcher_running`, `boards`, and `last_dispatch_tick_at`; a live Runtime does not imply that Gateway-hosted native dispatch is currently active. `GET /api/plugins/kanban-workflow-controller/runtime/decisions` provides the latest compact dry-run decision for each monitored board.
 
 ## Retry behavior
 
@@ -230,9 +233,11 @@ From the repository root:
 
 ```bash
 python plugins/kanban-workflow-controller/test_kanban_workflow_controller.py -v
+python plugins/kanban-workflow-controller/test_workflow_engine.py -v
+python plugins/kanban-workflow-controller/test_snapshot_service.py -v
 python plugins/kanban-workflow-controller/test_runtime_service.py -v
 python plugins/kanban-workflow-controller/test_plugin_runtime_api.py -v
-python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
+python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/workflow_engine.py plugins/kanban-workflow-controller/snapshot_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_workflow_engine.py plugins/kanban-workflow-controller/test_snapshot_service.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
 node --check plugins/kanban-workflow-controller/desktop/plugin.js
 hermes plugins doctor plugins/kanban-workflow-controller --ci
 ```

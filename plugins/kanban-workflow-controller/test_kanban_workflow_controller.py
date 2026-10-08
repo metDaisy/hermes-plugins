@@ -238,7 +238,7 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
                 response = PLUGIN_API.status()
         self.assertTrue(response["dispatcher_running"])
         self.assertFalse(response["running"])
-        self.assertEqual(response["version"], "0.7.0")
+        self.assertEqual(response["version"], PLUGIN_API._plugin_version())
         self.assertEqual(set(response["boards"]), {"issue151", "issue152"})
         self.assertEqual(response["last_dispatch_tick_at"], 1000)
 

@@ -35,7 +35,9 @@ except ImportError:
 
 try:
     from ..runtime_service import ensure_runtime as _ensure_runtime
+    from ..runtime_service import read_reconcile_health as _read_reconcile_health
     from ..runtime_service import read_runtime_status as _read_runtime_status
+    from ..runtime_service import read_workflow_decisions as _read_workflow_decisions
     from ..runtime_service import request_runtime_stop as _request_runtime_stop
 except ImportError:
     _runtime_path = Path(__file__).resolve().parents[1] / "runtime_service.py"
@@ -51,7 +53,9 @@ except ImportError:
     elif Path(_runtime_module.__file__).resolve() != _runtime_path:
         raise ImportError("KWC runtime service module name is already bound to another path")
     _ensure_runtime = _runtime_module.ensure_runtime
+    _read_reconcile_health = _runtime_module.read_reconcile_health
     _read_runtime_status = _runtime_module.read_runtime_status
+    _read_workflow_decisions = _runtime_module.read_workflow_decisions
     _request_runtime_stop = _runtime_module.request_runtime_stop
 
 router = APIRouter()
@@ -121,11 +125,19 @@ def runtime_stop() -> dict[str, Any]:
     )
 
 
+@router.get("/runtime/decisions")
+def runtime_decisions() -> dict[str, Any]:
+    """Return latest read-only WorkflowEngine decisions without task bodies or logs."""
+    items = _read_workflow_decisions(state_path=_state_path())
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/status")
 def status() -> dict[str, object]:
     """Report Desktop-owned runtime health separately from native dispatcher health."""
     state_path = _state_path()
     runtime = _read_runtime_status(state_path=state_path)
+    reconciliation = _read_reconcile_health(state_path=state_path)
     heartbeats = _read_heartbeats()
     now = _now()
     active = [
@@ -139,6 +151,7 @@ def status() -> dict[str, object]:
         "running": bool(runtime["running"]),
         "version": _plugin_version(),
         "runtime": runtime,
+        "reconciliation": reconciliation,
         "dispatcher_running": bool(active),
         "board": active[0]["board"] if active else None,
         "boards": [item["board"] for item in active],

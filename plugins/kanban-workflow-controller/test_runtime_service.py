@@ -165,6 +165,130 @@ class RuntimeServiceTests(unittest.TestCase):
         self.assertTrue(stopped["stop_requested"])
         self.assertEqual(stopped["generation"], started["generation"])
 
+    def test_reconcile_workflows_persists_only_compact_decision_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            conn = RUNTIME._connect(state_path)
+            conn.execute(
+                "INSERT INTO board_heartbeat(board, last_dispatch_tick_at) VALUES(?, ?)",
+                ("issue-151", 900),
+            )
+            conn.commit()
+            conn.close()
+
+            summary = RUNTIME.reconcile_workflows(
+                state_path=state_path,
+                snapshot_reader=lambda board: {
+                    "schema": "kwc-workflow-snapshot-v1",
+                    "board": board,
+                    "tasks": [],
+                },
+                decide_fn=lambda snapshot: {
+                    "schema": "kwc-workflow-decision-v1",
+                    "board": snapshot["board"],
+                    "valid": True,
+                    "phase": "ready",
+                    "action": {
+                        "kind": "dispatch-task",
+                        "task_id": "t_impl",
+                        "profile": "coder",
+                        "skill": "run-impl-card",
+                        "reason": "ready_implementation",
+                    },
+                    "errors": [],
+                },
+                now_fn=lambda: 1000,
+            )
+            decisions = RUNTIME.read_workflow_decisions(state_path=state_path)
+
+        self.assertEqual({"boards": 1, "valid": 1, "invalid": 0}, summary)
+        self.assertEqual(
+            [
+                {
+                    "board": "issue-151",
+                    "evaluated_at": 1000,
+                    "decision_schema": "kwc-workflow-decision-v1",
+                    "valid": True,
+                    "phase": "ready",
+                    "action_kind": "dispatch-task",
+                    "task_id": "t_impl",
+                    "profile": "coder",
+                    "skill": "run-impl-card",
+                    "reason": "ready_implementation",
+                    "errors": [],
+                }
+            ],
+            decisions,
+        )
+
+    def test_worker_runs_read_only_reconciliation_once_per_owned_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            started = RUNTIME.ensure_runtime(
+                state_path=state_path,
+                plugin_root=_ROOT,
+                parent_pid=1234,
+                now_fn=lambda: 1000,
+                popen_fn=lambda *_args, **_kwargs: _FakeProcess(4321),
+                pid_alive_fn=lambda pid: pid in {4321, 1234},
+            )
+            parent_checks = iter((True, False))
+            times = iter((1001, 1002, 1003, 1004))
+            reconciled: list[Path] = []
+
+            RUNTIME.run_worker(
+                state_path=state_path,
+                parent_pid=1234,
+                generation=started["generation"],
+                interval_seconds=0,
+                now_fn=lambda: next(times),
+                sleep_fn=lambda _seconds: None,
+                pid_alive_fn=lambda _pid: next(parent_checks),
+                reconcile_fn=lambda path: reconciled.append(path),
+            )
+
+        self.assertEqual([state_path], reconciled)
+
+    def test_worker_records_privacy_safe_reconcile_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            started = RUNTIME.ensure_runtime(
+                state_path=state_path,
+                plugin_root=_ROOT,
+                parent_pid=1234,
+                now_fn=lambda: 1000,
+                popen_fn=lambda *_args, **_kwargs: _FakeProcess(4321),
+                pid_alive_fn=lambda pid: pid in {4321, 1234},
+            )
+            parent_checks = iter((True, False))
+            times = iter((1001, 1002))
+
+            def fail_reconciliation(_path: Path) -> None:
+                raise ModuleNotFoundError("SECRET must not be persisted")
+
+            RUNTIME.run_worker(
+                state_path=state_path,
+                parent_pid=1234,
+                generation=started["generation"],
+                interval_seconds=0,
+                now_fn=lambda: next(times),
+                sleep_fn=lambda _seconds: None,
+                pid_alive_fn=lambda _pid: next(parent_checks),
+                reconcile_fn=fail_reconciliation,
+            )
+
+            health = RUNTIME.read_reconcile_health(state_path=state_path)
+
+        self.assertEqual(
+            {
+                "attempted_at": 1001,
+                "succeeded_at": None,
+                "healthy": False,
+                "error_code": "RECONCILE_ERROR:ModuleNotFoundError",
+            },
+            health,
+        )
+
     def test_worker_exits_when_parent_dies_and_marks_generation_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.db"

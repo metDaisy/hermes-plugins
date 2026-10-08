@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
 import os
 import sqlite3
 import subprocess
@@ -81,6 +83,41 @@ def _connect(state_path: Path) -> sqlite3.Connection:
             stop_requested INTEGER NOT NULL DEFAULT 0,
             stopped_at INTEGER,
             exit_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS board_heartbeat (
+            board TEXT PRIMARY KEY,
+            last_dispatch_tick_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_reconcile_health (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            attempted_at INTEGER NOT NULL,
+            succeeded_at INTEGER,
+            error_code TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workflow_decision (
+            board TEXT PRIMARY KEY,
+            evaluated_at INTEGER NOT NULL,
+            decision_schema TEXT NOT NULL,
+            valid INTEGER NOT NULL,
+            phase TEXT NOT NULL,
+            action_kind TEXT,
+            task_id TEXT,
+            profile TEXT,
+            skill TEXT,
+            reason TEXT,
+            errors_json TEXT NOT NULL
         )
         """
     )
@@ -253,6 +290,207 @@ def request_runtime_stop(
         conn.close()
 
 
+def read_reconcile_health(*, state_path: Path) -> dict[str, Any]:
+    """Return privacy-safe Runtime reconciliation health."""
+    conn = _connect(state_path)
+    try:
+        row = conn.execute(
+            "SELECT attempted_at, succeeded_at, error_code "
+            "FROM runtime_reconcile_health WHERE singleton = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {
+            "attempted_at": None,
+            "succeeded_at": None,
+            "healthy": False,
+            "error_code": None,
+        }
+    error_code = row["error_code"]
+    return {
+        "attempted_at": int(row["attempted_at"]),
+        "succeeded_at": int(row["succeeded_at"]) if row["succeeded_at"] is not None else None,
+        "healthy": error_code is None and row["succeeded_at"] is not None,
+        "error_code": str(error_code) if error_code is not None else None,
+    }
+
+
+def _record_reconcile_health(
+    state_path: Path,
+    *,
+    attempted_at: int,
+    error_code: str | None,
+) -> None:
+    conn = _connect(state_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO runtime_reconcile_health(
+                singleton, attempted_at, succeeded_at, error_code
+            ) VALUES(1, ?, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                attempted_at=excluded.attempted_at,
+                succeeded_at=CASE
+                    WHEN excluded.error_code IS NULL THEN excluded.attempted_at
+                    ELSE runtime_reconcile_health.succeeded_at
+                END,
+                error_code=excluded.error_code
+            """,
+            (
+                attempted_at,
+                attempted_at if error_code is None else None,
+                error_code,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def read_workflow_decisions(*, state_path: Path) -> list[dict[str, Any]]:
+    """Return the latest privacy-safe dry-run decision for each monitored board."""
+    conn = _connect(state_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM workflow_decision ORDER BY evaluated_at DESC, board ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            errors = json.loads(row["errors_json"])
+        except (TypeError, ValueError):
+            errors = ["DECISION_ERRORS_CORRUPT"]
+        result.append(
+            {
+                "board": str(row["board"]),
+                "evaluated_at": int(row["evaluated_at"]),
+                "decision_schema": str(row["decision_schema"]),
+                "valid": bool(row["valid"]),
+                "phase": str(row["phase"]),
+                "action_kind": row["action_kind"],
+                "task_id": row["task_id"],
+                "profile": row["profile"],
+                "skill": row["skill"],
+                "reason": row["reason"],
+                "errors": errors if isinstance(errors, list) else ["DECISION_ERRORS_CORRUPT"],
+            }
+        )
+    return result
+
+
+def reconcile_workflows(
+    *,
+    state_path: Path,
+    snapshot_reader: Callable[[str], dict[str, Any]],
+    decide_fn: Callable[[Any], dict[str, Any]],
+    now_fn: Callable[[], int] = _now,
+) -> dict[str, int]:
+    """Evaluate monitored boards read-only and persist compact decisions."""
+    conn = _connect(state_path)
+    try:
+        boards = [
+            str(row["board"])
+            for row in conn.execute("SELECT board FROM board_heartbeat ORDER BY board ASC").fetchall()
+        ]
+    finally:
+        conn.close()
+    valid_count = 0
+    invalid_count = 0
+    evaluated_at = now_fn()
+    for board in boards:
+        try:
+            decision = decide_fn(snapshot_reader(board))
+            if not isinstance(decision, dict):
+                raise TypeError("decision must be an object")
+        except Exception as exc:
+            decision = {
+                "schema": "kwc-workflow-decision-v1",
+                "valid": False,
+                "phase": "error",
+                "action": None,
+                "errors": [f"RECONCILE_ERROR:{type(exc).__name__}"],
+            }
+        action = decision.get("action")
+        action = action if isinstance(action, dict) else {}
+        errors = decision.get("errors")
+        errors = errors if isinstance(errors, list) else ["DECISION_ERRORS_INVALID"]
+        valid = bool(decision.get("valid"))
+        valid_count += int(valid)
+        invalid_count += int(not valid)
+        conn = _connect(state_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO workflow_decision(
+                    board, evaluated_at, decision_schema, valid, phase,
+                    action_kind, task_id, profile, skill, reason, errors_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(board) DO UPDATE SET
+                    evaluated_at=excluded.evaluated_at,
+                    decision_schema=excluded.decision_schema,
+                    valid=excluded.valid,
+                    phase=excluded.phase,
+                    action_kind=excluded.action_kind,
+                    task_id=excluded.task_id,
+                    profile=excluded.profile,
+                    skill=excluded.skill,
+                    reason=excluded.reason,
+                    errors_json=excluded.errors_json
+                """,
+                (
+                    board,
+                    evaluated_at,
+                    str(decision.get("schema") or "kwc-workflow-decision-v1"),
+                    1 if valid else 0,
+                    str(decision.get("phase") or "invalid"),
+                    action.get("kind"),
+                    action.get("task_id"),
+                    action.get("profile"),
+                    action.get("skill"),
+                    action.get("reason"),
+                    json.dumps(errors, ensure_ascii=True, separators=(",", ":")),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {"boards": len(boards), "valid": valid_count, "invalid": invalid_count}
+
+
+def _load_sibling_module(unique_name: str, filename: str) -> Any:
+    path = Path(__file__).resolve().with_name(filename)
+    module = sys.modules.get(unique_name)
+    if module is not None:
+        if Path(module.__file__).resolve() != path:
+            raise ImportError(f"{unique_name} is bound to another path")
+        return module
+    spec = importlib.util.spec_from_file_location(unique_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load KWC runtime dependency from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[unique_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def reconcile_runtime(state_path: Path) -> dict[str, int]:
+    """Load the pure engine and canonical snapshot adapter, then evaluate boards."""
+    engine = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_workflow_engine", "workflow_engine.py"
+    )
+    snapshots = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_snapshot_service", "snapshot_service.py"
+    )
+    return reconcile_workflows(
+        state_path=state_path,
+        snapshot_reader=snapshots.read_board_snapshot,
+        decide_fn=engine.decide,
+    )
+
+
 def _worker_tick(
     state_path: Path,
     generation: str,
@@ -307,20 +545,37 @@ def run_worker(
     now_fn: Callable[[], int] = _now,
     sleep_fn: Callable[[float], None] = time.sleep,
     pid_alive_fn: Callable[[int], bool] = _pid_alive,
+    reconcile_fn: Callable[[Path], Any] | None = None,
 ) -> dict[str, str]:
     reason = "superseded"
+    reconcile = reconcile_fn or reconcile_runtime
     try:
         while True:
             if not pid_alive_fn(parent_pid):
                 reason = "parent_exited"
                 break
-            owned, stop_requested = _worker_tick(state_path, generation, now_fn())
+            tick_at = now_fn()
+            owned, stop_requested = _worker_tick(state_path, generation, tick_at)
             if not owned:
                 reason = "superseded"
                 break
             if stop_requested:
                 reason = "stop_requested"
                 break
+            try:
+                reconcile(state_path)
+            except Exception as exc:
+                reconcile_error = f"RECONCILE_ERROR:{type(exc).__name__}"
+            else:
+                reconcile_error = None
+            try:
+                _record_reconcile_health(
+                    state_path,
+                    attempted_at=tick_at,
+                    error_code=reconcile_error,
+                )
+            except (OSError, sqlite3.Error):
+                pass
             sleep_fn(interval_seconds)
     finally:
         _mark_worker_stopped(state_path, generation, now_fn(), reason)

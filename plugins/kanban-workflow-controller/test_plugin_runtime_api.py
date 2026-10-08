@@ -82,11 +82,20 @@ class RuntimeApiTests(unittest.TestCase):
             "stop_requested": False,
             "exit_reason": None,
         }
+        reconciliation = {
+            "attempted_at": 1009,
+            "succeeded_at": 1009,
+            "healthy": True,
+            "error_code": None,
+        }
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.db"
             with (
                 patch.object(PLUGIN_API, "_state_path", return_value=state_path),
                 patch.object(PLUGIN_API, "_read_runtime_status", return_value=runtime),
+                patch.object(
+                    PLUGIN_API, "_read_reconcile_health", return_value=reconciliation
+                ),
                 patch.object(PLUGIN_API, "_read_heartbeats", return_value=[]),
                 patch.object(PLUGIN_API, "_now", return_value=1010),
             ):
@@ -94,7 +103,37 @@ class RuntimeApiTests(unittest.TestCase):
 
         self.assertTrue(response["running"])
         self.assertEqual(response["runtime"], runtime)
+        self.assertEqual(response["reconciliation"], reconciliation)
         self.assertFalse(response["dispatcher_running"])
+
+    def test_runtime_decisions_returns_privacy_safe_engine_readback(self) -> None:
+        expected = [
+            {
+                "board": "issue-151",
+                "evaluated_at": 1000,
+                "decision_schema": "kwc-workflow-decision-v1",
+                "valid": True,
+                "phase": "ready",
+                "action_kind": "dispatch-task",
+                "task_id": "t_impl",
+                "profile": "coder",
+                "skill": "run-impl-card",
+                "reason": "ready_implementation",
+                "errors": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            with (
+                patch.object(PLUGIN_API, "_state_path", return_value=state_path),
+                patch.object(
+                    PLUGIN_API, "_read_workflow_decisions", return_value=expected
+                ) as read_decisions,
+            ):
+                response = PLUGIN_API.runtime_decisions()
+
+        self.assertEqual({"items": expected, "total": 1}, response)
+        read_decisions.assert_called_once_with(state_path=state_path)
 
     def test_runtime_stop_targets_the_current_generation(self) -> None:
         current = {"generation": "generation-1"}
