@@ -2,6 +2,19 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.10.0] - 2026-10-08
+
+### Added
+
+- Added a durable `kwc-agent-lease-v1` capacity-one lease for the `local-agent` execution slot.
+- Added atomic acquire, heartbeat, release, read, stale-takeover, generation tracking, and exact retry behavior on SQLite WAL.
+- Added concurrent-acquire and privacy-schema regression coverage.
+
+### Changed
+
+- A released or expired lease id cannot be reused; each new execution generation must use a new opaque lease id.
+- This release reserves the serial execution slot only. It does not yet spawn Profile workers or execute WorkflowEngine actions.
+
 ## [0.9.0] - 2026-10-08
 
 ### Added

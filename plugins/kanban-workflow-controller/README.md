@@ -32,7 +32,9 @@ The Runtime still performs **no Kanban mutation** and does not run the native di
 
 Starting with `0.9.0`, KWC also has the first execution-plane contract: a durable pending invocation can accept exactly one structured Project Manager result through `kwc_pm_response`. The result is bound to the invocation id, configured coordinator Profile, durable Hermes session key, snapshot fingerprint, and an invocation-specific outcome allowlist. An identical retry is idempotent; a different replay is rejected. The response tool only records validated intent and still performs no Kanban mutation.
 
-This slice deliberately does not create or resume a PM worker yet. The event dispatcher, serial agent lease, PM session runner, action executor, and canonical mutation/read-back adapter remain follow-up work; therefore `kanban.dispatch_in_gateway` stays unchanged.
+Starting with `0.10.0`, the execution plane also owns one durable `local-agent` lease. Atomic acquire, heartbeat, release, and stale takeover serialize every future local Profile worker through one VRAM slot. A fresh opaque lease id fences each holder while the generation records replacement history; released or expired lease ids cannot be reused.
+
+This slice deliberately does not create or resume a PM worker yet. The event dispatcher, PM session runner, action executor, and canonical mutation/read-back adapter remain follow-up work; therefore `kanban.dispatch_in_gateway` stays unchanged.
 
 The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership.
 
@@ -203,13 +205,13 @@ Message injection is capability-gated by Hermes and must be explicitly allowed o
 hermes -p main config set plugins.entries.kanban-workflow-controller.allow_gateway_injection true
 ```
 
-The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, Profile invocation/response ledger, comment delivery ledger, and activity log are stored machine-wide under:
+The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, Profile invocation/response ledger, capacity-one local-agent lease, comment delivery ledger, and activity log are stored machine-wide under:
 
 ```text
 $HERMES_ROOT/plugin-data/kanban-workflow-controller/state.db
 ```
 
-This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, invocation-response ledger, and activity log. Workflow decisions contain only board/time, fixed phase/action/reason/error codes, task ID, Profile, and Skill. Invocation rows additionally retain the durable session key required for ownership validation, but it is never returned by the response tool. No invocation row stores a task body, comment body, prompt, free-form reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
+This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, invocation-response ledger, local-agent lease, and activity log. Workflow decisions contain only board/time, fixed phase/action/reason/error codes, task ID, Profile, and Skill. Invocation rows additionally retain the durable session key required for ownership validation, but it is never returned by the response tool. Lease rows retain only opaque lease/holder ids, status, generation, and timestamps. Neither contract stores a task body, comment body, prompt, free-form reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
 
 ## Activity log
 
@@ -257,7 +259,8 @@ python plugins/kanban-workflow-controller/test_snapshot_service.py -v
 python plugins/kanban-workflow-controller/test_runtime_service.py -v
 python plugins/kanban-workflow-controller/test_plugin_runtime_api.py -v
 python plugins/kanban-workflow-controller/test_invocation_service.py -v
-python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/invocation_service.py plugins/kanban-workflow-controller/workflow_engine.py plugins/kanban-workflow-controller/snapshot_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_invocation_service.py plugins/kanban-workflow-controller/test_workflow_engine.py plugins/kanban-workflow-controller/test_snapshot_service.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
+python plugins/kanban-workflow-controller/test_agent_lease_service.py -v
+python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/invocation_service.py plugins/kanban-workflow-controller/agent_lease_service.py plugins/kanban-workflow-controller/workflow_engine.py plugins/kanban-workflow-controller/snapshot_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_invocation_service.py plugins/kanban-workflow-controller/test_agent_lease_service.py plugins/kanban-workflow-controller/test_workflow_engine.py plugins/kanban-workflow-controller/test_snapshot_service.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
 node --check plugins/kanban-workflow-controller/desktop/plugin.js
 hermes plugins doctor plugins/kanban-workflow-controller --ci
 ```
