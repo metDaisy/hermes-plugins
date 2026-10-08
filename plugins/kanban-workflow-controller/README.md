@@ -23,12 +23,13 @@ Hermes Desktop
 └─ desktop-serve
    └─ KWC Runtime child
       ├─ heartbeat + parent/stop monitoring
-      └─ canonical snapshot → pure WorkflowEngine → compact dry-run decision
+      ├─ canonical snapshot → pure WorkflowEngine → durable action outbox
+      └─ capacity-one action executor → fenced native adapter / Profile worker
 ```
 
 Starting with `0.8.0`, the Runtime performs read-only reconciliation for every board previously observed through KWC's durable `board_heartbeat` rows. It reads tasks, direct graph links, runs, and events through canonical Hermes Kanban functions, normalizes only the fields needed by the workflow contract, and asks the pure WorkflowEngine for exactly one next action or a fail-closed error. The latest compact decision is persisted per board; task bodies, comments, prompts, logs, session keys, and reasoning are not copied into KWC state.
 
-The Runtime still performs **no Kanban mutation** and does not run the native dispatcher. Native dispatch remains on the existing Hermes Core/Gateway path, and this release neither changes `kanban.dispatch_in_gateway` nor modifies Hermes Core. `GET /runtime/decisions` exposes the latest dry-run decisions, while `/status` reports Runtime health, privacy-safe reconciliation attempt/success/error state, and native dispatch-tick health separately as `dispatcher_running`.
+The Runtime keeps native Hermes Kanban as the canonical mutation and dispatch surface. `GET /runtime/decisions` exposes the latest compact decision and `GET /runtime/actions` exposes the privacy-safe durable action state, while `/status` reports Runtime health and native dispatch-tick health separately as `dispatcher_running`. Native Gateway dispatch stays enabled; KWC neither changes `kanban.dispatch_in_gateway` nor modifies Hermes Core.
 
 Starting with `0.9.0`, KWC also has the first execution-plane contract: a durable pending invocation can accept exactly one structured Project Manager result through `kwc_pm_response`. The result is bound to the invocation id, configured coordinator Profile, durable Hermes session key, snapshot fingerprint, and an invocation-specific outcome allowlist. An identical retry is idempotent; a different replay is rejected. The response tool only records validated intent and still performs no Kanban mutation.
 
@@ -40,7 +41,9 @@ Starting with `0.12.0`, KWC has a fenced canonical adapter for `promote-task`. I
 
 Starting with `0.13.0`, invocation-bound typed responses cover all execution Profiles. The coordinator keeps the compatibility `kwc_pm_response` tool, while configured non-coordinator execution Profiles use `kwc_profile_response`. Each session sees only its applicable response tool, and the same durable Profile/session/outcome/replay checks protect both paths.
 
-This slice deliberately does not create or resume a PM worker yet, and the Runtime does not claim or execute outbox rows. The Profile session runner and action executor remain follow-up work; therefore `kanban.dispatch_in_gateway` stays unchanged.
+Starting with `0.14.0`, the Desktop Runtime claims and executes at most one durable action per successful reconciliation tick. `promote-task` uses a snapshot-fenced native promotion adapter. `dispatch-task` revalidates the canonical task/run/profile contract, starts the native run, creates a task-scoped Hermes session in the target Profile, and launches a detached worker. `wake-profile` resumes the coordinator's bound durable session without starting a second Hermes process. Action, local-agent lease, and native run claims are heartbeated and generation-fenced; Desktop parent exit, timeout, missing typed response, stale snapshot, or lost ownership fail closed.
+
+Workers receive only compact locators on their command line and environment. They do not persist task bodies, prompts, transcripts, reasoning, raw commands/output, or credentials in KWC state. A typed Profile response is accepted only from the invocation-bound Profile/session/outcome. The worker must submit the typed response before the terminal Kanban mutation because native terminal handoff tools end the turn. KWC completes the durable action only after both that response and the matching canonical task/run handoff are visible; it never trusts process exit or an unrelated board snapshot change.
 
 The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership.
 
@@ -137,9 +140,9 @@ KWC supplies an opaque invocation id and an invocation-specific outcome contract
 ```text
 kwc_pm_response(
   invocation_id="inv_pm_01H...",
-  outcome="checkpoint-approved",
+  outcome="completed",
   task_id="t_impl1",
-  reason_code="VERIFICATION_PASSED"
+  reason_code="CHECKPOINT_VERIFIED"
 )
 ```
 
@@ -148,13 +151,13 @@ Coder and Reviewer sessions use the generic execution-Profile tool:
 ```text
 kwc_profile_response(
   invocation_id="inv_coder_01H...",
-  outcome="review-requested",
+  outcome="completed",
   task_id="t_impl1",
   reason_code="IMPLEMENTATION_VERIFIED"
 )
 ```
 
-`reason_code` is optional but, when present, must be a compact uppercase identifier such as `MISSING_INPUT` or `POLICY:USER_DECISION_REQUIRED`; it is not a free-form reasoning field. `kwc_pm_response` is available only in the configured coordinator Profile, while `kwc_profile_response` is available only in configured non-coordinator `execution_profiles`. KWC never returns the bound session key in either tool result. Unknown invocations, wrong Profiles, wrong sessions, non-allowlisted outcomes, and conflicting replays fail closed.
+`reason_code` is optional but, when present, must be a compact uppercase identifier such as `MISSING_INPUT` or `POLICY:USER_DECISION_REQUIRED`; it is not a free-form reasoning field. Runtime-created worker invocations currently allow only `completed`, `blocked`, or `failed`. The worker must submit the typed response before the terminal Kanban mutation, then perform the matching native handoff (`done`/`completed`, `review`/`review_requested`, or `blocked` with a compatible run outcome). `kwc_pm_response` is available only in the configured coordinator Profile, while `kwc_profile_response` is available only in configured non-coordinator `execution_profiles`. KWC never returns the bound session key in either tool result. Unknown invocations, wrong Profiles, wrong sessions, non-allowlisted outcomes, and conflicting replays fail closed.
 
 ## Routing and privacy boundary
 
@@ -222,13 +225,13 @@ Message injection is capability-gated by Hermes and must be explicitly allowed o
 hermes -p main config set plugins.entries.kanban-workflow-controller.allow_gateway_injection true
 ```
 
-The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, durable action outbox/claims, Profile invocation/response ledger, capacity-one local-agent lease, comment delivery ledger, and activity log are stored machine-wide under:
+The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, durable action outbox/claims, Profile invocation/response ledger, durable Profile wake queue, capacity-one local-agent lease, comment delivery ledger, and activity log are stored machine-wide under:
 
 ```text
 $HERMES_ROOT/plugin-data/kanban-workflow-controller/state.db
 ```
 
-This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, action outbox, invocation-response ledger, local-agent lease, and activity log. Workflow decisions and action rows contain only board/time, snapshot hash, fixed phase/action/reason/error codes, task ID, Profile, Skill, claim state, and compact result code. Invocation rows additionally retain the durable session key required for ownership validation, but it is never returned by the response tool. Lease rows retain only opaque lease/holder ids, status, generation, and timestamps. These contracts store no task body, comment body, prompt, free-form reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
+This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, action outbox, invocation-response ledger, Profile wake queue, local-agent lease, and activity log. Workflow decisions, action rows, and wake rows contain only board/time, snapshot hash, fixed phase/action/reason/error codes, task ID, Profile, Skill, invocation ID, claim state, and compact result code. Invocation rows additionally retain the durable session key required for ownership validation, but it is never returned by the response tool. Lease rows retain only opaque lease/holder ids, status, generation, and timestamps. These contracts store no task body, comment body, prompt, free-form reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
 
 ## Activity log
 
@@ -253,7 +256,7 @@ The unified Desktop half contributes a compact item to `statusBar.right`, the ri
 - `(running)` uses the Hermes success-green token while the Desktop-owned KWC Runtime child is alive, its parent `desktop-serve` process is alive, and its heartbeat is fresh.
 - `(stopped)` uses the Hermes danger-red token when the API is unavailable or Runtime ownership is absent, stale, stopping, or dead.
 
-The indicator first renews `POST /api/plugins/kanban-workflow-controller/runtime/lease`, then checks the namespaced `/status` endpoint every 10 seconds. The response exposes native dispatcher health independently as `dispatcher_running`, `boards`, and `last_dispatch_tick_at`; a live Runtime does not imply that Gateway-hosted native dispatch is currently active. `GET /api/plugins/kanban-workflow-controller/runtime/decisions` provides the latest compact dry-run decision for each monitored board.
+The indicator first renews `POST /api/plugins/kanban-workflow-controller/runtime/lease`, then checks the namespaced `/status` endpoint every 10 seconds. The response exposes native dispatcher health independently as `dispatcher_running`, `boards`, and `last_dispatch_tick_at`; a live Runtime does not imply that Gateway-hosted native dispatch is currently active. `GET /api/plugins/kanban-workflow-controller/runtime/decisions` provides the latest compact decision for each monitored board and `GET /api/plugins/kanban-workflow-controller/runtime/actions` provides privacy-safe action claim/result state.
 
 ## Retry behavior
 
@@ -270,16 +273,8 @@ Comment delivery has the same at-least-once boundary around `ctx.inject_message(
 From the repository root:
 
 ```bash
-python plugins/kanban-workflow-controller/test_kanban_workflow_controller.py -v
-python plugins/kanban-workflow-controller/test_workflow_engine.py -v
-python plugins/kanban-workflow-controller/test_snapshot_service.py -v
-python plugins/kanban-workflow-controller/test_runtime_service.py -v
-python plugins/kanban-workflow-controller/test_plugin_runtime_api.py -v
-python plugins/kanban-workflow-controller/test_invocation_service.py -v
-python plugins/kanban-workflow-controller/test_agent_lease_service.py -v
-python plugins/kanban-workflow-controller/test_action_service.py -v
-python plugins/kanban-workflow-controller/test_mutation_service.py -v
-python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/invocation_service.py plugins/kanban-workflow-controller/agent_lease_service.py plugins/kanban-workflow-controller/action_service.py plugins/kanban-workflow-controller/mutation_service.py plugins/kanban-workflow-controller/workflow_engine.py plugins/kanban-workflow-controller/snapshot_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_invocation_service.py plugins/kanban-workflow-controller/test_agent_lease_service.py plugins/kanban-workflow-controller/test_action_service.py plugins/kanban-workflow-controller/test_mutation_service.py plugins/kanban-workflow-controller/test_workflow_engine.py plugins/kanban-workflow-controller/test_snapshot_service.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
+python -m unittest discover -s plugins/kanban-workflow-controller -p 'test_*.py' -v
+python -m py_compile plugins/kanban-workflow-controller/*.py plugins/kanban-workflow-controller/dashboard/plugin_api.py
 node --check plugins/kanban-workflow-controller/desktop/plugin.js
 hermes plugins doctor plugins/kanban-workflow-controller --ci
 ```

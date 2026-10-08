@@ -2,6 +2,22 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.14.0] - 2026-10-08
+
+### Added
+
+- Added a Runtime action executor that claims durable outbox rows and executes `promote-task`, `dispatch-task`, and `wake-profile` through narrow adapters.
+- Added fenced native dispatch claims for `ready` and `review` tasks, task-scoped Hermes session creation for Coder/Reviewer workers, and resumable coordinator wake guards.
+- Added durable Profile wake delivery, action-claim heartbeats, and worker-side heartbeats for the action claim, capacity-one local-agent lease, and native Kanban run claim.
+
+### Changed
+
+- Runtime reconciliation now executes at most one action per successful tick while preserving the native Hermes Kanban database and state machine as canonical.
+- Profile workers submit typed invocation responses before native terminal handoff, reuse the same task/session scope for one bounded retry, and complete only after the matching canonical task/run outcome is read back; missing responses, lost fencing, dead Desktop ownership, and unrelated snapshot changes fail closed.
+- A terminal native handoff without a typed response may relaunch the same bound session once so the response can be recovered without creating a new invocation or task claim.
+- Agent plugin startup defers standalone sibling-module loading until the corresponding KWC tool is called, avoiding plugin-discovery iteration races.
+- CLI Profile sessions may bind typed responses with their durable `HERMES_SESSION_ID` when no Gateway `HERMES_SESSION_KEY` exists.
+
 ## [0.13.0] - 2026-10-08
 
 ### Added

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import re
 import sqlite3
 import sys
@@ -13,52 +14,48 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-try:
-    from .comment_service import create_comment_request as _create_comment_request
-except ImportError:
-    _service_path = Path(__file__).resolve().parent / "comment_service.py"
-    _service_name = "_hermes_kanban_workflow_controller_comment_service"
-    _service_module = sys.modules.get(_service_name)
-    if _service_module is None:
-        _service_spec = importlib.util.spec_from_file_location(_service_name, _service_path)
-        if _service_spec is None or _service_spec.loader is None:
-            raise ImportError(f"cannot load KWC comment service from {_service_path}")
-        _service_module = importlib.util.module_from_spec(_service_spec)
-        sys.modules[_service_name] = _service_module
-        _service_spec.loader.exec_module(_service_module)
-    elif Path(_service_module.__file__).resolve() != _service_path:
-        raise ImportError("KWC comment service module name is already bound to another path")
-    _create_comment_request = _service_module.create_comment_request
+def _load_sibling_module(unique_name: str, filename: str) -> Any:
+    module_path = Path(__file__).resolve().parent / filename
+    module = sys.modules.get(unique_name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(unique_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load KWC dependency from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[unique_name] = module
+        spec.loader.exec_module(module)
+    elif Path(module.__file__).resolve() != module_path:
+        raise ImportError(f"{unique_name} is bound to another path")
+    return module
 
-try:
-    from .invocation_service import (
-        submit_pm_response as _submit_pm_response,
-        submit_profile_response as _submit_profile_response,
+
+def _create_comment_request(*args: Any, **kwargs: Any) -> Any:
+    module = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_comment_service", "comment_service.py"
     )
-except ImportError:
-    _invocation_path = Path(__file__).resolve().parent / "invocation_service.py"
-    _invocation_name = "_hermes_kanban_workflow_controller_invocation_service"
-    _invocation_module = sys.modules.get(_invocation_name)
-    if _invocation_module is None:
-        _invocation_spec = importlib.util.spec_from_file_location(
-            _invocation_name, _invocation_path
-        )
-        if _invocation_spec is None or _invocation_spec.loader is None:
-            raise ImportError(f"cannot load KWC invocation service from {_invocation_path}")
-        _invocation_module = importlib.util.module_from_spec(_invocation_spec)
-        sys.modules[_invocation_name] = _invocation_module
-        _invocation_spec.loader.exec_module(_invocation_module)
-    elif Path(_invocation_module.__file__).resolve() != _invocation_path:
-        raise ImportError(
-            "KWC invocation service module name is already bound to another path"
-        )
-    _submit_pm_response = _invocation_module.submit_pm_response
-    _submit_profile_response = _invocation_module.submit_profile_response
+    return module.create_comment_request(*args, **kwargs)
+
+
+def _submit_pm_response(*args: Any, **kwargs: Any) -> Any:
+    module = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_invocation_service",
+        "invocation_service.py",
+    )
+    return module.submit_pm_response(*args, **kwargs)
+
+
+def _submit_profile_response(*args: Any, **kwargs: Any) -> Any:
+    module = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_invocation_service",
+        "invocation_service.py",
+    )
+    return module.submit_profile_response(*args, **kwargs)
 
 
 _STATE_SCHEMA = "kanban-workflow-controller-state-v1"
 _WAKE_SCHEMA = "kanban-workflow-wakeup-v1"
 _COMMENT_WAKE_SCHEMA = "kanban-comment-wakeup-v1"
+_PROFILE_WAKE_SCHEMA = "kwc-profile-wakeup-v1"
 _DECISION_SCHEMA = "policy-decision-card-v1"
 _IMPLEMENTATION_SCHEMAS = {
     "backend-implementation-card-v2",
@@ -78,9 +75,31 @@ def _now() -> int:
 
 
 def _state_path() -> Path:
+    override = str(os.getenv("HERMES_KWC_STATE_PATH") or "").strip()
+    if override:
+        path = Path(override)
+        if not path.is_absolute():
+            raise RuntimeError("HERMES_KWC_STATE_PATH must be absolute")
+        return path
     from hermes_constants import get_default_hermes_root
 
     return get_default_hermes_root() / "plugin-data" / "kanban-workflow-controller" / "state.db"
+
+
+def _load_wake_service() -> Any:
+    module_path = Path(__file__).resolve().parent / "wake_service.py"
+    module_name = "_hermes_kanban_workflow_controller_wake_service"
+    module = sys.modules.get(module_name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load KWC wake service from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    elif Path(module.__file__).resolve() != module_path:
+        raise ImportError("KWC wake service module name is already bound to another path")
+    return module
 
 
 def _connect_state() -> sqlite3.Connection:
@@ -304,6 +323,78 @@ def _comment_wake_message(delivery: dict[str, Any], target_profile: str) -> str:
         },
         ensure_ascii=False,
         sort_keys=True,
+    )
+
+
+def _profile_wake_message(wake: dict[str, Any]) -> str:
+    response_tool = (
+        "kwc_pm_response"
+        if wake["profile"]
+        == str(_CONTEXT.get_config("coordinator_profile", "project-manager") or "project-manager")
+        else "kwc_profile_response"
+    )
+    return json.dumps(
+        {
+            "schema": _PROFILE_WAKE_SCHEMA,
+            "action_id": wake["action_id"],
+            "board": wake["board"],
+            "source_task_id": wake["task_id"],
+            "target_profile": wake["profile"],
+            "skill": wake["skill"],
+            "invocation_id": wake["invocation_id"],
+            "instruction": (
+                "Freshly read the canonical board, task, runs, events, comments, and Git state; "
+                f"perform the requested skill and submit exactly one typed result with {response_tool}."
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _profile_session_key(profile: str) -> str:
+    coordinator_profile = str(
+        _CONTEXT.get_config("coordinator_profile", "project-manager") or "project-manager"
+    )
+    with closing(_connect_state()) as conn:
+        if profile == coordinator_profile:
+            row = conn.execute(
+                "SELECT coordinator_session_key AS session_key FROM coordinator_binding "
+                "WHERE singleton=1"
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT session_key FROM profile_session_binding WHERE profile=?", (profile,)
+            ).fetchone()
+    return str(row["session_key"] or "").strip() if row is not None else ""
+
+
+def _process_pending_profile_wakes(board: str) -> None:
+    if _CONTEXT is None:
+        return
+    wake_service = _load_wake_service()
+    claimant_id = f"gateway:{board}"
+    wake = wake_service.claim_next_profile_wake(
+        state_path=_state_path(),
+        board=board,
+        claimant_id=claimant_id,
+        ttl_seconds=30,
+        now_fn=_now,
+    )
+    if not bool(wake.get("claimed")):
+        return
+    session_key = _profile_session_key(str(wake["profile"]))
+    if not session_key:
+        return
+    accepted = _CONTEXT.inject_message(_profile_wake_message(wake), session_key=session_key)
+    if not accepted:
+        return
+    wake_service.complete_profile_wake(
+        state_path=_state_path(),
+        action_id=wake["action_id"],
+        claimant_id=claimant_id,
+        claim_generation=wake["claim_generation"],
+        now_fn=_now,
     )
 
 
@@ -631,7 +722,10 @@ def _current_session_key() -> str:
     try:
         from gateway.session_context import get_session_env
 
-        return str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+        session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+        if session_key:
+            return session_key
+        return str(get_session_env("HERMES_SESSION_ID", "") or "").strip()
     except ImportError:
         return ""
 
@@ -640,9 +734,14 @@ def _current_session_profile() -> str:
     try:
         from gateway.session_context import get_session_env
 
-        return str(get_session_env("HERMES_SESSION_PROFILE", "") or "").strip()
+        profile = str(get_session_env("HERMES_SESSION_PROFILE", "") or "").strip()
     except ImportError:
-        return ""
+        profile = ""
+    if profile:
+        return profile
+    return str(
+        os.getenv("HERMES_PROFILE_NAME") or os.getenv("HERMES_PROFILE") or ""
+    ).strip()
 
 
 def _pm_response_available() -> bool:
@@ -837,6 +936,7 @@ def _on_dispatch_tick(**kwargs: Any) -> None:
     if not board:
         return
     _mark_dispatch_heartbeat(board)
+    _process_pending_profile_wakes(board)
     _process_pending_comment_deliveries(board)
     if _read_state() is not None and _read_state(board) is None:
         _ensure_board_cursor(board, _latest_event_id(board))

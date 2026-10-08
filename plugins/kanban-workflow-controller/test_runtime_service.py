@@ -280,6 +280,7 @@ class RuntimeServiceTests(unittest.TestCase):
             parent_checks = iter((True, False))
             times = iter((1001, 1002, 1003, 1004))
             reconciled: list[Path] = []
+            executed: list[tuple[Path, str, int]] = []
 
             RUNTIME.run_worker(
                 state_path=state_path,
@@ -290,9 +291,13 @@ class RuntimeServiceTests(unittest.TestCase):
                 sleep_fn=lambda _seconds: None,
                 pid_alive_fn=lambda _pid: next(parent_checks),
                 reconcile_fn=lambda path: reconciled.append(path),
+                execute_fn=lambda path, generation, parent: executed.append(
+                    (path, generation, parent)
+                ),
             )
 
         self.assertEqual([state_path], reconciled)
+        self.assertEqual([(state_path, started["generation"], 1234)], executed)
 
     def test_worker_records_privacy_safe_reconcile_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

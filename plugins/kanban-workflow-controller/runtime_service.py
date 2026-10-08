@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -505,6 +506,23 @@ def reconcile_runtime(state_path: Path) -> dict[str, int]:
     )
 
 
+def execute_runtime_action(state_path: Path, generation: str, parent_pid: int) -> dict[str, Any]:
+    """Execute at most one durable action through the fenced Runtime adapter."""
+    executor = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_action_executor", "action_executor.py"
+    )
+    hermes_executable = shutil.which("hermes")
+    if not hermes_executable:
+        raise FileNotFoundError("Hermes executable was not found")
+    return executor.execute_next_action(
+        state_path=state_path,
+        runtime_generation=generation,
+        parent_pid=parent_pid,
+        plugin_root=Path(__file__).resolve().parent,
+        hermes_executable=hermes_executable,
+    )
+
+
 def _worker_tick(
     state_path: Path,
     generation: str,
@@ -560,9 +578,11 @@ def run_worker(
     sleep_fn: Callable[[float], None] = time.sleep,
     pid_alive_fn: Callable[[int], bool] = _pid_alive,
     reconcile_fn: Callable[[Path], Any] | None = None,
+    execute_fn: Callable[[Path, str, int], Any] | None = None,
 ) -> dict[str, str]:
     reason = "superseded"
     reconcile = reconcile_fn or reconcile_runtime
+    execute = execute_fn or execute_runtime_action
     try:
         while True:
             if not pid_alive_fn(parent_pid):
@@ -582,6 +602,11 @@ def run_worker(
                 reconcile_error = f"RECONCILE_ERROR:{type(exc).__name__}"
             else:
                 reconcile_error = None
+            if reconcile_error is None:
+                try:
+                    execute(state_path, generation, parent_pid)
+                except Exception as exc:
+                    reconcile_error = f"EXECUTE_ERROR:{type(exc).__name__}"
             try:
                 _record_reconcile_health(
                     state_path,

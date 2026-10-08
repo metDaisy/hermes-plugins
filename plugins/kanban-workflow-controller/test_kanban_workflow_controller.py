@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -21,7 +23,9 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC and _SPEC.loader
 PLUGIN = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(PLUGIN)
-COMMENT_SERVICE = sys.modules[PLUGIN._create_comment_request.__module__]
+COMMENT_SERVICE = PLUGIN._load_sibling_module(
+    "_hermes_kanban_workflow_controller_comment_service", "comment_service.py"
+)
 
 _API_SPEC = importlib.util.spec_from_file_location(
     "kanban_workflow_controller_api", _ROOT / "dashboard" / "plugin_api.py"
@@ -124,6 +128,26 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
             manifest.write_text("name: test\nversion: 9.8.7\n", encoding="utf-8")
             self.assertEqual(PLUGIN_API._plugin_version(manifest), "9.8.7")
 
+    def test_standalone_import_defers_service_modules_until_tool_use(self) -> None:
+        code = f"""
+import importlib.util, json, sys
+path = {str(_ROOT / '__init__.py')!r}
+spec = importlib.util.spec_from_file_location('kwc_startup_probe', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps({{
+    'comment': '_hermes_kanban_workflow_controller_comment_service' in sys.modules,
+    'invocation': '_hermes_kanban_workflow_controller_invocation_service' in sys.modules,
+}}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json.loads(result.stdout), {"comment": False, "invocation": False})
+
     def test_desktop_status_panel_contract(self) -> None:
         desktop = (_ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn("id: 'controller-status'", desktop)
@@ -150,6 +174,14 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         self.assertIn("`aggregate-review-card-v3`", readme)
         self.assertIn("Reviewer `completed`", readme)
         self.assertIn("schema-tag-matched", readme)
+
+    def test_readme_requires_typed_response_before_terminal_handoff(self) -> None:
+        readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("submit the typed response before the terminal Kanban mutation", readme)
+        self.assertIn("matching canonical task/run handoff", readme)
+        self.assertNotIn(
+            "canonical task transition before submitting the typed response", readme
+        )
 
     def test_activity_api_returns_privacy_safe_recent_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -277,6 +309,19 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
             },
         )
 
+    def test_cli_profile_response_falls_back_to_the_durable_session_id(self) -> None:
+        gateway_module = types.ModuleType("gateway")
+        session_context = types.ModuleType("gateway.session_context")
+        session_context.get_session_env = lambda key, default="": {
+            "HERMES_SESSION_KEY": "",
+            "HERMES_SESSION_ID": "coder-session-id",
+        }.get(key, default)
+        with patch.dict(
+            sys.modules,
+            {"gateway": gateway_module, "gateway.session_context": session_context},
+        ):
+            self.assertEqual(PLUGIN._current_session_key(), "coder-session-id")
+
     def test_pm_response_tool_submits_profile_and_session_bound_result(self) -> None:
         ctx = FakeContext()
         PLUGIN.register(ctx)
@@ -327,6 +372,30 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
             self.assertFalse(coder.tool_checks["kwc_pm_response"]())
         with patch.object(PLUGIN, "_current_session_profile", return_value="project-manager"):
             self.assertTrue(coder.tool_checks["kwc_pm_response"]())
+
+    def test_worker_state_path_can_be_explicitly_bound_by_the_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = Path(tmp) / "kwc" / "state.db"
+            with patch.dict(
+                os.environ,
+                {"HERMES_KWC_STATE_PATH": str(expected)},
+                clear=False,
+            ):
+                self.assertEqual(PLUGIN._state_path(), expected)
+
+    def test_cli_profile_identity_falls_back_to_active_profile_environment(self) -> None:
+        session_context = types.ModuleType("gateway.session_context")
+        session_context.get_session_env = lambda _name, default="": default
+        gateway = types.ModuleType("gateway")
+        gateway.session_context = session_context
+        with (
+            patch.dict(
+                sys.modules,
+                {"gateway": gateway, "gateway.session_context": session_context},
+            ),
+            patch.dict(os.environ, {"HERMES_PROFILE": "coder"}, clear=False),
+        ):
+            self.assertEqual(PLUGIN._current_session_profile(), "coder")
 
     def test_profile_response_tool_submits_profile_and_session_bound_result(self) -> None:
         ctx = FakeContext(profile_name="coder")
@@ -385,6 +454,36 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
             self.assertTrue(ctx.tool_checks["kwc_pm_response"]())
         with patch.object(PLUGIN, "_current_session_profile", return_value="other"):
             self.assertFalse(ctx.tool_checks["kwc_profile_response"]())
+
+    def test_dispatch_tick_delivers_durable_profile_wake_to_bound_coordinator(self) -> None:
+        ctx = FakeContext({"coordinator_profile": "project-manager"})
+        PLUGIN.register(ctx)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            with patch.object(PLUGIN, "_state_path", return_value=state_path):
+                PLUGIN._bind_state("issue151", "pm-session", 0)
+                wake_service = PLUGIN._load_wake_service()
+                wake_service.enqueue_profile_wake(
+                    state_path=state_path,
+                    action_id="act_wake_1",
+                    board="issue151",
+                    task_id="t_review",
+                    profile="project-manager",
+                    skill="run-workflow",
+                    invocation_id="inv_pm_1",
+                    now_fn=lambda: 1000,
+                )
+                with patch.object(PLUGIN, "_now", return_value=1001):
+                    PLUGIN._process_pending_profile_wakes("issue151")
+                wakes = wake_service.read_profile_wakes(state_path=state_path)
+
+        self.assertEqual([session for session, _ in ctx.injected], ["pm-session"])
+        payload = json.loads(ctx.injected[0][1])
+        self.assertEqual(payload["schema"], "kwc-profile-wakeup-v1")
+        self.assertEqual(payload["invocation_id"], "inv_pm_1")
+        self.assertEqual(payload["source_task_id"], "t_review")
+        self.assertNotIn("task_body", payload)
+        self.assertEqual(wakes[0]["status"], "delivered")
 
     def test_dispatch_tick_processes_pending_kwc_comments_without_core_comment_hook(self) -> None:
         ctx = FakeContext({"board": "issue151"})
