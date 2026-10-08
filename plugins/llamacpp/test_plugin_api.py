@@ -2043,6 +2043,11 @@ class LlamaCppManagerTests(unittest.TestCase):
         push_hook = source[source.index("function useCoordinatorPush"):source.index("function startDesktopLease")]
         self.assertIn("}, [activeProfile])", push_hook)
         self.assertIn("inventory: [ID, 'hf-models']", source)
+        self.assertIn("const SELECTABLE_TEXT_STYLE", source)
+        self.assertIn(".llamacpp-selectable, .llamacpp-selectable *", source)
+        self.assertIn("user-select: text !important", source)
+        self.assertIn("-webkit-user-select: text !important", source)
+        self.assertIn("className: 'llamacpp-selectable", source)
         coordinator_source = (Path(__file__).parent / "dashboard" / "coordinator_server.py").read_text(encoding="utf-8")
         self.assertEqual(coordinator_source.count('"refresh": ["status", "jobs", "logs", "metrics", "inventory"]'), 2)
         self.assertIn("pushConnected ? false", source)
