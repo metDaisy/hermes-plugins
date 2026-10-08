@@ -58,6 +58,23 @@ except ImportError:
     _read_workflow_decisions = _runtime_module.read_workflow_decisions
     _request_runtime_stop = _runtime_module.request_runtime_stop
 
+try:
+    from ..action_service import read_actions as _read_actions
+except ImportError:
+    _action_path = Path(__file__).resolve().parents[1] / "action_service.py"
+    _action_name = "_hermes_kanban_workflow_controller_action_service"
+    _action_module = sys.modules.get(_action_name)
+    if _action_module is None:
+        _action_spec = importlib.util.spec_from_file_location(_action_name, _action_path)
+        if _action_spec is None or _action_spec.loader is None:
+            raise ImportError(f"cannot load KWC action service from {_action_path}")
+        _action_module = importlib.util.module_from_spec(_action_spec)
+        sys.modules[_action_name] = _action_module
+        _action_spec.loader.exec_module(_action_module)
+    elif Path(_action_module.__file__).resolve() != _action_path:
+        raise ImportError("KWC action service module name is already bound to another path")
+    _read_actions = _action_module.read_actions
+
 router = APIRouter()
 _HEARTBEAT_MAX_AGE_SECONDS = 180
 
@@ -129,6 +146,13 @@ def runtime_stop() -> dict[str, Any]:
 def runtime_decisions() -> dict[str, Any]:
     """Return latest read-only WorkflowEngine decisions without task bodies or logs."""
     items = _read_workflow_decisions(state_path=_state_path())
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/runtime/actions")
+def runtime_actions() -> dict[str, Any]:
+    """Return the privacy-safe durable dispatch outbox."""
+    items = _read_actions(state_path=_state_path())
     return {"items": items, "total": len(items)}
 
 

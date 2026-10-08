@@ -135,6 +135,33 @@ class RuntimeApiTests(unittest.TestCase):
         self.assertEqual({"items": expected, "total": 1}, response)
         read_decisions.assert_called_once_with(state_path=state_path)
 
+    def test_runtime_actions_returns_privacy_safe_dispatch_outbox(self) -> None:
+        expected = [
+            {
+                "schema": "kwc-workflow-action-v1",
+                "action_id": "act_123",
+                "board": "issue-151",
+                "snapshot_fingerprint": "sha256:snapshot",
+                "decision_schema": "kwc-workflow-decision-v1",
+                "action_kind": "dispatch-task",
+                "task_id": "t_impl",
+                "profile": "coder",
+                "skill": "run-impl-card",
+                "reason": "ready_implementation",
+                "status": "pending",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            with (
+                patch.object(PLUGIN_API, "_state_path", return_value=state_path),
+                patch.object(PLUGIN_API, "_read_actions", return_value=expected) as read_actions,
+            ):
+                response = PLUGIN_API.runtime_actions()
+
+        self.assertEqual({"items": expected, "total": 1}, response)
+        read_actions.assert_called_once_with(state_path=state_path)
+
     def test_runtime_stop_targets_the_current_generation(self) -> None:
         current = {"generation": "generation-1"}
         expected = {"running": False, "status": "stopping", "generation": "generation-1"}

@@ -2,6 +2,19 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.11.0] - 2026-10-08
+
+### Added
+
+- Added a durable `kwc-workflow-action-v1` outbox keyed by a canonical snapshot fingerprint and compact WorkflowEngine action contract.
+- Added capacity-one action claims with expiry, stale takeover, claim generations, and exact completion replay.
+- Added `GET /runtime/actions` for privacy-safe dispatch outbox read-back.
+
+### Changed
+
+- Runtime reconciliation now materializes actionable `dispatch-task`, `wake-profile`, and `promote-task` decisions exactly once per canonical snapshot.
+- Invalid decisions, terminal decisions, and `wait-for-profile` states do not enter the outbox. No action is executed and no Kanban state is mutated in this release.
+
 ## [0.10.0] - 2026-10-08
 
 ### Added

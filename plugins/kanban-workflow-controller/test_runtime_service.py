@@ -221,6 +221,51 @@ class RuntimeServiceTests(unittest.TestCase):
             decisions,
         )
 
+    def test_reconcile_workflows_materializes_the_decision_from_the_same_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            conn = RUNTIME._connect(state_path)
+            conn.execute(
+                "INSERT INTO board_heartbeat(board, last_dispatch_tick_at) VALUES(?, ?)",
+                ("issue-151", 900),
+            )
+            conn.commit()
+            conn.close()
+            snapshot = {
+                "schema": "kwc-workflow-snapshot-v1",
+                "board": "issue-151",
+                "tasks": [{"task_id": "t_impl", "status": "ready"}],
+            }
+            decision = {
+                "schema": "kwc-workflow-decision-v1",
+                "board": "issue-151",
+                "valid": True,
+                "phase": "ready",
+                "action": {
+                    "kind": "dispatch-task",
+                    "task_id": "t_impl",
+                    "profile": "coder",
+                    "skill": "run-impl-card",
+                    "reason": "ready_implementation",
+                },
+                "errors": [],
+            }
+            calls: list[dict] = []
+
+            RUNTIME.reconcile_workflows(
+                state_path=state_path,
+                snapshot_reader=lambda _board: snapshot,
+                decide_fn=lambda _snapshot: decision,
+                action_materializer=lambda **kwargs: calls.append(kwargs),
+                now_fn=lambda: 1000,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["state_path"], state_path)
+        self.assertIs(calls[0]["snapshot"], snapshot)
+        self.assertIs(calls[0]["decision"], decision)
+        self.assertEqual(calls[0]["now_fn"](), 1000)
+
     def test_worker_runs_read_only_reconciliation_once_per_owned_tick(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.db"

@@ -386,6 +386,7 @@ def reconcile_workflows(
     state_path: Path,
     snapshot_reader: Callable[[str], dict[str, Any]],
     decide_fn: Callable[[Any], dict[str, Any]],
+    action_materializer: Callable[..., dict[str, Any]] | None = None,
     now_fn: Callable[[], int] = _now,
 ) -> dict[str, int]:
     """Evaluate monitored boards read-only and persist compact decisions."""
@@ -401,8 +402,10 @@ def reconcile_workflows(
     invalid_count = 0
     evaluated_at = now_fn()
     for board in boards:
+        snapshot: dict[str, Any] | None = None
         try:
-            decision = decide_fn(snapshot_reader(board))
+            snapshot = snapshot_reader(board)
+            decision = decide_fn(snapshot)
             if not isinstance(decision, dict):
                 raise TypeError("decision must be an object")
         except Exception as exc:
@@ -457,6 +460,13 @@ def reconcile_workflows(
             conn.commit()
         finally:
             conn.close()
+        if action_materializer is not None and snapshot is not None:
+            action_materializer(
+                state_path=state_path,
+                snapshot=snapshot,
+                decision=decision,
+                now_fn=lambda value=evaluated_at: value,
+            )
     return {"boards": len(boards), "valid": valid_count, "invalid": invalid_count}
 
 
@@ -484,10 +494,14 @@ def reconcile_runtime(state_path: Path) -> dict[str, int]:
     snapshots = _load_sibling_module(
         "_hermes_kanban_workflow_controller_snapshot_service", "snapshot_service.py"
     )
+    actions = _load_sibling_module(
+        "_hermes_kanban_workflow_controller_action_service", "action_service.py"
+    )
     return reconcile_workflows(
         state_path=state_path,
         snapshot_reader=snapshots.read_board_snapshot,
         decide_fn=engine.decide,
+        action_materializer=actions.materialize_decision_action,
     )
 
 
