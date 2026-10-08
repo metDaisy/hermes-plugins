@@ -2,6 +2,19 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.12.0] - 2026-10-08
+
+### Added
+
+- Added a canonical `promote-task` mutation adapter that calls Hermes Kanban functions without modifying Core.
+- Added snapshot-fingerprint fencing before mutation and canonical task read-back after mutation.
+- Added idempotent recovery when a previously promoted task has already advanced to `ready`, `running`, `review`, or `done`.
+
+### Changed
+
+- Exposed canonical workflow snapshot fingerprinting as a shared KWC action/mutation contract.
+- The mutation adapter is not yet wired to the Runtime action executor; durable action claims remain the execution handoff boundary.
+
 ## [0.11.0] - 2026-10-08
 
 ### Added

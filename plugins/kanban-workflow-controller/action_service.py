@@ -108,7 +108,7 @@ def _connect(state_path: Path) -> sqlite3.Connection:
         raise
 
 
-def _snapshot_fingerprint(snapshot: Any) -> str:
+def fingerprint_snapshot(snapshot: Any) -> str:
     if not isinstance(snapshot, dict) or snapshot.get("schema") != _SNAPSHOT_SCHEMA:
         raise ValueError("snapshot schema is invalid")
     try:
@@ -214,7 +214,7 @@ def materialize_decision_action(
     )
     if snapshot_board != board:
         raise ValueError("snapshot board does not match decision board")
-    snapshot_fingerprint = _snapshot_fingerprint(snapshot)
+    snapshot_fingerprint = fingerprint_snapshot(snapshot)
     contract = {
         "board": board,
         "snapshot_fingerprint": snapshot_fingerprint,
