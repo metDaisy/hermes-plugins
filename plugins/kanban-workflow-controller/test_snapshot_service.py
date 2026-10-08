@@ -53,11 +53,13 @@ class SnapshotServiceTests(unittest.TestCase):
             skills=None,
             block_kind=None,
             current_run_id=7,
+            workspace_path="C:/workspace/issue151",
         )
         run = SimpleNamespace(
             id=7,
             profile="coder",
             status="running",
+            outcome=None,
             metadata=None,
         )
         claimed = SimpleNamespace(
@@ -84,6 +86,7 @@ class SnapshotServiceTests(unittest.TestCase):
         self.assertEqual(
             {
                 "task_id": "t_impl",
+                "workspace_path": "C:/workspace/issue151",
                 "status": "running",
                 "assignee": "coder",
                 "body_schema": "backend-implementation-card-v3",
@@ -95,6 +98,7 @@ class SnapshotServiceTests(unittest.TestCase):
                 "latest_run_profile": "coder",
                 "latest_run_id": 7,
                 "latest_run_status": "running",
+                "latest_run_outcome": None,
                 "latest_run_metadata_schema": None,
                 "latest_run_result": None,
                 "block_kind": None,

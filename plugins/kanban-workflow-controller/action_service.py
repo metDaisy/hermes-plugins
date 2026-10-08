@@ -380,6 +380,61 @@ def claim_next_action(
         conn.close()
 
 
+def heartbeat_action_claim(
+    *,
+    state_path: Path,
+    action_id: Any,
+    claimant_id: Any,
+    claim_generation: Any,
+    ttl_seconds: Any,
+    now_fn: Callable[[], int] = _now,
+) -> dict[str, Any]:
+    """Extend the current unexpired action claim without changing its generation."""
+    action_id = _required_text(action_id, "action_id")
+    claimant_id = _stable_text(claimant_id, "claimant_id")
+    if isinstance(claim_generation, bool) or (
+        isinstance(claim_generation, float) and not claim_generation.is_integer()
+    ):
+        raise ValueError("claim_generation must be a positive integer")
+    try:
+        claim_generation = int(claim_generation)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("claim_generation must be a positive integer") from exc
+    if claim_generation <= 0:
+        raise ValueError("claim_generation must be a positive integer")
+    ttl_seconds = _positive_ttl(ttl_seconds)
+    now = int(now_fn())
+
+    conn = _connect(state_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM workflow_action WHERE action_id=?", (action_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("unknown action_id")
+        if (
+            str(row["status"]) != "claimed"
+            or str(row["claimant_id"] or "") != claimant_id
+            or int(row["claim_generation"]) != claim_generation
+        ):
+            raise ValueError("action claim does not match claimant or generation")
+        if row["claim_expires_at"] is None or now >= int(row["claim_expires_at"]):
+            raise ValueError("action claim has expired")
+        expires_at = max(int(row["claim_expires_at"]), now + ttl_seconds)
+        conn.execute(
+            "UPDATE workflow_action SET claim_expires_at=? WHERE action_id=?",
+            (expires_at, action_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM workflow_action WHERE action_id=?", (action_id,)
+        ).fetchone()
+        conn.commit()
+        return _public_payload(updated, claimed=True)
+    finally:
+        conn.close()
+
+
 def complete_action(
     *,
     state_path: Path,

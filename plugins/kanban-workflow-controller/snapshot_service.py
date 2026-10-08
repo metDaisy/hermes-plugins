@@ -90,6 +90,7 @@ def normalize_snapshot(
         normalized.append(
             {
                 "task_id": task_id,
+                "workspace_path": getattr(task, "workspace_path", None),
                 "status": getattr(task, "status", None),
                 "assignee": getattr(task, "assignee", None),
                 "body_schema": _body_schema(getattr(task, "body", None)),
@@ -103,6 +104,7 @@ def normalize_snapshot(
                 "latest_run_profile": getattr(latest_run, "profile", None),
                 "latest_run_id": getattr(latest_run, "id", None),
                 "latest_run_status": getattr(latest_run, "status", None),
+                "latest_run_outcome": getattr(latest_run, "outcome", None),
                 "latest_run_metadata_schema": metadata.get("schema"),
                 "latest_run_result": metadata.get("result"),
                 "block_kind": getattr(task, "block_kind", None),

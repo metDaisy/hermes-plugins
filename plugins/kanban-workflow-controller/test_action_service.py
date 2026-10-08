@@ -194,6 +194,46 @@ class ActionServiceTests(unittest.TestCase):
         self.assertTrue(takeover["takeover"])
         self.assertEqual(takeover["claim_generation"], 2)
 
+    def test_claim_heartbeat_extends_only_the_current_unexpired_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            action = self._materialize(state_path)
+            claim = ACTIONS.claim_next_action(
+                state_path=state_path,
+                claimant_id="runtime-a",
+                ttl_seconds=10,
+                now_fn=lambda: 1001,
+            )
+            heartbeat = ACTIONS.heartbeat_action_claim(
+                state_path=state_path,
+                action_id=action["action_id"],
+                claimant_id="runtime-a",
+                claim_generation=claim["claim_generation"],
+                ttl_seconds=20,
+                now_fn=lambda: 1005,
+            )
+            with self.assertRaisesRegex(ValueError, "claimant or generation"):
+                ACTIONS.heartbeat_action_claim(
+                    state_path=state_path,
+                    action_id=action["action_id"],
+                    claimant_id="runtime-b",
+                    claim_generation=claim["claim_generation"],
+                    ttl_seconds=20,
+                    now_fn=lambda: 1006,
+                )
+            with self.assertRaisesRegex(ValueError, "expired"):
+                ACTIONS.heartbeat_action_claim(
+                    state_path=state_path,
+                    action_id=action["action_id"],
+                    claimant_id="runtime-a",
+                    claim_generation=claim["claim_generation"],
+                    ttl_seconds=20,
+                    now_fn=lambda: 1025,
+                )
+
+        self.assertEqual(heartbeat["claim_expires_at"], 1025)
+        self.assertEqual(heartbeat["status"], "claimed")
+
     def test_completion_is_bound_to_claimant_generation_and_exact_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.db"
