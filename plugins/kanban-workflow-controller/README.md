@@ -38,6 +38,8 @@ Starting with `0.11.0`, each actionable WorkflowEngine decision is materialized 
 
 Starting with `0.12.0`, KWC has a fenced canonical adapter for `promote-task`. It recomputes the current canonical snapshot fingerprint before mutation, calls Hermes Kanban's native `promote_task`, and reads the task back. A retry is idempotent after the task has already reached `ready`, `running`, `review`, or `done`. Hermes Core remains unmodified.
 
+Starting with `0.13.0`, invocation-bound typed responses cover all execution Profiles. The coordinator keeps the compatibility `kwc_pm_response` tool, while configured non-coordinator execution Profiles use `kwc_profile_response`. Each session sees only its applicable response tool, and the same durable Profile/session/outcome/replay checks protect both paths.
+
 This slice deliberately does not create or resume a PM worker yet, and the Runtime does not claim or execute outbox rows. The Profile session runner and action executor remain follow-up work; therefore `kanban.dispatch_in_gateway` stays unchanged.
 
 The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership.
@@ -128,9 +130,9 @@ kwc_reply(
 
 `kwc_reply` records the reply relationship in KWC state and does not create another automatic wake. A reply can therefore not loop endlessly between Profiles. Use a new idempotency key for each intentional reply, and reuse that key only when retrying the same reply.
 
-## Project Manager invocation response
+## Profile invocation responses
 
-KWC supplies an opaque invocation id and an invocation-specific outcome contract. The Project Manager completes that invocation with the tool rather than emitting JSON in prose:
+KWC supplies an opaque invocation id and an invocation-specific outcome contract. Profiles complete that invocation with a typed tool rather than emitting JSON in prose. The coordinator uses the compatibility tool:
 
 ```text
 kwc_pm_response(
@@ -141,7 +143,18 @@ kwc_pm_response(
 )
 ```
 
-`reason_code` is optional but, when present, must be a compact uppercase identifier such as `MISSING_INPUT` or `POLICY:USER_DECISION_REQUIRED`; it is not a free-form reasoning field. The tool is available only in the configured coordinator Profile's session and KWC never returns the bound session key in the tool result. Unknown invocations, wrong Profiles, wrong sessions, non-allowlisted outcomes, and conflicting replays fail closed.
+Coder and Reviewer sessions use the generic execution-Profile tool:
+
+```text
+kwc_profile_response(
+  invocation_id="inv_coder_01H...",
+  outcome="review-requested",
+  task_id="t_impl1",
+  reason_code="IMPLEMENTATION_VERIFIED"
+)
+```
+
+`reason_code` is optional but, when present, must be a compact uppercase identifier such as `MISSING_INPUT` or `POLICY:USER_DECISION_REQUIRED`; it is not a free-form reasoning field. `kwc_pm_response` is available only in the configured coordinator Profile, while `kwc_profile_response` is available only in configured non-coordinator `execution_profiles`. KWC never returns the bound session key in either tool result. Unknown invocations, wrong Profiles, wrong sessions, non-allowlisted outcomes, and conflicting replays fail closed.
 
 ## Routing and privacy boundary
 

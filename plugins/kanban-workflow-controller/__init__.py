@@ -31,7 +31,10 @@ except ImportError:
     _create_comment_request = _service_module.create_comment_request
 
 try:
-    from .invocation_service import submit_pm_response as _submit_pm_response
+    from .invocation_service import (
+        submit_pm_response as _submit_pm_response,
+        submit_profile_response as _submit_profile_response,
+    )
 except ImportError:
     _invocation_path = Path(__file__).resolve().parent / "invocation_service.py"
     _invocation_name = "_hermes_kanban_workflow_controller_invocation_service"
@@ -50,6 +53,7 @@ except ImportError:
             "KWC invocation service module name is already bound to another path"
         )
     _submit_pm_response = _invocation_module.submit_pm_response
+    _submit_profile_response = _invocation_module.submit_profile_response
 
 
 _STATE_SCHEMA = "kanban-workflow-controller-state-v1"
@@ -650,6 +654,24 @@ def _pm_response_available() -> bool:
     return _current_session_profile() == coordinator_profile
 
 
+def _profile_response_available() -> bool:
+    if _CONTEXT is None:
+        return False
+    raw = _CONTEXT.get_config(
+        "execution_profiles", "project-manager,coder,reviewer"
+    )
+    if isinstance(raw, (list, tuple, set)):
+        values = raw
+    else:
+        values = str(raw or "").split(",")
+    profiles = {str(value).strip() for value in values if str(value).strip()}
+    current_profile = _current_session_profile()
+    coordinator_profile = str(
+        _CONTEXT.get_config("coordinator_profile", "project-manager") or "project-manager"
+    ).strip()
+    return current_profile in profiles and current_profile != coordinator_profile
+
+
 def _configured_comment_profiles() -> set[str]:
     raw = _CONTEXT.get_config(
         "comment_profiles", "project-manager,coder,reviewer"
@@ -917,6 +939,24 @@ def _kwc_pm_response_tool(arguments: dict[str, Any]) -> str:
         )
 
 
+def _kwc_profile_response_tool(arguments: dict[str, Any]) -> str:
+    try:
+        result = _submit_profile_response(
+            state_path=_state_path(),
+            invocation_id=arguments.get("invocation_id"),
+            caller_profile=_current_session_profile(),
+            caller_session_key=_current_session_key(),
+            outcome=arguments.get("outcome"),
+            task_id=arguments.get("task_id"),
+            reason_code=arguments.get("reason_code"),
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        return json.dumps(
+            {"ok": False, "error": str(exc)}, ensure_ascii=False, sort_keys=True
+        )
+
+
 def _event_hint_callback(event_kind: str):
     def callback(**kwargs: Any) -> None:
         _on_event_hint(event_kind=event_kind, **kwargs)
@@ -1015,5 +1055,42 @@ def register(ctx: Any) -> None:
         _kwc_pm_response_tool,
         check_fn=_pm_response_available,
         description="Submit a Profile/session-bound PM result without mutating Kanban.",
+        emoji="📨",
+    )
+    ctx.register_tool(
+        "kwc_profile_response",
+        "kanban-workflow-controller",
+        {
+            "name": "kwc_profile_response",
+            "description": (
+                "Submit the structured result for the current KWC Profile invocation. "
+                "The invocation, Profile, session, and allowed outcome are validated."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "invocation_id": {
+                        "type": "string",
+                        "description": "Opaque invocation id supplied by KWC.",
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "description": "One of the outcomes allowed by this invocation.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Related native Kanban task id, when applicable.",
+                    },
+                    "reason_code": {
+                        "type": "string",
+                        "description": "Compact stable reason code, not free-form reasoning.",
+                    },
+                },
+                "required": ["invocation_id", "outcome"],
+            },
+        },
+        _kwc_profile_response_tool,
+        check_fn=_profile_response_available,
+        description="Submit a Profile/session-bound typed result without mutating Kanban.",
         emoji="📨",
     )

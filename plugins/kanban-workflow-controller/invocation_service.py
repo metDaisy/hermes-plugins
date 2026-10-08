@@ -187,7 +187,7 @@ def create_invocation(
         conn.close()
 
 
-def submit_pm_response(
+def submit_profile_response(
     *,
     state_path: Path,
     invocation_id: Any,
@@ -198,7 +198,7 @@ def submit_pm_response(
     reason_code: Any = None,
     now_fn: Callable[[], int] = _now,
 ) -> dict[str, Any]:
-    """Accept exactly one Profile/session-bound PM response without mutating Kanban."""
+    """Accept exactly one Profile/session-bound typed response without mutating Kanban."""
     invocation_id = _required_text(invocation_id, "invocation_id")
     caller_profile = _required_text(caller_profile, "caller_profile")
     caller_session_key = _required_text(caller_session_key, "caller_session_key")
@@ -259,6 +259,10 @@ def submit_pm_response(
         return _public_payload(accepted, idempotent_replay=False)
     finally:
         conn.close()
+
+
+# Backward-compatible name for the coordinator-specific tool.
+submit_pm_response = submit_profile_response
 
 
 def read_invocation(*, state_path: Path, invocation_id: Any) -> dict[str, Any] | None:

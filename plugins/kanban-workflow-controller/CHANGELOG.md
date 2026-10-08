@@ -2,6 +2,18 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.13.0] - 2026-10-08
+
+### Added
+
+- Added `kwc_profile_response` for invocation-bound Coder and Reviewer results without natural-language JSON parsing.
+- Added configurable `execution_profiles` visibility, while the coordinator retains the compatibility `kwc_pm_response` tool.
+
+### Changed
+
+- Generalized the invocation response service across Profiles while preserving exact Profile/session/outcome binding, replay fencing, and privacy-safe persistence.
+- The coordinator sees only `kwc_pm_response`; non-coordinator execution Profiles see only `kwc_profile_response`, avoiding duplicate response tools in one session.
+
 ## [0.12.0] - 2026-10-08
 
 ### Added

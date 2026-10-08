@@ -2,7 +2,7 @@
   "name": "kanban-workflow-controller",
   "label": "kanban-workflow-controller",
   "description": "Desktop-owned KWC runtime, Kanban workflow status, activity, and comment API",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "slots": [],
   "api": "plugin_api.py"
 }

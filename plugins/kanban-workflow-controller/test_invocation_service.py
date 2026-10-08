@@ -168,6 +168,37 @@ class InvocationServiceTests(unittest.TestCase):
         self.assertTrue(accepted["ok"])
         self.assertEqual(accepted["profile"], "workflow-pm")
 
+    def test_non_coordinator_profile_can_submit_its_bound_typed_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.db"
+            INVOCATIONS.create_invocation(
+                state_path=state_path,
+                invocation_id="inv_coder_1",
+                workflow_instance_id="issue151:g1",
+                board="issue151",
+                profile="coder",
+                session_key="coder-session-key",
+                expected_response="implementation-result",
+                allowed_outcomes=["review-requested", "blocked"],
+                snapshot_fingerprint="sha256:snapshot-1",
+                now_fn=lambda: 1000,
+            )
+
+            accepted = INVOCATIONS.submit_profile_response(
+                state_path=state_path,
+                invocation_id="inv_coder_1",
+                caller_profile="coder",
+                caller_session_key="coder-session-key",
+                outcome="review-requested",
+                task_id="t_impl1",
+                reason_code="IMPLEMENTATION_VERIFIED",
+                now_fn=lambda: 1001,
+            )
+
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(accepted["profile"], "coder")
+        self.assertEqual(accepted["status"], "accepted")
+
     def test_invocation_creation_is_idempotent_only_for_the_same_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.db"
