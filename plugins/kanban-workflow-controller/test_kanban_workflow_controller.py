@@ -62,10 +62,12 @@ with patch.dict(sys.modules, {"fastapi": _fastapi}):
 
 
 class FakeContext:
-    def __init__(self, settings=None) -> None:
+    def __init__(self, settings=None, *, profile_name="project-manager") -> None:
         self.hooks: dict[str, object] = {}
         self.tools: dict[str, object] = {}
+        self.tool_checks: dict[str, object] = {}
         self.settings = settings or {}
+        self.profile_name = profile_name
         self.injected: list[tuple[str, str]] = []
 
     def register_hook(self, name: str, callback) -> None:
@@ -73,6 +75,7 @@ class FakeContext:
 
     def register_tool(self, name: str, _toolset: str, _schema: dict, handler, **_kwargs) -> None:
         self.tools[name] = handler
+        self.tool_checks[name] = _kwargs.get("check_fn")
 
     def get_config(self, key: str, default=None):
         return self.settings.get(key, default)
@@ -104,6 +107,7 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
         self.assertNotIn("  - kanban_task_commented", manifest)
         self.assertIn("  - kwc_comment", manifest)
         self.assertIn("  - kwc_reply", manifest)
+        self.assertIn("  - kwc_pm_response", manifest)
         self.assertNotRegex(manifest, r"(?m)^  board:\s*$")
         self.assertEqual(dashboard_manifest["name"], "kanban-workflow-controller")
         self.assertEqual(dashboard_manifest["version"], version)
@@ -271,6 +275,57 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
                 "on_kanban_dispatch_tick",
             },
         )
+
+    def test_pm_response_tool_submits_profile_and_session_bound_result(self) -> None:
+        ctx = FakeContext()
+        PLUGIN.register(ctx)
+        self.assertIn("kwc_pm_response", ctx.tools)
+        with (
+            patch.object(PLUGIN, "_state_path", return_value=Path("state.db")),
+            patch.object(PLUGIN, "_current_session_profile", return_value="project-manager"),
+            patch.object(PLUGIN, "_current_session_key", return_value="pm-session-key"),
+            patch.object(
+                PLUGIN,
+                "_submit_pm_response",
+                return_value={
+                    "ok": True,
+                    "invocation_id": "inv_pm_1",
+                    "status": "accepted",
+                    "idempotent_replay": False,
+                },
+            ) as submit,
+        ):
+            result = json.loads(
+                ctx.tools["kwc_pm_response"](
+                    {
+                        "invocation_id": "inv_pm_1",
+                        "outcome": "checkpoint-approved",
+                        "task_id": "t_impl1",
+                        "reason_code": "VERIFICATION_PASSED",
+                    }
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        submit.assert_called_once_with(
+            state_path=Path("state.db"),
+            invocation_id="inv_pm_1",
+            caller_profile="project-manager",
+            caller_session_key="pm-session-key",
+            outcome="checkpoint-approved",
+            task_id="t_impl1",
+            reason_code="VERIFICATION_PASSED",
+        )
+
+    def test_pm_response_tool_is_visible_only_to_the_coordinator_profile(self) -> None:
+        coder = FakeContext(profile_name="coder")
+        PLUGIN.register(coder)
+        self.assertIn("kwc_pm_response", coder.tools)
+        self.assertIsNotNone(coder.tool_checks["kwc_pm_response"])
+        with patch.object(PLUGIN, "_current_session_profile", return_value="coder"):
+            self.assertFalse(coder.tool_checks["kwc_pm_response"]())
+        with patch.object(PLUGIN, "_current_session_profile", return_value="project-manager"):
+            self.assertTrue(coder.tool_checks["kwc_pm_response"]())
 
     def test_dispatch_tick_processes_pending_kwc_comments_without_core_comment_hook(self) -> None:
         ctx = FakeContext({"board": "issue151"})
@@ -519,10 +574,12 @@ class KanbanWorkflowControllerContractTests(unittest.TestCase):
                     conn.close()
         self.assertEqual(row["session_key"], "coder-session")
 
-    def test_registers_kwc_comment_and_reply_tools(self) -> None:
+    def test_registers_kwc_comment_reply_and_pm_response_tools(self) -> None:
         ctx = FakeContext()
         PLUGIN.register(ctx)
-        self.assertEqual(set(ctx.tools), {"kwc_comment", "kwc_reply"})
+        self.assertEqual(
+            set(ctx.tools), {"kwc_comment", "kwc_reply", "kwc_pm_response"}
+        )
 
     def test_kwc_comment_routes_but_kwc_reply_suppresses_follow_up_wake(self) -> None:
         ctx = FakeContext()

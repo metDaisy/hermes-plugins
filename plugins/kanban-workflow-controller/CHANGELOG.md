@@ -2,6 +2,19 @@
 
 All notable Kanban Workflow Controller changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.9.0] - 2026-10-08
+
+### Added
+
+- Added a durable `kwc-profile-invocation-v1` ledger for one pending Profile invocation and one accepted structured response.
+- Added `kwc_pm_response`, bound to the invocation's configured coordinator Profile and durable Hermes session key.
+- Added allowlisted outcomes, compact reason-code validation, exact idempotent replay, conflicting-replay rejection, and WAL-backed cross-process access.
+
+### Changed
+
+- PM results are now submitted as typed tool arguments instead of requiring natural-language JSON parsing. The tool records intent only and performs no Kanban mutation.
+- This release does not yet create PM workers, resume PM sessions, execute WorkflowEngine actions, or replace the native Core/Gateway dispatcher.
+
 ## [0.8.0] - 2026-10-08
 
 ### Added

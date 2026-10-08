@@ -30,6 +30,10 @@ Starting with `0.8.0`, the Runtime performs read-only reconciliation for every b
 
 The Runtime still performs **no Kanban mutation** and does not run the native dispatcher. Native dispatch remains on the existing Hermes Core/Gateway path, and this release neither changes `kanban.dispatch_in_gateway` nor modifies Hermes Core. `GET /runtime/decisions` exposes the latest dry-run decisions, while `/status` reports Runtime health, privacy-safe reconciliation attempt/success/error state, and native dispatch-tick health separately as `dispatcher_running`.
 
+Starting with `0.9.0`, KWC also has the first execution-plane contract: a durable pending invocation can accept exactly one structured Project Manager result through `kwc_pm_response`. The result is bound to the invocation id, configured coordinator Profile, durable Hermes session key, snapshot fingerprint, and an invocation-specific outcome allowlist. An identical retry is idempotent; a different replay is rejected. The response tool only records validated intent and still performs no Kanban mutation.
+
+This slice deliberately does not create or resume a PM worker yet. The event dispatcher, serial agent lease, PM session runner, action executor, and canonical mutation/read-back adapter remain follow-up work; therefore `kanban.dispatch_in_gateway` stays unchanged.
+
 The Runtime exits when its owning `desktop-serve` PID disappears, when `POST /runtime/stop` marks its generation for shutdown, or when another generation safely takes ownership.
 
 Lifecycle routing remains passive:
@@ -118,6 +122,21 @@ kwc_reply(
 
 `kwc_reply` records the reply relationship in KWC state and does not create another automatic wake. A reply can therefore not loop endlessly between Profiles. Use a new idempotency key for each intentional reply, and reuse that key only when retrying the same reply.
 
+## Project Manager invocation response
+
+KWC supplies an opaque invocation id and an invocation-specific outcome contract. The Project Manager completes that invocation with the tool rather than emitting JSON in prose:
+
+```text
+kwc_pm_response(
+  invocation_id="inv_pm_01H...",
+  outcome="checkpoint-approved",
+  task_id="t_impl1",
+  reason_code="VERIFICATION_PASSED"
+)
+```
+
+`reason_code` is optional but, when present, must be a compact uppercase identifier such as `MISSING_INPUT` or `POLICY:USER_DECISION_REQUIRED`; it is not a free-form reasoning field. The tool is available only in the configured coordinator Profile's session and KWC never returns the bound session key in the tool result. Unknown invocations, wrong Profiles, wrong sessions, non-allowlisted outcomes, and conflicting replays fail closed.
+
 ## Routing and privacy boundary
 
 - `@{profile}` accepts letters, digits, `.`, `_`, and `-`; duplicate mentions are delivered once in appearance order.
@@ -184,13 +203,13 @@ Message injection is capability-gated by Hermes and must be explicitly allowed o
 hermes -p main config set plugins.entries.kanban-workflow-controller.allow_gateway_injection true
 ```
 
-The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, comment delivery ledger, and activity log are stored machine-wide under:
+The global coordinator binding, per-Profile comment-session bindings, per-board event cursors/heartbeats, Runtime owner generation/heartbeat, privacy-safe reconciliation health, latest compact WorkflowEngine decisions, Profile invocation/response ledger, comment delivery ledger, and activity log are stored machine-wide under:
 
 ```text
 $HERMES_ROOT/plugin-data/kanban-workflow-controller/state.db
 ```
 
-This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, and activity log. Workflow decisions contain only board/time, fixed phase/action/reason/error codes, task ID, Profile, and Skill. They contain no task body, comment body, prompt, session key, reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
+This file is only a routing/delivery index, Runtime lifecycle store, privacy-safe decision cache, invocation-response ledger, and activity log. Workflow decisions contain only board/time, fixed phase/action/reason/error codes, task ID, Profile, and Skill. Invocation rows additionally retain the durable session key required for ownership validation, but it is never returned by the response tool. No invocation row stores a task body, comment body, prompt, free-form reasoning, raw command/result, log, or credential; Kanban remains the workflow and lifecycle authority.
 
 ## Activity log
 
@@ -237,7 +256,8 @@ python plugins/kanban-workflow-controller/test_workflow_engine.py -v
 python plugins/kanban-workflow-controller/test_snapshot_service.py -v
 python plugins/kanban-workflow-controller/test_runtime_service.py -v
 python plugins/kanban-workflow-controller/test_plugin_runtime_api.py -v
-python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/workflow_engine.py plugins/kanban-workflow-controller/snapshot_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_workflow_engine.py plugins/kanban-workflow-controller/test_snapshot_service.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
+python plugins/kanban-workflow-controller/test_invocation_service.py -v
+python -m py_compile plugins/kanban-workflow-controller/__init__.py plugins/kanban-workflow-controller/comment_service.py plugins/kanban-workflow-controller/invocation_service.py plugins/kanban-workflow-controller/workflow_engine.py plugins/kanban-workflow-controller/snapshot_service.py plugins/kanban-workflow-controller/runtime_service.py plugins/kanban-workflow-controller/dashboard/plugin_api.py plugins/kanban-workflow-controller/test_kanban_workflow_controller.py plugins/kanban-workflow-controller/test_invocation_service.py plugins/kanban-workflow-controller/test_workflow_engine.py plugins/kanban-workflow-controller/test_snapshot_service.py plugins/kanban-workflow-controller/test_runtime_service.py plugins/kanban-workflow-controller/test_plugin_runtime_api.py
 node --check plugins/kanban-workflow-controller/desktop/plugin.js
 hermes plugins doctor plugins/kanban-workflow-controller --ci
 ```
