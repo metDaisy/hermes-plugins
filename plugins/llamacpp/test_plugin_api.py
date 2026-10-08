@@ -2208,6 +2208,22 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("Prism-ML 호환 다운로드 모델이 없습니다.", page)
         self.assertIn("runtime 종류와 관계없이 모두 표시합니다.", page)
 
+    def test_parameter_preset_tab_uses_configured_main_model_while_server_is_stopped(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+        self.assertIn("['parameters', 'parameter preset']", source)
+        self.assertIn(
+            "const parameterModel = models.find(model => model.id === data?.active_model_id) || "
+            "models.find(model => model.id === data?.profiles?.main?.model_id) || models[0]",
+            source,
+        )
+        parameter_tab = source[
+            source.index("tab === 'parameters'"):
+            source.index("\n  ] })", source.index("tab === 'parameters'"))
+        ]
+        self.assertIn("ModelSettingsEditor, { modelId: parameterModel.id", parameter_tab)
+        self.assertNotIn("activeModel ?", parameter_tab)
+
     def test_parameter_preset_actions_and_flag_rows_stay_inline(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         editor = source[source.index("function ModelSettingsEditor"):source.index("function RegisterWizard")]
@@ -2590,7 +2606,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("children: '이름 변경'", desktop_source)
         self.assertNotIn("모델 설정 저장", desktop_source)
         self.assertIn("setDraft(next)", desktop_source)
-        self.assertIn("appliedPresetId: data?.model_presets?.[activeModel.id] || ''", desktop_source)
+        self.assertIn("appliedPresetId: data?.model_presets?.[parameterModel.id] || ''", desktop_source)
         self.assertNotIn("queryKey: [ID, 'model-card-presets']", desktop_source)
         self.assertNotIn("queryKey: [ID, 'parameter-presets']", desktop_source)
         self.assertIn("queryKey: [ID, 'presets']", desktop_source)
