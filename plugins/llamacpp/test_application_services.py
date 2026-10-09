@@ -1611,6 +1611,27 @@ class OfficialRuntimeServiceTests(unittest.TestCase):
 
 
 class ServerLifecycleServiceTests(unittest.TestCase):
+    def test_stop_marker_does_not_create_a_missing_activity_log(self) -> None:
+        from dashboard.application.server_lifecycle import ServerLifecycleService
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            log_path = Path(raw_root) / "missing.log"
+            state: dict[str, object] = {"pid": 42}
+            service = ServerLifecycleService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                pid_alive=lambda _pid: False,
+                terminate=lambda _pid: None,
+                unregister_endpoint=lambda: None,
+                log_path=log_path,
+            )
+
+            service.stop(preserve_log=True)
+
+            self.assertFalse(log_path.exists())
+
     def test_unexpected_worker_exit_publishes_state_change(self) -> None:
         from dashboard.application.server_lifecycle import ServerLifecycleService
 
@@ -1627,6 +1648,7 @@ class ServerLifecycleServiceTests(unittest.TestCase):
                 return
 
         with tempfile.TemporaryDirectory() as raw_root:
+            (Path(raw_root) / "server.log").write_text("", encoding="utf-8")
             service = ServerLifecycleService(
                 load_state=lambda: state,
                 save_state=lambda value: state.update(value),
@@ -1687,6 +1709,7 @@ class ServerLifecycleServiceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw_root:
             state: dict[str, object] = {"pid": 42, "custom_endpoint": {"key": "llamacpp-local"}}
+            (Path(raw_root) / "server.log").write_text("", encoding="utf-8")
             termination_finished = threading.Event()
             observed: list[object] = []
 

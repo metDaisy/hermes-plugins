@@ -82,8 +82,9 @@ class ServerLifecycleService:
         threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
 
     def _append_proxy_stop_marker(self) -> None:
+        if not self._log_path.is_file():
+            return
         try:
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
             with self._log_path.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write("[proxy] --- proxy server stop ---\n")
         except OSError:
