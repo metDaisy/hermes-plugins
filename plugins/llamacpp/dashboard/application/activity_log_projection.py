@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-_ROLE_LABELS = {"main": "Main", "compression": "Compress", "server": "Server"}
+_ROLE_LABELS = {"main": "Main", "compression": "Compress", "server": "Server", "proxy": "Proxy Server"}
 _MODEL_ROLES = {"main-local": "main", "compression-local": "compression"}
 _SESSION_DISPLAY_LIMIT = 24
 _NATIVE_ELAPSED_PREFIX = re.compile(r"^(\d+)\.(\d{2})\.(\d{3})\.(\d{3})(?:\s|$)")
@@ -205,7 +205,11 @@ def project_activity_lines(raw_lines: list[str], *, latest_observed_at: float | 
 
         listening = re.search(r"listening on http://[^:]+:(\d+)", text)
         if listening:
-            _emit(events, lines, "server", "server_ready", f"서버 준비 완료 · :{listening.group(1)}", contexts=contexts, port=int(listening.group(1)))
+            _emit(events, lines, "proxy", "proxy_server_started", "=======Start=======", contexts=contexts, port=int(listening.group(1)))
+            continue
+
+        if re.search(r"\[proxy\]\s+--- proxy server stop ---", text, re.IGNORECASE):
+            _emit(events, lines, "proxy", "proxy_server_stopped", "=======Stop========", contexts=contexts)
             continue
 
         evict = re.search(r"evicting idle LRU name=([^\s]+)", text)

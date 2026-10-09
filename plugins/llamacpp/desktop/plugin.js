@@ -797,18 +797,7 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
       setMessage('현재 parameter를 preset으로 저장했습니다.')
     } catch (cause) { setMessage(`preset 저장 실패: ${cause?.message || String(cause)}`) }
   }
-  const applyPreset = async () => {
-    if (!selectedPresetId) return
-    try {
-      const result = await api(`/presets/${encodeURIComponent(selectedPresetId)}/apply`, { method: 'POST', body: { model_id: modelId } })
-      setDraft({ ...(selectedPreset?.options || {}) })
-      await presetsQuery.refetch()
-      await settings.refetch()
-      const omitted = result.omitted_options?.length ? ` Prism-ML에서 관리하지 않는 ${result.omitted_options.join(', ')}은 제외했습니다.` : ''
-      setMessage((result.requires_restart ? 'preset을 현재 모델 설정에 저장했습니다. 현재 server는 유지되며 다음 start에 반영됩니다.' : 'preset을 현재 모델 설정에 저장했습니다.') + omitted)
-      refresh()
-    } catch (cause) { setMessage(`preset 적용 실패: ${cause?.message || String(cause)}`) }
-  }
+  const saveSelectedPreset = () => persistPreset(draft)
   const renamePreset = async () => {
     if (!selectedPresetId || !presetRename.trim()) { setMessage('변경할 preset 이름을 입력하세요.'); return }
     try {
@@ -835,10 +824,10 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
       jsx('p', { className: `mb-2 text-xs ${muted}`, children: 'preset을 선택하면 해당 preset의 parameter만 표시됩니다. preset 선택을 해제하면 parameter가 비워집니다.' }),
       jsxs('div', { className: 'mb-4 rounded-md bg-(--ui-bg-tertiary) p-3', children: [
         jsx('p', { className: 'mb-1 text-xs font-medium text-(--ui-text-primary)', children: 'parameter preset' }),
-        jsx('p', { className: `mb-2 text-xs ${muted}`, children: '저장은 선택한 preset 값으로 현재 모델 설정을 교체합니다.' }),
+        jsx('p', { className: `mb-2 text-xs ${muted}`, children: '저장은 선택한 preset 자체의 parameter를 저장합니다. 모델별 preset 적용은 모델 탭에서만 변경합니다.' }),
         jsxs('div', { className: 'flex items-stretch gap-2', 'data-testid': 'preset-actions', children: [
           jsx('select', { className: `${compactInput} min-w-0 flex-1`, style: { ...themedSelect(), width: 'auto', minWidth: 0, flex: '1 1 auto' }, value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
-          jsx('button', { className: `${compactPrimary} shrink-0`, disabled: !selectedPresetId || saving, onClick: applyPreset, children: '저장' }),
+          jsx('button', { className: `${compactPrimary} shrink-0`, disabled: !selectedPresetId || saving, onClick: saveSelectedPreset, children: '저장' }),
           jsx('button', { className: `${compactDanger} shrink-0`, disabled: !selectedPresetId || saving, onClick: deletePreset, children: '삭제' })
         ] }),
         jsxs('div', { className: 'mt-2 flex items-stretch gap-2', 'data-testid': 'preset-name-actions', children: [

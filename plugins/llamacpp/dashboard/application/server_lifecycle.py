@@ -43,11 +43,14 @@ class ServerLifecycleService:
         with self._lifecycle_lock:
             state = self._load_state()
             pid = state.get("pid")
+            had_owned_worker = pid is not None
             if self._pid_alive(pid):
                 terminated = self._terminate(pid)
                 if terminated is False and self._pid_alive(pid):
                     raise RuntimeError("refusing to clear a live llama-server with unverified process identity")
             self._clear_owned_state(state, pid, clear_endpoint=not keep_endpoint)
+            if had_owned_worker:
+                self._append_proxy_stop_marker()
             if not keep_endpoint:
                 self._unregister_endpoint()
             if not preserve_log:
@@ -72,10 +75,19 @@ class ServerLifecycleService:
                 if state.get("pid") != process.pid:
                     return
                 self._clear_owned_state(state, process.pid, clear_endpoint=True)
+                self._append_proxy_stop_marker()
                 self._unregister_endpoint()
                 self._on_state_change()
 
         threading.Thread(target=wait_for_exit, daemon=True, name="llamacpp-server-watch").start()
+
+    def _append_proxy_stop_marker(self) -> None:
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write("[proxy] --- proxy server stop ---\n")
+        except OSError:
+            pass
 
     def log_tail(self, limit: int = 250) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 500))

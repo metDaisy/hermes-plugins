@@ -176,7 +176,8 @@ class ActivityLogProjectionTests(unittest.TestCase):
 
         result = project_activity_lines(raw)
 
-        self.assertIn('[Server] 서버 준비 완료 · :18434', result["lines"])
+        self.assertIn('[Proxy Server] =======Start=======', result["lines"])
+        self.assertNotIn('[Server] 서버 준비 완료 · :18434', result["lines"])
         self.assertIn('[Main] prompt 처리 33% · 4096 tok · 1200.0 tok/s', result["lines"])
         self.assertIn('[Main] 생성 128 tok · 73.4 tok/s', result["lines"])
         self.assertIn('[Main] 생성 64 tok · 53.3 tok/s', result["lines"])
@@ -186,6 +187,13 @@ class ActivityLogProjectionTests(unittest.TestCase):
         self.assertIn('[Compress] 요청 완료 · 2176 tok · 2.39초', result["lines"])
         self.assertNotIn('PRIVATE PROMPT CONTENT', "\n".join(result["lines"]))
         self.assertTrue(any(event["event"] == "prompt_progress" for event in result["events"]))
+
+    def test_projects_proxy_server_stop_boundary(self) -> None:
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        result = project_activity_lines(["[proxy] --- proxy server stop ---"])
+
+        self.assertEqual(result["lines"], ["[Proxy Server] =======Stop========"])
 
     def test_suppresses_cross_origin_banner_but_keeps_other_warnings(self) -> None:
         from dashboard.application.activity_log_projection import project_activity_lines

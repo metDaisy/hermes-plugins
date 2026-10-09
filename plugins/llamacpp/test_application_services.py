@@ -1640,6 +1640,7 @@ class ServerLifecycleServiceTests(unittest.TestCase):
 
             self.assertTrue(changed.wait(1), "worker exit did not publish a state change")
             self.assertIsNone(state["pid"])
+            self.assertIn("[proxy] --- proxy server stop ---", (Path(raw_root) / "server.log").read_text(encoding="utf-8"))
 
     def test_stop_clears_owned_state_unregisters_endpoint_and_removes_log(self) -> None:
         from dashboard.application.server_lifecycle import ServerLifecycleService
@@ -1702,11 +1703,12 @@ class ServerLifecycleServiceTests(unittest.TestCase):
                 log_path=Path(raw_root) / "server.log",
             )
 
-            service.stop(keep_endpoint=True)
+            service.stop(preserve_log=True, keep_endpoint=True)
 
             self.assertTrue(termination_finished.is_set())
             self.assertEqual(observed, [42])
             self.assertIsNone(state["pid"])
+            self.assertIn("[proxy] --- proxy server stop ---", (Path(raw_root) / "server.log").read_text(encoding="utf-8"))
 
     def test_stop_preserves_live_state_when_identity_validation_refuses_termination(self) -> None:
         from dashboard.application.server_lifecycle import ServerLifecycleService

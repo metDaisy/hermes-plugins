@@ -2247,6 +2247,15 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("children: 'flag'", control)
         self.assertNotIn("값 없는 flag", control)
 
+    def test_parameter_editor_save_does_not_reassign_the_models_preset(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        editor = source[source.index("function ModelSettingsEditor"):source.index("function RegisterWizard")]
+
+        self.assertIn("const saveSelectedPreset = () => persistPreset(draft)", editor)
+        self.assertIn("onClick: saveSelectedPreset, children: '저장'", editor)
+        self.assertNotIn("/presets/${encodeURIComponent(selectedPresetId)}/apply", editor)
+        self.assertIn("선택한 preset 자체의 parameter를 저장합니다.", editor)
+
     def test_model_cards_use_inline_download_panel_and_unregister_action(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
 
