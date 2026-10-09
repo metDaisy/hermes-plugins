@@ -2206,6 +2206,48 @@ class ServerStartupServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "select a model"):
             service.start()
 
+    def test_writes_llama_server_version_as_the_first_startup_log(self) -> None:
+        from dashboard.application.server_startup import ServerStartupService
+
+        import tempfile
+
+        class Backend:
+            @staticmethod
+            def build_command(*_args, **_kwargs):
+                return ["llama-server"]
+
+        class Process:
+            pid = os.getpid()
+
+            @staticmethod
+            def poll():
+                return None
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            model = root / "model.gguf"
+            model.write_bytes(b"gguf")
+            log_path = root / "activity.log"
+            state = {"active_model_id": "model", "models": {"model": {}}}
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda value: state.update(value),
+                executable=lambda: root / "llama-server.exe", stop=lambda **_: None,
+                active_path=lambda _model_id: model, load_options=lambda: {"model": {}},
+                runtime_kind=lambda _state: "official", backend=lambda _kind: Backend(),
+                serving_model_name=lambda _model_id: "served", option_args=lambda _options: [],
+                watch=lambda _process: None, health=lambda _port: True,
+                register_endpoint=lambda _port, _model: {}, log_tail=lambda _limit: {"lines": []},
+                log_path=log_path, spawn=lambda *_args: Process(),
+                now=lambda: 0.0, sleep=lambda _seconds: None,
+                server_version=lambda _executable: "0.6.0-dev (build 11515, commit 3d65c90d0)",
+            )
+
+            service.start()
+
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[0], "[Server] llama-server version: 0.6.0-dev (build 11515, commit 3d65c90d0)")
+            self.assertIn("--- llama-server start: model=model, port=18434 ---", lines[1])
+
     def test_uses_a_stable_serving_alias_for_command_and_endpoint(self) -> None:
         from dashboard.application.server_startup import ServerStartupService
 

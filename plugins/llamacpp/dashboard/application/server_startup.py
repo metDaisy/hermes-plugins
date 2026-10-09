@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 import os
 import re
+import subprocess
 
 try:
     from .owned_process import capture_process_identity, terminate_owned_process
@@ -71,10 +72,31 @@ def _startup_failure_detail(payload: dict[str, Any]) -> str:
     return "\n".join(candidates[-10:])
 
 
+def _query_server_version(executable: Path) -> str:
+    """Return one bounded, display-safe version line from the managed binary."""
+    try:
+        result = subprocess.run(
+            [str(executable), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    lines = [line.strip() for line in f"{result.stdout}\n{result.stderr}".splitlines() if line.strip()]
+    version_line = next((line for line in lines if line.lower().startswith("version:")), lines[0] if lines else "unknown")
+    if version_line.lower().startswith("version:"):
+        version_line = version_line.split(":", 1)[1].strip()
+    return version_line[:300] or "unknown"
+
+
 class ServerStartupService:
     """Own command assembly, startup persistence, health polling, and cleanup."""
 
-    def __init__(self, load_state: Callable[[], dict[str, Any]], save_state: Callable[[dict[str, Any]], None], executable: Callable[[], Path | None], stop: Callable[..., None], active_path: Callable[[str], Path], load_options: Callable[[], dict[str, dict[str, str]]], runtime_kind: Callable[[dict[str, Any]], str], backend: Callable[[str], Any], serving_model_name: Callable[[str], str], option_args: Callable[[dict[str, str]], list[str]], watch: Callable[[Any], None], health: Callable[[int], bool], register_endpoint: Callable[[int, str], dict[str, Any]], log_tail: Callable[[int], dict[str, Any]], log_path: Path | None, spawn: Callable[..., Any], now: Callable[[], float], sleep: Callable[[float], None], mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None, router_plan: Callable[[dict[str, Any], Path], Any | None] | None = None, router_preset_path: Path | None = None, router_ready: Callable[[int, str], bool] | None = None) -> None:
+    def __init__(self, load_state: Callable[[], dict[str, Any]], save_state: Callable[[dict[str, Any]], None], executable: Callable[[], Path | None], stop: Callable[..., None], active_path: Callable[[str], Path], load_options: Callable[[], dict[str, dict[str, str]]], runtime_kind: Callable[[dict[str, Any]], str], backend: Callable[[str], Any], serving_model_name: Callable[[str], str], option_args: Callable[[dict[str, str]], list[str]], watch: Callable[[Any], None], health: Callable[[int], bool], register_endpoint: Callable[[int, str], dict[str, Any]], log_tail: Callable[[int], dict[str, Any]], log_path: Path | None, spawn: Callable[..., Any], now: Callable[[], float], sleep: Callable[[float], None], mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None, router_plan: Callable[[dict[str, Any], Path], Any | None] | None = None, router_preset_path: Path | None = None, router_ready: Callable[[int, str], bool] | None = None, server_version: Callable[[Path], str] | None = None) -> None:
         self._load_state, self._save_state, self._executable, self._stop = load_state, save_state, executable, stop
         self._active_path, self._load_options, self._runtime_kind, self._backend = active_path, load_options, runtime_kind, backend
         self._serving_model_name = serving_model_name
@@ -84,6 +106,7 @@ class ServerStartupService:
         self._router_plan = router_plan
         self._router_preset_path = router_preset_path
         self._router_ready = router_ready
+        self._server_version = server_version or _query_server_version
 
     def start(self) -> None:
         state = self._load_state()
@@ -126,9 +149,13 @@ class ServerStartupService:
         if self._log_path is None:
             raise RuntimeError("server log path is required")
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        version = self._server_version(executable)
+        needs_separator = self._log_path.is_file() and self._log_path.stat().st_size > 0
         log = self._log_path.open("ab", buffering=0)
         role = "router" if native_router is not None else str(state.get("active_role") or "server")
-        log.write(f"\n[{role}] --- llama-server start: model={model_id}, port={port} ---\n".encode())
+        separator = "\n" if needs_separator else ""
+        log.write(f"{separator}[Server] llama-server version: {version}\n".encode(errors="replace"))
+        log.write(f"[{role}] --- llama-server start: model={model_id}, port={port} ---\n".encode())
         try:
             process = self._spawn(command, log, executable)
         except OSError as exc:

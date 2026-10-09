@@ -184,6 +184,11 @@ def project_activity_lines(raw_lines: list[str], *, latest_observed_at: float | 
         if not text:
             continue
 
+        version = re.search(r"\[Server\]\s+llama-server version:\s*(.+)", text, re.IGNORECASE)
+        if version:
+            _emit(events, lines, "server", "llama_server_version", f"llama-server version: {version.group(1).strip()}")
+            continue
+
         marker = re.search(r"\[(main|compression)\]\s+--- llama-server start", text, re.IGNORECASE)
         if marker:
             current_role = marker.group(1).lower()

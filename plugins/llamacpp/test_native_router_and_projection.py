@@ -158,6 +158,19 @@ class ActivityLogProjectionTests(unittest.TestCase):
 
         self.assertIn("[Main] prompt 처리 25% · 256 tok · 50.0 tok/s", result["lines"])
 
+    def test_projects_llama_server_version_as_the_first_visible_startup_log(self) -> None:
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        result = project_activity_lines([
+            "[Server] llama-server version: 0.6.0-dev (build 11515, commit 3d65c90d0)",
+            '{"type":"log","level":"info","msg":"srv llama_server: listening on http://127.0.0.1:18434\\n"}',
+            "I srv spawning server instance with name=main-local on port 19001",
+        ])
+
+        self.assertEqual(result["lines"][0], "[Server] llama-server version: 0.6.0-dev (build 11515, commit 3d65c90d0)")
+        self.assertEqual(result["lines"][1], "[Proxy Server] =======Start=======")
+        self.assertEqual(result["lines"][2], "[Main] 모델 로딩 중")
+
     def test_projects_router_and_inference_events_without_prompt_content(self) -> None:
         from dashboard.application.activity_log_projection import project_activity_lines
 
