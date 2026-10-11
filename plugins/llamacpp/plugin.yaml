@@ -1,5 +1,5 @@
 name: llamacpp
-version: 0.3.32
+version: 0.3.33
 description: Unified local model manager with official llama.cpp, Prism-ML, and external Strata backends.
 kind: standalone
 provides_hooks:
