@@ -333,12 +333,18 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         endpoint = next(route.endpoint for route in router.routes if route.path == "/profiles/start")
         direct = next(route.endpoint for route in router.routes if route.path == "/profiles/{role}/start")
 
-        result = endpoint({"main_model_id": "large-model", "compression_model_id": "small-model"})
+        result = endpoint({
+            "main_model_id": "large-model", "main_preset_id": "main-preset",
+            "compression_model_id": "small-model", "compression_preset_id": "compress-preset",
+        })
 
         self.assertEqual(result["job_id"], "job-1")
         self.assertEqual(events[0], (
             "save_many",
-            {"main": {"model_id": "large-model"}, "compression": {"model_id": "small-model"}},
+            {
+                "main": {"model_id": "large-model", "preset_id": "main-preset"},
+                "compression": {"model_id": "small-model", "preset_id": "compress-preset"},
+            },
         ))
         self.assertEqual(events[2], ("start", "main"))
 
@@ -445,6 +451,49 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         result = service.save("compression", {"model_id": "my-compressor"})
 
         self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "prism_ml")
+
+    def test_execution_profiles_snapshot_distinct_preset_options_for_same_strata_model(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state: dict[str, object] = {
+            "models": {"strata-iq3_xxs": {"runtime_kind": "strata"}},
+        }
+        presets = {
+            "main-preset": {"options": {"temp": "0.7", "top-p": "0.9"}},
+            "compress-preset": {"options": {"temp": "0", "top-p": "1"}},
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda kind, _model_id: kind == "strata",
+            resolve_preset=presets.get,
+        )
+
+        result = service.save_many({
+            "main": {"model_id": "strata-iq3_xxs", "preset_id": "main-preset"},
+            "compression": {"model_id": "strata-iq3_xxs", "preset_id": "compress-preset"},
+        })
+
+        self.assertEqual(result["profiles"]["main"]["preset_options"], {"temp": "0.7", "top-p": "0.9"})
+        self.assertEqual(result["profiles"]["compression"]["preset_options"], {"temp": "0", "top-p": "1"})
+        self.assertEqual(state["execution_profiles"]["main"]["preset_id"], "main-preset")
+        self.assertEqual(state["execution_profiles"]["compression"]["preset_id"], "compress-preset")
+
+    def test_execution_profile_rejects_unknown_preset(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state: dict[str, object] = {
+            "models": {"strata-iq3_xxs": {"runtime_kind": "strata"}},
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda _kind, _model_id: True,
+            resolve_preset=lambda _preset_id: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "preset"):
+            service.save("main", {"model_id": "strata-iq3_xxs", "preset_id": "missing"})
 
     def test_concurrent_execution_profile_saves_preserve_both_roles(self) -> None:
         import tempfile
@@ -835,6 +884,34 @@ class ParameterRouteAdapterTests(unittest.TestCase):
 
         self.assertTrue({"/settings", "/settings/{model_id}", "/presets", "/presets/{preset_id}/apply", "/presets/{preset_id}"}.issubset(routes))
         self.assertEqual(routes["/settings"]("ctx", 50)["options"], [option])
+
+    def test_preset_edits_refresh_role_snapshots_and_delete_clears_them(self) -> None:
+        from dashboard.routes.parameter_routes import ParameterRouteContext, create_router
+
+        updates: list[tuple[str, dict[str, str] | None]] = []
+
+        class Parameters:
+            @staticmethod
+            def rename_preset(preset_id, _name, options):
+                return {"id": preset_id, "name": "Strata Main", "options": dict(options or {})}
+
+            @staticmethod
+            def delete_preset(_preset_id):
+                return None
+
+        context = ParameterRouteContext(
+            options=lambda: [], executable=lambda: None, parameters=lambda: Parameters(),
+            server_requires_restart=lambda: False, runtime_kind=lambda _state: "strata", state=lambda: {},
+            refresh_profile_preset=lambda preset_id, options: updates.append((preset_id, options)),
+        )
+        routes = create_router(context).routes
+        patch_preset = next(route.endpoint for route in routes if route.path == "/presets/{preset_id}" and "PATCH" in route.methods)
+        delete_preset = next(route.endpoint for route in routes if route.path == "/presets/{preset_id}" and "DELETE" in route.methods)
+
+        patch_preset("preset-1", {"options": {"temp": "0.7"}})
+        delete_preset("preset-1")
+
+        self.assertEqual(updates, [("preset-1", {"temp": "0.7"}), ("preset-1", None)])
 
 
 class ServerRouteAdapterTests(unittest.TestCase):

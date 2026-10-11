@@ -22,7 +22,7 @@ const input = 'w-full rounded-md border border-(--ui-stroke-secondary) bg-transp
 const compactInput = 'h-8 w-full rounded-md border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-xs text-(--ui-text-primary) outline-none focus:border-(--ui-accent) focus-visible:ring-1 focus-visible:ring-(--ui-accent)'
 const compactDanger = 'shrink-0 rounded-md border border-(--dt-destructive)/50 px-2 py-1 text-xs text-(--dt-destructive) transition hover:bg-(--dt-destructive)/10 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--ui-accent)'
 const compactPrimary = 'h-8 shrink-0 rounded-md bg-(--ui-accent) px-2 py-1 text-xs text-(--ui-accent-foreground) transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--ui-accent)'
-const SELECTABLE_TEXT_STYLE = '.llamacpp-selectable, .llamacpp-selectable * { user-select: text !important; -webkit-user-select: text !important; }'
+const SELECTABLE_TEXT_STYLE = '.llamacpp-selectable, .llamacpp-selectable * { user-select: text !important; -webkit-user-select: text !important; -webkit-user-drag: none; }'
 const themeColorScheme = () => {
   if (typeof document === 'undefined') return 'dark'
   const mode = document.documentElement.dataset.hermesMode
@@ -515,17 +515,18 @@ function UnexpectedExitPanel({ diagnostic }) {
   ] })
 }
 
-function ExecutionProfileRow({ role, label, auxRole, status, modelId, onModelChange, saving }) {
+function ExecutionProfileRow({ role, label, auxRole, status, modelId, presetId, presets, onModelChange, onPresetChange, saving }) {
   const profile = status?.profiles?.[role] || {}
   const models = (role === 'main' ? status?.main_model_options : status?.auxiliary_model_options) || []
-  const runtimeKind = modelId.startsWith('Ternary-Bonsai') ? 'prism_ml' : 'official'
+  const runtimeKind = profile.runtime_kind || 'official'
   const serverRunning = Boolean(status?.server_running)
   const running = Boolean(serverRunning && status?.execution?.active_role === role && status?.active_model_id === modelId)
   return jsxs('div', { className: 'flex flex-wrap items-center gap-2 border-b border-(--ui-stroke-secondary) py-2 last:border-0', children: [
     jsxs('div', { className: 'w-20 shrink-0', children: [jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: label }), jsx('p', { className: 'mt-0.5 font-mono text-[10px] text-(--ui-text-tertiary)', children: profile.logical_model || `${role}-local` })] }),
     auxRole ? jsx('select', { className: compactInput, style: { ...themedSelect(), width: '7rem' }, value: 'compress', 'aria-label': 'Auxiliary 역할', onChange: () => {}, children: jsx('option', { style: themedOption, value: 'compress', children: 'compress' }) }) : null,
-    jsx('div', { className: 'flex h-8 w-24 shrink-0 items-center rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) px-2 font-mono text-xs text-(--ui-text-secondary)', 'aria-label': `${label} runtime`, children: runtimeKind === 'prism_ml' ? 'Prism-ML' : 'official' }),
+    jsx('div', { className: 'flex h-8 w-24 shrink-0 items-center rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) px-2 font-mono text-xs text-(--ui-text-secondary)', 'aria-label': `${label} runtime`, children: runtimeKind === 'prism_ml' ? 'Prism-ML' : runtimeKind === 'strata' ? 'Strata' : 'official' }),
     jsx('select', { className: compactInput, style: { ...themedSelect(), minWidth: '12rem', flex: '1 1 14rem' }, value: modelId, disabled: serverRunning || saving, 'aria-label': `${label} model`, onChange: event => onModelChange(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: '사용 안 함' }), ...models.map(model => jsx('option', { style: themedOption, value: model.id, children: model.label }, model.id))] }),
+    jsx('select', { className: compactInput, style: { ...themedSelect(), width: '12rem', minWidth: '10rem', flex: '0 1 12rem' }, value: presetId, disabled: serverRunning || saving || !modelId, 'aria-label': `${label} parameter preset`, onChange: event => onPresetChange(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: 'preset 사용 안 함' }), ...presets.map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
     jsx(Badge, { tone: running ? 'good' : modelId ? 'neutral' : 'warn', children: running ? 'running' : modelId ? role === 'compression' ? 'on demand' : 'selected' : 'not set' })
   ] })
 }
@@ -533,18 +534,24 @@ function ExecutionProfileRow({ role, label, auxRole, status, modelId, onModelCha
 function ExecutionProfilesPanel({ status, onRefresh }) {
   const mainProfile = status?.profiles?.main || {}
   const compressionProfile = status?.profiles?.compression || {}
+  const presetsQuery = useQuery({ queryKey: [ID, 'presets'], queryFn: () => api('/presets'), staleTime: 0, refetchOnWindowFocus: true })
+  const presets = presetsQuery.data?.presets || []
   const [mainModelId, setMainModelId] = useState(mainProfile.model_id || '')
   const [compressionModelId, setCompressionModelId] = useState(compressionProfile.model_id || '')
+  const [mainPresetId, setMainPresetId] = useState(mainProfile.preset_id || '')
+  const [compressionPresetId, setCompressionPresetId] = useState(compressionProfile.preset_id || '')
   const [starting, setStarting] = useState(false)
   const [savingRole, setSavingRole] = useState('')
   const [message, setMessage] = useState('')
   const running = Boolean(status?.server_running)
   useEffect(() => { setMainModelId(mainProfile.model_id || '') }, [mainProfile.model_id])
   useEffect(() => { setCompressionModelId(compressionProfile.model_id || '') }, [compressionProfile.model_id])
-  const saveProfile = async (role, value, previous, setter) => {
+  useEffect(() => { setMainPresetId(mainProfile.preset_id || '') }, [mainProfile.preset_id])
+  useEffect(() => { setCompressionPresetId(compressionProfile.preset_id || '') }, [compressionProfile.preset_id])
+  const saveModel = async (role, value, previous, setter, presetId) => {
     setter(value); setSavingRole(role); setMessage('')
     try {
-      await api(`/profiles/${role}`, { method: 'PUT', body: { model_id: value } })
+      await api(`/profiles/${role}`, { method: 'PUT', body: { model_id: value, preset_id: presetId } })
       await onRefresh()
       setMessage(`${role === 'main' ? 'Main' : 'Auxiliary'} 구성을 저장했습니다.`)
     } catch (cause) {
@@ -552,10 +559,21 @@ function ExecutionProfilesPanel({ status, onRefresh }) {
       setMessage(`모델 구성 저장 실패: ${cause?.message || String(cause)}`)
     } finally { setSavingRole('') }
   }
+  const savePreset = async (role, value, previous, setter, modelId) => {
+    setter(value); setSavingRole(role); setMessage('')
+    try {
+      await api(`/profiles/${role}`, { method: 'PUT', body: { model_id: modelId, preset_id: value } })
+      await onRefresh()
+      setMessage(`${role === 'main' ? 'Main' : 'Auxiliary'} parameter preset을 저장했습니다.`)
+    } catch (cause) {
+      setter(previous)
+      setMessage(`preset 구성 저장 실패: ${cause?.message || String(cause)}`)
+    } finally { setSavingRole('') }
+  }
   const start = async () => {
     setStarting(true); setMessage('')
     try {
-      const result = await api('/profiles/start', { method: 'POST', body: { main_model_id: mainModelId, compression_model_id: compressionModelId } })
+      const result = await api('/profiles/start', { method: 'POST', body: { main_model_id: mainModelId, main_preset_id: mainPresetId, compression_model_id: compressionModelId, compression_preset_id: compressionPresetId } })
       await onRefresh()
       setMessage(`${result.startup_role === 'main' ? 'Main' : 'Auxiliary'} 서버 시작 요청됨`)
     } catch (cause) { setMessage(`서버 시작 실패: ${cause?.message || String(cause)}`) } finally { setStarting(false) }
@@ -570,10 +588,10 @@ function ExecutionProfilesPanel({ status, onRefresh }) {
     catch (cause) { setMessage(`서버 중지 실패: ${cause?.message || String(cause)}`) } finally { setStarting(false) }
   }
   return jsxs('section', { className: 'mt-4 rounded-md border border-(--ui-stroke-secondary) p-3', 'aria-labelledby': 'llamacpp-profiles-title', children: [
-    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-2', children: [jsx('div', { children: [jsx('h2', { id: 'llamacpp-profiles-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Main / Auxiliary 모델' }), jsx('p', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: '각 역할은 선택하지 않아도 됩니다. Main이 선택되어 있으면 Main을 우선 로드합니다. Auxiliary만 선택하면 Auxiliary로 시작합니다.' })] }), jsx(Badge, { children: 'single worker' })] }),
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-2', children: [jsx('div', { children: [jsx('h2', { id: 'llamacpp-profiles-title', className: 'text-sm font-medium text-(--ui-text-primary)', children: 'Main / Auxiliary 모델' }), jsx('p', { className: 'mt-1 text-xs text-(--ui-text-tertiary)', children: '모델과 parameter preset을 역할별로 저장합니다. 같은 Strata worker를 사용해도 request parameter는 Main과 Auxiliary에 각각 적용됩니다.' })] }), jsx(Badge, { children: 'single worker' })] }),
     jsxs('div', { className: 'mt-3', children: [
-      jsx(ExecutionProfileRow, { role: 'main', label: 'Main', status, modelId: mainModelId, saving: Boolean(savingRole), onModelChange: value => saveProfile('main', value, mainModelId, setMainModelId) }),
-      jsx(ExecutionProfileRow, { role: 'compression', label: 'Auxiliary', auxRole: true, status, modelId: compressionModelId, saving: Boolean(savingRole), onModelChange: value => saveProfile('compression', value, compressionModelId, setCompressionModelId) })
+      jsx(ExecutionProfileRow, { role: 'main', label: 'Main', status, modelId: mainModelId, presetId: mainPresetId, presets, saving: Boolean(savingRole), onModelChange: value => saveModel('main', value, mainModelId, setMainModelId, mainPresetId), onPresetChange: value => savePreset('main', value, mainPresetId, setMainPresetId, mainModelId) }),
+      jsx(ExecutionProfileRow, { role: 'compression', label: 'Auxiliary', auxRole: true, status, modelId: compressionModelId, presetId: compressionPresetId, presets, saving: Boolean(savingRole), onModelChange: value => saveModel('compression', value, compressionModelId, setCompressionModelId, compressionPresetId), onPresetChange: value => savePreset('compression', value, compressionPresetId, setCompressionPresetId, compressionModelId) })
     ] }),
     jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2', children: [running ? jsx('button', { className: compactDanger, disabled: starting, onClick: stop, children: '서버 중지' }) : jsx('button', { className: compactPrimary, disabled: starting || (!mainModelId && !compressionModelId), onClick: start, children: starting ? '시작 중…' : '서버 시작' }), message ? jsx('span', { className: `text-[11px] ${message.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-tertiary)'}`, role: 'status', children: message }) : null] })
   ] })
@@ -651,61 +669,6 @@ function RuntimeCard({ status, jobs, onRefresh, pushConnected }) {
     jsx(JobProgress, { job: runtimeJob }), jsx(JobProgress, { job: serverJob }), jsx(UnexpectedExitPanel, { diagnostic: status?.last_unexpected_exit }), jsx(CoordinatorStatusPanel, { status })
   ] })
 }
-function ParameterSummary({ options, order }) {
-  const keys = order?.length ? order.filter(key => Object.prototype.hasOwnProperty.call(options || {}, key)) : Object.keys(options || {})
-  const entries = keys.map(key => [key, options[key]])
-  const [expanded, setExpanded] = useState(false)
-  if (!entries.length) return null
-  const visible = expanded ? entries : entries.slice(0, 4)
-  return jsxs('div', { className: 'mt-2 flex flex-wrap gap-1.5 text-xs', children: [
-    jsx('div', { className: 'flex flex-wrap gap-1.5', children: visible.map(([key, value]) => jsx('span', { className: 'rounded bg-(--ui-bg-tertiary) px-2 py-1 text-(--ui-text-secondary)', children: `${key}(${value})` }, key)) }),
-    entries.length > 4 ? jsx('button', { className: 'px-1 text-(--ui-accent) hover:underline', onClick: () => setExpanded(current => !current), children: expanded ? '접기' : `더보기 (${entries.length - 4}개)` }) : null
-  ] })
-}
-
-function ModelRow({ model, status, refresh }) {
-  const [busy, setBusy] = useState(false)
-  const [selectedPresetId, setSelectedPresetId] = useState('')
-  const [presetMessage, setPresetMessage] = useState('')
-  const isActive = status?.active_model_id === model.id
-  const display = model.id || 'unknown model'
-  const parameterQuery = useQuery({ queryKey: [ID, 'model-settings', model.id], queryFn: () => api(`/settings/${encodeURIComponent(model.id)}`), refetchOnWindowFocus: false })
-  const presetsQuery = useQuery({ queryKey: [ID, 'presets'], queryFn: () => api('/presets'), staleTime: 0, refetchOnMount: 'always', refetchOnWindowFocus: true })
-  useEffect(() => { const applied = status?.model_presets?.[model.id] || ''; setSelectedPresetId(applied) }, [status?.model_presets?.[model.id], model.id])
-  const activeState = status?.server_running && isActive ? 'running' : 'stopped'
-  const compactSize = String(model.size_label || 'unknown').replace(/\s+/g, '')
-  const unregister = async () => { setBusy(true); try { await api(`/models/${encodeURIComponent(model.id)}/registration`, { method: 'DELETE' }); await refresh() } finally { setBusy(false) } }
-  const applyPreset = async () => {
-    if (!selectedPresetId) return
-    setBusy(true); setPresetMessage('')
-    try {
-      const result = await api(`/presets/${encodeURIComponent(selectedPresetId)}/apply`, { method: 'POST', body: { model_id: model.id } })
-      await parameterQuery.refetch()
-      const omitted = result.omitted_options?.length ? ` · 제외: ${result.omitted_options.join(', ')}` : ''
-      setPresetMessage(`preset으로 모델 설정을 교체했습니다. 다음 server 시작에 반영됩니다${omitted}`)
-      refresh()
-    } catch (cause) { setPresetMessage(`preset 적용 실패: ${cause?.message || String(cause)}`) } finally { setBusy(false) }
-  }
-  return jsxs('article', { className: 'border-b border-(--ui-stroke-secondary) py-5 last:border-0', 'aria-label': `${display} 등록 모델`, children: [
-    jsxs('div', { className: 'flex flex-wrap items-center gap-x-3 gap-y-2', children: [
-      jsx('h3', { className: 'min-w-0 break-words font-medium', title: display, children: display }),
-      jsx(PrismOnlyHint, { model: display }),
-      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', 'aria-hidden': true, children: '|' }),
-      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `크기(${compactSize})` }),
-      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', 'aria-hidden': true, children: '|' }),
-      jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: `상태(${activeState})` }),
-      jsx('button', { className: 'ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-lg text-(--ui-text-secondary) transition hover:bg-(--dt-destructive)/10 hover:text-(--dt-destructive) disabled:cursor-not-allowed disabled:opacity-50', disabled: busy || (status?.server_running && isActive), onClick: unregister, title: '모델 등록에서 제거', 'aria-label': `${display} 모델 등록 해제`, children: '×' })
-    ] }),
-    jsx(ParameterSummary, { options: parameterQuery.data?.options, order: parameterQuery.data?.order }),
-    jsxs('div', { className: 'mt-3 flex flex-wrap items-center gap-2 rounded-md bg-(--ui-bg-tertiary) p-2', 'data-testid': 'model-card-presets', children: [
-      jsx('label', { className: 'shrink-0 text-xs font-medium text-(--ui-text-primary)', htmlFor: `model-preset-${model.id}`, children: 'parameter preset' }),
-      jsx('select', { id: `model-preset-${model.id}`, className: 'min-w-44 flex-1 rounded-md border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-xs text-(--ui-text-primary)', style: themedSelect(), value: selectedPresetId, onChange: event => setSelectedPresetId(event.target.value), 'aria-label': `${display} preset 선택`, children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
-      jsx('button', { className: compactPrimary, disabled: busy || !selectedPresetId, onClick: applyPreset, children: '적용' }),
-      presetMessage ? jsx('span', { className: `basis-full text-xs ${presetMessage.includes('실패') ? 'text-(--dt-destructive)' : 'text-(--ui-text-secondary)'}`, role: 'status', children: presetMessage }) : null
-    ] })
-  ] })
-}
-
 function ParameterControl({ id, option, value, onChange, onBlur, onKeyDown, error, describedBy, ariaLabel, className = input, allowEmpty = false }) {
   if (option && !option.requires_value) return jsx('span', { className: `min-w-0 flex h-8 flex-1 items-center px-2 text-xs ${muted}`, role: 'status', children: 'flag' })
   const common = { id, value, 'aria-label': ariaLabel, 'aria-invalid': Boolean(error), 'aria-describedby': describedBy, onChange, onBlur, onKeyDown }
@@ -824,7 +787,7 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
       jsx('p', { className: `mb-2 text-xs ${muted}`, children: 'preset을 선택하면 해당 preset의 parameter만 표시됩니다. preset 선택을 해제하면 parameter가 비워집니다.' }),
       jsxs('div', { className: 'mb-4 rounded-md bg-(--ui-bg-tertiary) p-3', children: [
         jsx('p', { className: 'mb-1 text-xs font-medium text-(--ui-text-primary)', children: 'parameter preset' }),
-        jsx('p', { className: `mb-2 text-xs ${muted}`, children: '저장은 선택한 preset 자체의 parameter를 저장합니다. 모델별 preset 적용은 모델 탭에서만 변경합니다.' }),
+        jsx('p', { className: `mb-2 text-xs ${muted}`, children: '저장은 선택한 preset 자체의 parameter를 저장합니다. 역할별 preset 선택은 운영 탭에서 변경합니다.' }),
         jsxs('div', { className: 'flex items-stretch gap-2', 'data-testid': 'preset-actions', children: [
           jsx('select', { className: `${compactInput} min-w-0 flex-1`, style: { ...themedSelect(), width: 'auto', minWidth: 0, flex: '1 1 auto' }, value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...(presetsQuery.data?.presets || []).map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
           jsx('button', { className: `${compactPrimary} shrink-0`, disabled: !selectedPresetId || saving, onClick: saveSelectedPreset, children: '저장' }),
@@ -938,9 +901,9 @@ function Page() {
   const openRegister = repo => setWizard({ mode: 'register', repo })
   const deleteDownloaded = async repoId => { if (!window.confirm(`'${repoId}' HF cache를 삭제할까요?`)) return; try { await api('/hf-models/delete', { method: 'POST', body: { repo_id: repoId } }); await hfModels.refetch() } catch (cause) { window.alert(`모델 삭제 실패: ${cause?.message || String(cause)}`) } }
   const parameterModel = models.find(model => model.id === data?.active_model_id) || models.find(model => model.id === data?.profiles?.main?.model_id) || models[0]
-  return jsxs('main', { className: 'llamacpp-selectable mx-auto max-w-5xl p-4 sm:p-6', children: [jsx('style', { children: SELECTABLE_TEXT_STYLE }), jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus, pushConnected }) : null,
-    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '등록 모델과 다운받은 HF cache 모델을 runtime 종류와 관계없이 모두 표시합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode, pushConnected }) : null, jsx('section', { className: `${card} mt-4 px-5`, children: status.isLoading ? jsx('p', { className: `py-6 ${muted}`, children: '상태를 불러오는 중…' }) : models.length ? models.map(model => jsx(ModelRow, { model, status: data, refresh: refreshStatus }, model.id)) : jsx('p', { className: `py-8 text-center ${muted}`, children: '등록된 모델이 없습니다.' }) }), jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
-    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: 'parameter preset' }), jsx('p', { className: `mt-1 ${muted}`, children: '실행 중인 모델이 없으면 Main으로 선택한 모델의 parameter preset을 표시합니다.' }), parameterModel ? jsx(ModelSettingsEditor, { modelId: parameterModel.id, appliedPresetId: data?.model_presets?.[parameterModel.id] || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '등록된 모델이 없습니다.' })] }) : null
+  return jsxs('main', { className: 'llamacpp-selectable mx-auto max-w-5xl p-4 sm:p-6', draggable: false, children: [jsx('style', { children: SELECTABLE_TEXT_STYLE }), jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus, pushConnected }) : null,
+    tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '다운받은 HF cache 모델과 모델 다운로드만 관리합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode, pushConnected }) : null, jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
+    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: 'parameter preset' }), jsx('p', { className: `mt-1 ${muted}`, children: 'preset을 만들고 편집한 뒤 운영 탭에서 Main과 Auxiliary에 각각 선택합니다. Strata sampling parameter는 request마다 역할별로 적용됩니다.' }), parameterModel ? jsx(ModelSettingsEditor, { modelId: parameterModel.id, appliedPresetId: data?.profiles?.main?.preset_id || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '등록된 모델이 없습니다.' })] }) : null
   ] })
 }
 export default {

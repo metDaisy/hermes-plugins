@@ -190,13 +190,36 @@ def rewrite_logical_model(body: bytes, state: dict[str, Any]) -> bytes:
     if not model_id:
         raise HTTPException(status_code=503, detail=f"{role} execution profile is not configured")
 
+    preset_options = profile.get("preset_options") if isinstance(profile, dict) else None
+    role_options = preset_options if isinstance(preset_options, dict) else {}
     model_settings = state.get("model_settings")
     settings = model_settings.get(model_id) if isinstance(model_settings, dict) else None
-    saved_effort = settings.get("reasoning-effort") if isinstance(settings, dict) else None
+    saved_effort = role_options.get("reasoning-effort")
+    if saved_effort is None and isinstance(settings, dict):
+        saved_effort = settings.get("reasoning-effort")
     normalized_effort = str(saved_effort).strip() if saved_effort is not None else ""
     request_effort = str(payload.get("reasoning_effort") or "").strip()
     if not request_effort and normalized_effort:
         payload["reasoning_effort"] = normalized_effort
+
+    if isinstance(profile, dict) and profile.get("runtime_kind") == "strata":
+        request_options = {
+            "temp": ("temperature", float),
+            "top-p": ("top_p", float),
+            "top-k": ("top_k", int),
+            "min-p": ("min_p", float),
+            "repeat-penalty": ("repetition_penalty", float),
+            "frequency-penalty": ("frequency_penalty", float),
+            "presence-penalty": ("presence_penalty", float),
+            "seed": ("seed", int),
+        }
+        for option_key, (request_key, converter) in request_options.items():
+            if request_key in payload or option_key not in role_options:
+                continue
+            try:
+                payload[request_key] = converter(str(role_options[option_key]).strip())
+            except (TypeError, ValueError):
+                continue
 
     if state.get("execution_mode") != "native_router":
         payload["model"] = model_id

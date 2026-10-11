@@ -14,6 +14,7 @@ class ExecutionProfileService:
     save_state: Callable[[dict[str, Any]], None]
     accepts: Callable[[str, str], bool]
     mutate_state: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]] | None = None
+    resolve_preset: Callable[[str], dict[str, Any] | None] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         state = self.load_state()
@@ -55,13 +56,14 @@ class ExecutionProfileService:
                 "runtime_kind": profile["runtime_kind"],
                 "model_id": profile["model_id"],
                 "preset_id": profile["preset_id"],
+                "preset_options": profile["preset_options"],
             }
             for role, profile in normalized.items()
             if profile["configured"]
         }
         if normalized_storage != profiles:
             def persist_normalized(current: dict[str, Any]) -> None:
-                current["execution_mode"] = "exclusive_swap"
+                current.setdefault("execution_mode", "exclusive_swap")
                 current["execution_profiles"] = normalized_storage
 
             if self.mutate_state is not None:
@@ -95,10 +97,20 @@ class ExecutionProfileService:
             runtime_kind = stored_runtime if stored_runtime in {"official", "prism_ml", "strata"} else self._runtime_for_model(model_id)
             if not self.accepts(runtime_kind, model_id):
                 raise ValueError("선택한 모델은 해당 runtime과 호환되지 않습니다")
+            preset_id = str(body.get("preset_id") or "").strip()
+            preset_options: dict[str, str] = {}
+            if preset_id:
+                preset = self.resolve_preset(preset_id) if self.resolve_preset is not None else None
+                if self.resolve_preset is not None and preset is None:
+                    raise ValueError("선택한 parameter preset을 찾을 수 없습니다")
+                raw_options = (preset or {}).get("options")
+                if isinstance(raw_options, dict):
+                    preset_options = {str(key): str(value) for key, value in raw_options.items()}
             prepared[role] = {
                 "runtime_kind": runtime_kind,
                 "model_id": model_id,
-                "preset_id": str(body.get("preset_id") or "").strip(),
+                "preset_id": preset_id,
+                "preset_options": preset_options,
             }
 
         def apply(current: dict[str, Any]) -> None:
@@ -131,12 +143,17 @@ class ExecutionProfileService:
     def _normalize(cls, role: str, raw: Any) -> dict[str, Any]:
         profile = raw if isinstance(raw, dict) else {}
         model_id = str(profile.get("model_id") or "")
+        raw_preset_options = profile.get("preset_options")
         return {
             "role": role,
             "logical_model": LOGICAL_MODELS[role],
             "runtime_kind": cls._runtime_for_model(model_id),
             "model_id": model_id,
             "preset_id": str(profile.get("preset_id") or ""),
+            "preset_options": (
+                {str(key): str(value) for key, value in raw_preset_options.items()}
+                if isinstance(raw_preset_options, dict) else {}
+            ),
             "configured": bool(model_id),
         }
 
@@ -156,8 +173,10 @@ class ExecutionProfileCoordinator:
         profiles = value if isinstance(value, dict) else {}
         return {
             role: {
-                key: str(profile.get(key) or "")
-                for key in ("runtime_kind", "model_id", "preset_id")
+                "runtime_kind": str(profile.get("runtime_kind") or ""),
+                "model_id": str(profile.get("model_id") or ""),
+                "preset_id": str(profile.get("preset_id") or ""),
+                "preset_options": dict(profile.get("preset_options") or {}),
             }
             for role, profile in profiles.items()
             if isinstance(profile, dict)

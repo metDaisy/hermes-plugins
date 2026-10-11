@@ -36,12 +36,14 @@ def create_router(context: ExecutionProfileRouteContext) -> APIRouter:
     def start_profiles(body: dict[str, Any]) -> dict[str, Any]:
         main_model_id = str(body.get("main_model_id") or "").strip()
         compression_model_id = str(body.get("compression_model_id") or "").strip()
+        main_preset_id = str(body.get("main_preset_id") or "").strip()
+        compression_preset_id = str(body.get("compression_preset_id") or "").strip()
         if not main_model_id and not compression_model_id:
             raise HTTPException(status_code=422, detail="Main 또는 Auxiliary 모델을 하나 이상 선택해야 합니다.")
         try:
             context.save_many({
-                "main": {"model_id": main_model_id},
-                "compression": {"model_id": compression_model_id},
+                "main": {"model_id": main_model_id, "preset_id": main_preset_id},
+                "compression": {"model_id": compression_model_id, "preset_id": compression_preset_id},
             })
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

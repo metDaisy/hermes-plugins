@@ -1873,6 +1873,71 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertEqual(rewritten["model"], "large")
         self.assertEqual(rewritten["reasoning_effort"], "high")
 
+    def test_strata_same_model_uses_distinct_role_request_presets(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        state = {
+            "execution_mode": "exclusive_swap",
+            "execution_profiles": {
+                "main": {
+                    "runtime_kind": "strata", "model_id": "strata-iq3_xxs",
+                    "preset_id": "main-preset",
+                    "preset_options": {"temp": "0.7", "top-p": "0.9", "top-k": "40"},
+                },
+                "compression": {
+                    "runtime_kind": "strata", "model_id": "strata-iq3_xxs",
+                    "preset_id": "compress-preset",
+                    "preset_options": {"temp": "0", "top-p": "1", "top-k": "1"},
+                },
+            },
+        }
+
+        main = json.loads(rewrite_logical_model(
+            b'{"model":"main-local","messages":[]}', state,
+        ))
+        compression = json.loads(rewrite_logical_model(
+            b'{"model":"compression-local","messages":[]}', state,
+        ))
+
+        self.assertEqual(main["model"], "strata-iq3_xxs")
+        self.assertEqual(main["temperature"], 0.7)
+        self.assertEqual(main["top_p"], 0.9)
+        self.assertEqual(main["top_k"], 40)
+        self.assertEqual(compression["temperature"], 0.0)
+        self.assertEqual(compression["top_p"], 1.0)
+        self.assertEqual(compression["top_k"], 1)
+
+    def test_strata_request_parameter_catalog_is_available_for_presets(self) -> None:
+        catalog = {item["key"]: item for item in api._strata_request_option_catalog()}
+
+        self.assertEqual(
+            set(catalog),
+            {"temp", "top-p", "top-k", "min-p", "repeat-penalty", "frequency-penalty", "presence-penalty", "seed"},
+        )
+        self.assertEqual(catalog["temp"]["value_kind"], "number")
+        self.assertEqual(catalog["top-k"]["value_kind"], "integer")
+        self.assertTrue(all(item["requires_value"] for item in catalog.values()))
+
+    def test_explicit_strata_request_sampling_overrides_role_preset(self) -> None:
+        from dashboard.inference_proxy import rewrite_logical_model
+
+        state = {
+            "execution_mode": "exclusive_swap",
+            "execution_profiles": {
+                "main": {
+                    "runtime_kind": "strata", "model_id": "strata-iq3_xxs",
+                    "preset_options": {"temp": "0.7", "top-p": "0.9"},
+                },
+            },
+        }
+
+        rewritten = json.loads(rewrite_logical_model(
+            b'{"model":"main-local","temperature":0.2,"messages":[]}', state,
+        ))
+
+        self.assertEqual(rewritten["temperature"], 0.2)
+        self.assertEqual(rewritten["top_p"], 0.9)
+
     def test_proxy_uses_model_reasoning_effort_when_request_omits_it(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
 
@@ -2087,7 +2152,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("pushConnected ? false", source)
         self.assertNotIn("push 연결", source)
         self.assertIn("Auxiliary", source)
-        self.assertIn("Main이 선택되어 있으면 Main을 우선 로드합니다", source)
+        self.assertIn("모델과 parameter preset을 역할별로 저장합니다", source)
         self.assertIn("value: 'compress'", source)
         self.assertNotIn("`/profiles/${role}/start`", source)
         self.assertIn("api('/profiles/start'", source)
@@ -2101,7 +2166,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         profile_row = source[source.index("function ExecutionProfileRow"):source.index("function ExecutionProfilesPanel")]
         self.assertNotIn("children: '시작'", profile_row)
         self.assertNotIn("children: '중지'", profile_row)
-        self.assertIn("modelId.startsWith('Ternary-Bonsai')", source)
+        self.assertIn("profile.runtime_kind || 'official'", source)
+        self.assertIn("runtimeKind === 'strata' ? 'Strata'", source)
         self.assertNotIn("compressionFallback", source)
         self.assertIn("disabled: starting || (!mainModelId && !compressionModelId)", source)
         log_panel = source[source.index("function ServerLogPanel"):source.index("function UnexpectedExitPanel")]
@@ -2204,7 +2270,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertNotIn("분리 로그", source)
         self.assertIn("/lifecycle/lease", source)
         self.assertIn("pagehide", source)
-        runtime_card = source[source.index("function RuntimeCard"):source.index("function ParameterSummary")]
+        runtime_card = source[source.index("function RuntimeCard"):source.index("function ParameterControl")]
         self.assertNotIn("openFolder", runtime_card)
         self.assertNotIn("children: '열기'", runtime_card)
         self.assertNotIn("'aria-label': 'runtime 선택'", runtime_card)
@@ -2240,7 +2306,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         page = source[source.index("function Page"):source.index("export default")]
         self.assertIn("queryKey: [ID, 'hf-models']", page)
         self.assertNotIn("Prism-ML 호환 다운로드 모델이 없습니다.", page)
-        self.assertIn("runtime 종류와 관계없이 모두 표시합니다.", page)
+        self.assertIn("다운받은 HF cache 모델과 모델 다운로드만 관리합니다.", page)
 
     def test_parameter_preset_tab_uses_configured_main_model_while_server_is_stopped(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
@@ -2256,6 +2322,7 @@ class LlamaCppManagerTests(unittest.TestCase):
             source.index("\n  ] })", source.index("tab === 'parameters'"))
         ]
         self.assertIn("ModelSettingsEditor, { modelId: parameterModel.id", parameter_tab)
+        self.assertIn("appliedPresetId: data?.profiles?.main?.preset_id || ''", parameter_tab)
         self.assertNotIn("activeModel ?", parameter_tab)
 
     def test_parameter_preset_actions_and_flag_rows_stay_inline(self) -> None:
@@ -2289,6 +2356,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("onClick: saveSelectedPreset, children: '저장'", editor)
         self.assertNotIn("/presets/${encodeURIComponent(selectedPresetId)}/apply", editor)
         self.assertIn("선택한 preset 자체의 parameter를 저장합니다.", editor)
+        self.assertIn("역할별 preset 선택은 운영 탭에서 변경합니다.", editor)
 
     def test_model_cards_use_inline_download_panel_and_unregister_action(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
@@ -2298,28 +2366,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("role: 'compression'", execution)
         self.assertNotIn("activeTab", execution)
 
-        model_row = source[source.index("function ModelRow"):source.index("function ParameterControl")]
-        self.assertIn("children: 'parameter preset'", model_row)
-        self.assertIn("children: '적용'", model_row)
-        self.assertIn("children: '×'", model_row)
-        self.assertIn("disabled: busy || (status?.server_running && isActive)", model_row)
-        self.assertNotIn("absolute right-0 top-4", model_row)
-        header = model_row[model_row.index("jsxs('div', { className: 'flex flex-wrap items-center"):model_row.index("jsx(ParameterSummary")]
-        self.assertIn("children: '×'", header)
-        self.assertNotIn("const activate", model_row)
-        self.assertNotIn("api('/activate'", model_row)
-        self.assertNotIn("children: '선택'", model_row)
-        self.assertNotIn("children: '선택됨'", model_row)
-        self.assertIn("/registration`, { method: 'DELETE'", model_row)
-        self.assertNotIn("window.confirm", model_row)
-        self.assertNotIn("children: '삭제'", model_row)
-        self.assertNotIn("대기 중", model_row)
-        self.assertIn("const compactSize = String(model.size_label || 'unknown').replace(/\\s+/g, '')", model_row)
-        self.assertIn("children: '|'", header)
-        self.assertIn("`크기(${compactSize})`", model_row)
-        self.assertIn("`상태(${activeState})`", model_row)
-        self.assertNotIn("용량 -", model_row)
-        self.assertNotIn("상태 -", model_row)
+        self.assertNotIn("function ModelRow", source)
+        self.assertNotIn("function ParameterSummary", source)
 
         wizard = source[source.index("function RegisterWizard"):source.index("function DownloadedModelRow")]
         self.assertNotIn("fixed inset-0", wizard)
@@ -2344,8 +2392,33 @@ class LlamaCppManagerTests(unittest.TestCase):
         page = source[source.index("function Page"):source.index("export default")]
         models_branch = page[page.index("tab === 'models'"):page.index("tab === 'parameters'")]
         self.assertIn("wizard ? jsx(RegisterWizard", models_branch)
-        self.assertLess(models_branch.index("wizard ? jsx(RegisterWizard"), models_branch.index("models.length ? models.map"))
+        self.assertLess(models_branch.index("wizard ? jsx(RegisterWizard"), models_branch.index("jsx(DownloadedModelRow"))
         self.assertNotIn("wizard ? jsx(RegisterWizard", page[page.index("tab === 'parameters'"):])
+
+    def test_operations_selects_role_preset_and_models_tab_only_lists_downloads(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        profile_row = source[source.index("function ExecutionProfileRow"):source.index("function ExecutionProfilesPanel")]
+        profiles_panel = source[source.index("function ExecutionProfilesPanel"):source.index("function CoordinatorStatusPanel")]
+        page = source[source.index("function Page"):source.index("export default")]
+
+        self.assertIn("`${label} parameter preset`", profile_row)
+        self.assertLess(profile_row.index("`${label} model`"), profile_row.index("`${label} parameter preset`"))
+        self.assertIn("presetId", profile_row)
+        self.assertIn("body: { model_id: value, preset_id: presetId }", profiles_panel)
+        self.assertIn("body: { model_id: modelId, preset_id: value }", profiles_panel)
+        self.assertNotIn("jsx(ModelRow", page)
+        self.assertNotIn("등록 모델과 다운받은 HF cache 모델", page)
+        self.assertIn("children: '다운받은 모델'", page)
+        self.assertIn("children: '+ 모델 다운로드'", page)
+        self.assertIn("jsx(DownloadedModelRow", page)
+
+    def test_page_keeps_drag_copy_selection_enabled(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+        self.assertIn("user-select: text !important", source)
+        self.assertIn("-webkit-user-select: text !important", source)
+        self.assertIn("-webkit-user-drag: none", source)
+        self.assertIn("draggable: false", source)
 
     def test_custom_runtime_resolves_directory_and_explicit_executable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -2497,14 +2570,16 @@ class LlamaCppManagerTests(unittest.TestCase):
             self.assertEqual(applied["options"], {"ctx-size": "8192"})
             self.assertEqual(applied["omitted_options"], ["spec-draft-n-max", "spec-type"])
 
-    def test_model_card_exposes_applied_preset_and_running_state_before_server_start(self) -> None:
+    def test_operations_exposes_role_presets_before_server_start(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertNotIn("모델 시작 preset", source)
-        self.assertIn("model_presets", source)
-        self.assertIn("children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택'", source)
-        self.assertIn("/presets/${encodeURIComponent(selectedPresetId)}/apply", source)
-        self.assertIn("const activeState = status?.server_running && isActive ? 'running' : 'stopped'", source)
-        self.assertIn("children: `상태(${activeState})`", source)
+        self.assertIn("const presetsQuery = useQuery({ queryKey: [ID, 'presets']", source)
+        self.assertIn("'aria-label': `${label} parameter preset`", source)
+        self.assertIn("presetId: mainPresetId", source)
+        self.assertIn("presetId: compressionPresetId", source)
+        self.assertIn("main_preset_id: mainPresetId", source)
+        self.assertIn("compression_preset_id: compressionPresetId", source)
+        self.assertNotIn("function ModelRow", source)
         self.assertNotIn("children: '소스'", source)
         self.assertNotIn("server 사용 중", source)
 
@@ -2649,7 +2724,7 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("children: '이름 변경'", desktop_source)
         self.assertNotIn("모델 설정 저장", desktop_source)
         self.assertIn("setDraft(next)", desktop_source)
-        self.assertIn("appliedPresetId: data?.model_presets?.[parameterModel.id] || ''", desktop_source)
+        self.assertIn("appliedPresetId: data?.profiles?.main?.preset_id || ''", desktop_source)
         self.assertNotIn("queryKey: [ID, 'model-card-presets']", desktop_source)
         self.assertNotIn("queryKey: [ID, 'parameter-presets']", desktop_source)
         self.assertIn("queryKey: [ID, 'presets']", desktop_source)
@@ -2657,8 +2732,8 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'presets'] })", desktop_source)
         self.assertIn("queryClient.invalidateQueries({ queryKey: [ID, 'status'] })", desktop_source)
         self.assertIn("children: preset.name", desktop_source)
-        model_row = desktop_source[desktop_source.index("function ModelRow"):desktop_source.index("function ParameterControl")]
-        self.assertLess(model_row.index("jsx(ParameterSummary"), model_row.index("'data-testid': 'model-card-presets'"))
+        self.assertNotIn("function ModelRow", desktop_source)
+        self.assertNotIn("'data-testid': 'model-card-presets'", desktop_source)
 
 
     def test_prism_profile_resolves_managed_runtime_after_global_official_selection(self) -> None:

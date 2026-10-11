@@ -1072,7 +1072,10 @@ def _execution_profile_accepts(runtime_kind: str, model_id: str) -> bool:
 
 
 def _execution_profiles_service() -> ExecutionProfileService:
-    return ExecutionProfileService(_state, _save_state, _execution_profile_accepts, _mutate_state)
+    return ExecutionProfileService(
+        _state, _save_state, _execution_profile_accepts, _mutate_state,
+        resolve_preset=_presets_store().get,
+    )
 
 
 def execution_profiles() -> dict[str, Any]:
@@ -1329,29 +1332,66 @@ def _option_cache_identity(executable: Path) -> tuple[str, str, str, str, int, i
         return ("5", str(executable), tag, backend, 0, 0)
 
 
+def _strata_request_option_catalog() -> list[dict[str, Any]]:
+    """Return Strata's per-request sampling controls in llama-style preset keys."""
+    rows = [
+        ("temp", "temperature", "number"),
+        ("top-p", "top_p", "number"),
+        ("top-k", "top_k", "integer"),
+        ("min-p", "min_p", "number"),
+        ("repeat-penalty", "repetition_penalty", "number"),
+        ("frequency-penalty", "frequency_penalty", "number"),
+        ("presence-penalty", "presence_penalty", "number"),
+        ("seed", "seed", "integer"),
+    ]
+    return [
+        {
+            "key": key,
+            "name": f"--{key}",
+            "aliases": [f"--{key}"],
+            "value_hint": "N",
+            "description": f"Strata request parameter: {request_key}",
+            "requires_value": True,
+            "default_value": None,
+            "choices": [],
+            "value_kind": value_kind,
+            "toggle": False,
+        }
+        for key, request_key, value_kind in rows
+    ]
+
+
+def _with_strata_request_options(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = list(catalog)
+    existing = {str(item.get("key") or "") for item in merged}
+    merged.extend(item for item in _strata_request_option_catalog() if item["key"] not in existing)
+    return merged
+
+
 def _option_list() -> list[dict[str, Any]]:
     global _option_catalog_cache
     executable = _server_executable()
     if executable is None:
-        return []
+        return _copy_options(_strata_request_option_catalog())
     identity = _option_cache_identity(executable)
     with _option_cache_lock:
         if _option_catalog_cache and _option_catalog_cache[0] == identity:
-            return _copy_options(_option_catalog_cache[1])
+            return _copy_options(_with_strata_request_options(_option_catalog_cache[1]))
 
         persisted = _read_json(OPTION_METADATA_CACHE_PATH, {})
         cached_identity = persisted.get("identity") if isinstance(persisted, dict) else None
         cached_options = persisted.get("options") if isinstance(persisted, dict) else None
         if (isinstance(cached_identity, list) and tuple(cached_identity) == identity
                 and isinstance(cached_options, list) and all(isinstance(item, dict) for item in cached_options)):
-            _option_catalog_cache = (identity, cached_options)
-            return _copy_options(cached_options)
+            catalog = _with_strata_request_options(cached_options)
+            _option_catalog_cache = (identity, catalog)
+            return _copy_options(catalog)
 
         result = subprocess.run([str(executable), "--help"], capture_output=True, check=False,
                                 text=True, encoding="utf-8", errors="replace", timeout=30)
         if result.returncode != 0:
-            return []
-        catalog = ServerOptionCatalog.parse_help(result.stdout)
+            return _copy_options(_strata_request_option_catalog())
+        catalog = _with_strata_request_options(ServerOptionCatalog.parse_help(result.stdout))
         _option_catalog_cache = (identity, catalog)
         try:
             _write_json(OPTION_METADATA_CACHE_PATH, {"identity": list(identity), "options": catalog})
@@ -1529,6 +1569,23 @@ def _parameters() -> ParameterSettingsService:
 _PARAMETER_ROUTE_CONTEXT: ParameterRouteContext | None = None
 
 
+def _refresh_execution_profile_preset(preset_id: str, options: dict[str, str] | None) -> None:
+    def update(current: dict[str, Any]) -> None:
+        profiles = current.get("execution_profiles")
+        if not isinstance(profiles, dict):
+            return
+        for profile in profiles.values():
+            if not isinstance(profile, dict) or str(profile.get("preset_id") or "") != preset_id:
+                continue
+            if options is None:
+                profile["preset_id"] = ""
+                profile["preset_options"] = {}
+            else:
+                profile["preset_options"] = dict(options)
+
+    _mutate_state(update)
+
+
 def _parameter_route_context() -> ParameterRouteContext:
     # NOTE: keep the module-level cache so ``patch.object(api, ...)`` in the
     # public-API regression tests is still honoured every call. A stale cached
@@ -1539,6 +1596,7 @@ def _parameter_route_context() -> ParameterRouteContext:
     return ParameterRouteContext(
         options=_option_list, executable=_server_executable, parameters=_parameters,
         server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
+        refresh_profile_preset=_refresh_execution_profile_preset,
     )
 
 

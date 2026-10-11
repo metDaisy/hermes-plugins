@@ -17,6 +17,7 @@ class ParameterRouteContext:
     server_requires_restart: Callable[[], bool]
     runtime_kind: Callable[[dict[str, Any]], str]
     state: Callable[[], dict[str, Any]]
+    refresh_profile_preset: Callable[[str, dict[str, str] | None], None] = lambda _preset_id, _options: None
 
 
 # --- Framework-independent transport handlers -----------------------------
@@ -57,11 +58,14 @@ def apply_preset(context: ParameterRouteContext, preset_id: str, body: dict[str,
 
 def rename_preset(context: ParameterRouteContext, preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     options = body.get("options") if "options" in body else None
-    return {"preset": context.parameters().rename_preset(preset_id, body.get("name"), options)}
+    preset = context.parameters().rename_preset(preset_id, body.get("name"), options)
+    context.refresh_profile_preset(preset_id, dict(preset.get("options") or {}))
+    return {"preset": preset}
 
 
 def delete_preset(context: ParameterRouteContext, preset_id: str) -> dict[str, Any]:
     context.parameters().delete_preset(preset_id)
+    context.refresh_profile_preset(preset_id, None)
     return {"ok": True, "preset_id": preset_id}
 
 
