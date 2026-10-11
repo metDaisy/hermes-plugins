@@ -1,13 +1,13 @@
 name: llamacpp-pack
 description: Install the llama.cpp manager and its Hermes Model Provider adapter.
 author: metDaisy
-version: 0.3.28
+version: 0.3.29
 plugins:
   - repo: metDaisy/hermes-plugins
     subdir: plugins/llamacpp
-    ref: de608bb9d25b91ee9170bc67f61b54990b4e6410
+    ref: 5c507a5f1b1aca50a88c5cfd96db80f624b65296
   - repo: metDaisy/hermes-plugins
     subdir: plugins/llamacpp-provider
-    ref: de608bb9d25b91ee9170bc67f61b54990b4e6410
+    ref: 5c507a5f1b1aca50a88c5cfd96db80f624b65296
 config: {}
 skills: []
