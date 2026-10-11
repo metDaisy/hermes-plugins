@@ -35,6 +35,7 @@ try:
     from .application.huggingface_model_workflow import HuggingFaceModelWorkflow
     from .application.job_manager import JobManager
     from .application.json_http import JsonHttpClient
+    from .application.model_context import model_context_length
     from .application.model_lifecycle import ModelLifecycleService
     from .application.model_registry import RegisteredModelService
     from .application.model_policy import ModelPolicyService
@@ -85,6 +86,7 @@ except ImportError:
     from application.huggingface_model_workflow import HuggingFaceModelWorkflow
     from application.job_manager import JobManager
     from application.json_http import JsonHttpClient
+    from application.model_context import model_context_length
     from application.model_lifecycle import ModelLifecycleService
     from application.model_registry import RegisteredModelService
     from application.model_policy import ModelPolicyService
@@ -663,18 +665,13 @@ def _register_custom_endpoint(port: int, model_id: str) -> dict[str, Any]:
 
 def _profile_provider_models() -> dict[str, int]:
     snapshot = execution_profiles()
+    state = _state()
     profile_models: dict[str, int] = {}
-    options_by_model = _load_options()
     for profile in snapshot["profiles"].values():
         bound_model = str(profile.get("model_id") or "")
         if not bound_model:
             continue
-        try:
-            profile_models[str(profile["logical_model"])] = int(
-                options_by_model.get(bound_model, {}).get("ctx-size") or 65536
-            )
-        except (TypeError, ValueError):
-            profile_models[str(profile["logical_model"])] = 65536
+        profile_models[str(profile["logical_model"])] = model_context_length(state, bound_model)
     return profile_models
 
 
@@ -690,12 +687,7 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
         if isinstance(main_profile, dict) else str(fallback_model or "")
     )
     if "main-local" not in execution_models and fallback_model:
-        stored_options = _load_options().get(fallback_model, {})
-        try:
-            context_length = int(stored_options.get("ctx-size") or 65536)
-        except (TypeError, ValueError):
-            context_length = 65536
-        execution_models["main-local"] = context_length
+        execution_models["main-local"] = model_context_length(_state(), fallback_model)
     if "main-local" not in execution_models:
         raise RuntimeError("configure a Main execution profile first")
     provider_models = {

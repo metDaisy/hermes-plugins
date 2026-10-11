@@ -19,9 +19,11 @@ from starlette.background import BackgroundTask
 
 try:
     from .application.execution_lease import ExecutionLeaseCoordinator
+    from .application.model_context import model_context_length
     from .application.owned_process import process_tree_owns_listener
 except ImportError:  # pragma: no cover - direct module loading fallback
     from application.execution_lease import ExecutionLeaseCoordinator
+    from application.model_context import model_context_length
     from application.owned_process import process_tree_owns_listener
 
 router = APIRouter()
@@ -148,12 +150,7 @@ def logical_models_payload(state: dict[str, Any]) -> dict[str, Any]:
     main_profile = configured.get("main")
     main_model = str(main_profile.get("model_id") or "") if isinstance(main_profile, dict) else ""
     aliases = ["main-local"] if main_model else []
-    model_settings = state.get("model_settings")
-    settings = model_settings.get(main_model) if isinstance(model_settings, dict) else None
-    try:
-        context_length = int(settings.get("ctx-size") or 65536) if isinstance(settings, dict) else 65536
-    except (TypeError, ValueError):
-        context_length = 65536
+    context_length = model_context_length(state, main_model)
     reasoning_efforts = ["medium", "xhigh"] if "ternary-bonsai-2" in main_model.lower() else None
     return {
         "object": "list",

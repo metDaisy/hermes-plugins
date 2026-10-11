@@ -10,6 +10,28 @@ from unittest.mock import patch
 
 
 class ManagedEndpointConfigTests(unittest.TestCase):
+    def test_strata_context_length_comes_from_generated_config(self) -> None:
+        import json
+
+        from dashboard.application.model_context import model_context_length
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            config = Path(raw_root) / "strata.json"
+            config.write_text(json.dumps({
+                "args": ["--pack", "pack", "--max-context", "131072", "--kv", "int8"],
+            }), encoding="utf-8")
+            state = {
+                "models": {
+                    "strata-main": {
+                        "runtime_kind": "strata",
+                        "config_path": str(config),
+                    },
+                },
+                "model_settings": {"strata-main": {"temp": "1"}},
+            }
+
+            self.assertEqual(model_context_length(state, "strata-main"), 131072)
+
     def test_desktop_leases_expire_after_owner_heartbeat_stops(self) -> None:
         from dashboard.application.desktop_leases import DesktopLeaseRegistry
 

@@ -1236,6 +1236,56 @@ class LlamaCppManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "logical model"):
             validate_logical_model(b'{"model":""}')
 
+    def test_strata_execution_profiles_advertise_generated_context_length(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            config = Path(raw_root) / "strata.json"
+            config.write_text(json.dumps({
+                "args": ["--max-context", "131072"],
+            }), encoding="utf-8")
+            state = {
+                "models": {
+                    "strata-iq3_xxs": {
+                        "runtime_kind": "strata",
+                        "config_path": str(config),
+                    },
+                },
+                "model_settings": {"strata-iq3_xxs": {"temp": "1"}},
+            }
+            profiles = {
+                "profiles": {
+                    "main": {"logical_model": "main-local", "model_id": "strata-iq3_xxs"},
+                    "compression": {"logical_model": "compression-local", "model_id": "strata-iq3_xxs"},
+                },
+            }
+
+            with patch.object(api, "_state", return_value=state), \
+                    patch.object(api, "execution_profiles", return_value=profiles):
+                self.assertEqual(api._profile_provider_models(), {
+                    "main-local": 131072,
+                    "compression-local": 131072,
+                })
+
+    def test_proxy_advertises_strata_generated_context_length(self) -> None:
+        from dashboard.inference_proxy import logical_models_payload
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            config = Path(raw_root) / "strata.json"
+            config.write_text(json.dumps({
+                "args": ["--max-context", "131072"],
+            }), encoding="utf-8")
+            payload = logical_models_payload({
+                "execution_profiles": {"main": {"model_id": "strata-iq3_xxs"}},
+                "models": {
+                    "strata-iq3_xxs": {
+                        "runtime_kind": "strata",
+                        "config_path": str(config),
+                    },
+                },
+                "model_settings": {"strata-iq3_xxs": {"temp": "1"}},
+            })
+
+            self.assertEqual(payload["data"][0]["context_length"], 131072)
+
     def test_proxy_advertises_only_main_model_while_compression_stays_auxiliary(self) -> None:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
