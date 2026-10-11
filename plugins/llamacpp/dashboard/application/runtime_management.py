@@ -71,6 +71,8 @@ class RuntimeManagementWorkflow:
         kind = self._get_backend(str(body.get("kind") or "official")).key
         if kind == "prism_ml":
             return self._install_prism()
+        if kind != "official":
+            raise RuntimeError(f"{kind} is externally installed and cannot be installed by this plugin")
         tag, backend = self._runtime_target(True, body.get("backend"))
         job = self._create_job("runtime-install", f"llama.cpp {tag} ({backend})")
 

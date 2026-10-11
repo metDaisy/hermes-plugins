@@ -54,15 +54,20 @@ class RegisteredModelService:
                 row["hf_repo"] = str(entry["hf_repo"])
             if entry.get("hf_file"):
                 row["hf_file"] = str(entry["hf_file"])
-            if entry.get("runtime_kind") in {"official", "prism_ml"}:
+            if entry.get("runtime_kind") in {"official", "prism_ml", "strata"}:
                 row["runtime_kind"] = str(entry["runtime_kind"])
+            if entry.get("runtime_kind") == "strata":
+                for key in ("runtime_root", "python_path", "config_path", "worker_port", "serving_model", "strata_version"):
+                    if key in entry:
+                        row[key] = entry[key]
             rows.append(row)
         if state_dirty:
             self._save_state(state)
         return sorted(rows, key=lambda item: item["id"].lower())
 
     def register(self, model_id: str, paths: list[Path], owned: bool, hf_repo: str | None = None,
-                 hf_file: str | None = None, size_bytes: int = 0, runtime_kind: str | None = None) -> None:
+                 hf_file: str | None = None, size_bytes: int = 0, runtime_kind: str | None = None,
+                 metadata: dict[str, Any] | None = None) -> None:
         state = self._load_state()
         models = state.setdefault("models", {})
         if model_id in models:
@@ -74,8 +79,12 @@ class RegisteredModelService:
             entry["hf_repo"] = hf_repo
         if hf_file:
             entry["hf_file"] = hf_file
-        if runtime_kind in {"official", "prism_ml"}:
+        if runtime_kind in {"official", "prism_ml", "strata"}:
             entry["runtime_kind"] = runtime_kind
+        if runtime_kind == "strata" and isinstance(metadata, dict):
+            for key in ("runtime_root", "python_path", "config_path", "worker_port", "serving_model", "strata_version"):
+                if key in metadata:
+                    entry[key] = metadata[key]
         models[model_id] = entry
         self._save_state(state)
 
@@ -107,7 +116,8 @@ class RegisteredModelService:
         size_bytes = 0
         for raw_path in entry.get("paths", []):
             path = Path(str(raw_path))
-            if path.suffix.lower() != ".gguf" or path.name.lower().startswith("mmproj"):
+            is_strata_config = entry.get("runtime_kind") == "strata" and path.suffix.lower() == ".json"
+            if not is_strata_config and (path.suffix.lower() != ".gguf" or path.name.lower().startswith("mmproj")):
                 continue
             resolved = str(path.resolve())
             if resolved in paths:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 import threading
 import os
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -73,6 +74,28 @@ class ManagedEndpointConfigTests(unittest.TestCase):
 
         self.assertEqual(result["profiles"]["main"]["runtime_kind"], "official")
         self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "official")
+
+    def test_execution_profiles_allow_one_strata_model_for_both_roles(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state = {
+            "models": {"strata-main": {"runtime_kind": "strata"}},
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda kind, model_id: kind == "strata" and model_id == "strata-main",
+        )
+
+        result = service.save_many({
+            "main": {"model_id": "strata-main"},
+            "compression": {"model_id": "strata-main"},
+        })
+
+        self.assertEqual(result["profiles"]["main"]["runtime_kind"], "strata")
+        self.assertEqual(result["profiles"]["compression"]["runtime_kind"], "strata")
+        self.assertEqual(state["execution_profiles"]["main"]["model_id"], "strata-main")
+        self.assertEqual(state["execution_profiles"]["compression"]["model_id"], "strata-main")
 
     def test_execution_profiles_derive_runtime_from_model_name(self) -> None:
         from dashboard.application.execution_profiles import ExecutionProfileService
@@ -672,6 +695,37 @@ class RegisteredModelServiceTests(unittest.TestCase):
         )
         self.assertEqual(state["models"]["custom-alias"]["runtime_kind"], "official")
 
+    def test_strata_registration_preserves_runtime_metadata_and_config_path(self) -> None:
+        from dashboard.application.model_registry import RegisteredModelService
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            config = root / "strata-iq2_xs.json"
+            config.write_text("{}\n", encoding="utf-8")
+            state: dict[str, object] = {"models": {}}
+            service = RegisteredModelService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                cached_files=lambda _repo: ([], None),
+            )
+
+            service.register(
+                "strata-main", [config], False, runtime_kind="strata",
+                metadata={
+                    "runtime_root": str(root),
+                    "python_path": str(root / ".venv" / "Scripts" / "python.exe"),
+                    "config_path": str(config),
+                    "worker_port": 18080,
+                    "serving_model": "strata",
+                },
+            )
+
+            row = service.rows()[0]
+            self.assertEqual(row["runtime_kind"], "strata")
+            self.assertEqual(row["paths"], [str(config.resolve())])
+            self.assertEqual(row["worker_port"], 18080)
+            self.assertEqual(service.active_path("strata-main"), config.resolve())
+
     def test_legacy_hf_registration_is_migrated_to_cached_local_paths(self) -> None:
         from dashboard.application.model_registry import RegisteredModelService
 
@@ -706,6 +760,25 @@ class RuntimeRouteAdapterTests(unittest.TestCase):
 
 
 class RuntimeManagementWorkflowTests(unittest.TestCase):
+    def test_external_strata_runtime_cannot_use_llamacpp_installer(self) -> None:
+        from dashboard.application.runtime_management import RuntimeManagementWorkflow
+
+        class Backend:
+            key = "strata"
+
+        workflow = RuntimeManagementWorkflow(
+            load_state=lambda: {}, save_state=lambda _value: None,
+            get_backend=lambda _kind: Backend(), machine_root=Path("C:/runtime"),
+            runtime_kind=lambda _state: "strata", runtime_info=lambda: {},
+            pid_alive=lambda _pid: False, open_directory=lambda _path: None,
+            install_prism=lambda: {}, runtime_target=lambda *_: ("b1", "cpu"),
+            create_job=lambda *_: {}, launch=lambda *_: None, finish=lambda *_: None,
+            install_official=lambda *_: None, download_archive=lambda *_: None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "externally installed"):
+            workflow.install({"kind": "strata"})
+
     def test_selects_custom_runtime_and_projects_installed_state(self) -> None:
         from dashboard.application.runtime_management import RuntimeManagementWorkflow
 
@@ -1067,7 +1140,7 @@ class ModelRouteAdapterTests(unittest.TestCase):
         router = create_router(context)
         paths = {route.path: route.endpoint for route in router.routes}
 
-        self.assertTrue({"/activate", "/eject", "/models/{model_id}", "/models/{model_id}/registration", "/search", "/repo", "/download-browsed", "/register", "/sideload", "/hf-models", "/hf-models/files", "/hf-models/delete"}.issubset(paths))
+        self.assertTrue({"/activate", "/eject", "/models/{model_id}", "/models/{model_id}/registration", "/models/strata", "/search", "/repo", "/download-browsed", "/register", "/sideload", "/hf-models", "/hf-models/files", "/hf-models/delete"}.issubset(paths))
         with self.assertRaises(HTTPException) as raised:
             paths["/search"]("test", 20)
         self.assertEqual(raised.exception.status_code, 502)
@@ -1363,6 +1436,47 @@ class JobManagerTests(unittest.TestCase):
 
 
 class ModelLifecycleServiceTests(unittest.TestCase):
+    def test_register_strata_binds_both_roles_and_requires_port_18080(self) -> None:
+        from dashboard.application.model_lifecycle import ModelLifecycleService
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            python = root / ".venv" / "Scripts" / "python.exe"
+            server = root / "serve" / "server.py"
+            config = root / "strata.json"
+            python.parent.mkdir(parents=True)
+            server.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            server.write_text("# server\n", encoding="utf-8")
+            config.write_text("{}\n", encoding="utf-8")
+            registrations: list[tuple[tuple, dict]] = []
+            state: dict[str, object] = {}
+
+            class Registry:
+                def rows(self): return []
+                def active_path(self, _model_id): return config
+                def register(self, *args, **kwargs): registrations.append((args, kwargs))
+
+            service = ModelLifecycleService(
+                registry=Registry(), load_state=lambda: state, save_state=lambda value: state.update(value),
+                runtime_kind=lambda _state: "official", accepts=lambda *_: True,
+                server_running=lambda: False, stop_server=lambda: None,
+                models_root=root, model_id=lambda path: path.stem,
+            )
+
+            result = service.register_strata("strata-main", root, config)
+
+            self.assertEqual(result["worker_port"], 18080)
+            self.assertEqual(registrations[0][1]["runtime_kind"], "strata")
+            self.assertEqual(registrations[0][1]["metadata"]["python_path"], str(python.resolve()))
+            self.assertEqual(state["execution_profiles"]["main"]["model_id"], "strata-main")
+            self.assertEqual(state["execution_profiles"]["compression"]["model_id"], "strata-main")
+            with self.assertRaisesRegex(RuntimeError, "18080"):
+                service.register_strata("strata-unsafe", root, config, worker_port=8080)
+            config.write_text('{"api_key": "[REDACTED]"}\n', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "API key"):
+                service.register_strata("strata-auth", root, config)
+
     def test_unregister_removes_only_registration_and_clears_role_bindings(self) -> None:
         from dashboard.application.model_lifecycle import ModelLifecycleService
 
@@ -2291,6 +2405,69 @@ class ServerStartupServiceTests(unittest.TestCase):
             self.assertEqual(backend.command[-2:], ["--alias", "Ternary-Bonsai-2-27B"])
             self.assertEqual(endpoint_models, ["Ternary-Bonsai-2-27B"])
 
+    def test_strata_launch_controls_worker_port_and_working_directory(self) -> None:
+        from dashboard.application.server_startup import ServerStartupService
+        from dashboard.backends.base import WorkerLaunch
+
+        class Backend:
+            key = "strata"
+
+            @staticmethod
+            def build_launch(executable, _port, _model_id, _entry, _options,
+                             _serving_model, _option_args, model_path=None):
+                return WorkerLaunch(
+                    [str(executable), "-m", "serve.server", "--config", str(model_path), "--port", "18080"],
+                    executable.parent.parent.parent,
+                    18080,
+                    "Strata",
+                    startup_timeout=180,
+                    environment={},
+                )
+
+        class Process:
+            pid = os.getpid()
+
+            @staticmethod
+            def poll():
+                return None
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            python = root / ".venv" / "Scripts" / "python.exe"
+            config = root / "strata.json"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            config.write_text("{}\n", encoding="utf-8")
+            state = {
+                "active_model_id": "strata-main",
+                "active_role": "main",
+                "models": {"strata-main": {"runtime_kind": "strata"}},
+            }
+            spawned: list[tuple[list[str], Path, dict[str, str] | None]] = []
+            health_ports: list[int] = []
+
+            service = ServerStartupService(
+                load_state=lambda: state, save_state=lambda value: state.update(value),
+                executable=lambda: python, stop=lambda **_: None,
+                active_path=lambda _model_id: config, load_options=lambda: {"strata-main": {"port": "18434"}},
+                runtime_kind=lambda _state: "strata", backend=lambda _kind: Backend(),
+                serving_model_name=lambda _model_id: "strata-main", option_args=lambda _options: [],
+                watch=lambda _process: None,
+                health=lambda port: health_ports.append(port) or True,
+                register_endpoint=lambda port, model: {"port": port, "model": model},
+                log_tail=lambda _limit: {"lines": []}, log_path=root / "activity.log",
+                spawn=lambda command, _log, cwd, environment=None: spawned.append((command, cwd, environment)) or Process(),
+                now=lambda: 0.0, sleep=lambda _seconds: None,
+            )
+
+            service.start()
+
+            self.assertEqual(spawned[0][1], root)
+            self.assertNotIn("STRATA_API_KEY", spawned[0][2])
+            self.assertEqual(health_ports, [18080])
+            self.assertEqual(state["port"], 18080)
+            self.assertEqual(state["custom_endpoint"], {"port": 18080, "model": "strata-main"})
+
     def test_worker_early_exit_surfaces_native_failure_reason(self) -> None:
         import sys
         import tempfile
@@ -2734,6 +2911,83 @@ class MmprojAutoTests(unittest.TestCase):
 
 
 class ExecutionTransitionTests(unittest.TestCase):
+    def test_official_worker_is_not_reused_across_roles(self) -> None:
+        from dashboard import backend_impl
+
+        state = {
+            "execution_mode": "exclusive_swap",
+            "active_role": "main",
+            "active_model_id": "shared",
+            "active_runtime_kind": "official",
+        }
+        profiles = {
+            "main": {"configured": True, "model_id": "shared", "runtime_kind": "official", "preset_id": ""},
+            "compression": {"configured": True, "model_id": "shared", "runtime_kind": "official", "preset_id": ""},
+        }
+
+        def mutate(change):
+            change(state)
+            return state
+
+        startup = unittest.mock.MagicMock()
+        with patch.object(backend_impl, "execution_profiles", return_value={"profiles": profiles}), \
+                patch.object(backend_impl, "_state", side_effect=lambda: dict(state)), \
+                patch.object(backend_impl, "_mutate_state", side_effect=mutate), \
+                patch.object(backend_impl, "_active_runtime_kind", return_value="official"), \
+                patch.object(backend_impl, "_is_server_running", return_value=True), \
+                patch.object(backend_impl, "_server_startup", return_value=startup), \
+                patch.object(backend_impl, "_transition_log"):
+            result = backend_impl.ensure_execution_role("compression")
+
+        self.assertFalse(result["already_running"])
+        startup.start.assert_called_once()
+
+    def test_strata_execution_profile_accepts_registered_json_config(self) -> None:
+        from dashboard import backend_impl
+
+        state = {
+            "models": {
+                "strata-main": {
+                    "runtime_kind": "strata",
+                    "paths": ["E:/gguf/models/strata-iq2_xs.json"],
+                },
+            },
+        }
+        with patch.object(backend_impl, "_state", return_value=state):
+            self.assertTrue(backend_impl._execution_profile_accepts("strata", "strata-main"))
+
+    def test_same_strata_worker_is_reused_when_switching_to_compression_role(self) -> None:
+        from dashboard import backend_impl
+
+        state = {
+            "execution_mode": "exclusive_swap",
+            "active_role": "main",
+            "active_model_id": "strata-main",
+            "active_runtime_kind": "strata",
+        }
+        profiles = {
+            "main": {"configured": True, "model_id": "strata-main", "runtime_kind": "strata", "preset_id": ""},
+            "compression": {"configured": True, "model_id": "strata-main", "runtime_kind": "strata", "preset_id": ""},
+        }
+
+        def mutate(change):
+            change(state)
+            return state
+
+        with patch.object(backend_impl, "execution_profiles", return_value={"profiles": profiles}), \
+                patch.object(backend_impl, "_state", side_effect=lambda: dict(state)), \
+                patch.object(backend_impl, "_mutate_state", side_effect=mutate), \
+                patch.object(backend_impl, "_active_runtime_kind", return_value="strata"), \
+                patch.object(backend_impl, "_is_server_running", return_value=True), \
+                patch.object(backend_impl, "_server_startup") as startup, \
+                patch.object(backend_impl, "_transition_log"):
+            result = backend_impl.ensure_execution_role("compression")
+
+        self.assertTrue(result["already_running"])
+        self.assertEqual(state["active_role"], "compression")
+        self.assertEqual(state["transition_phase"], "COMPRESSING")
+        startup.assert_not_called()
+
     def test_sync_transition_wait_is_notified_when_main_becomes_idle(self) -> None:
         from dashboard import backend_impl
 

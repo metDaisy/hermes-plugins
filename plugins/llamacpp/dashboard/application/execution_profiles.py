@@ -47,7 +47,7 @@ class ExecutionProfileService:
             entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
             stored_runtime = str(entry.get("runtime_kind") or "")
             profile["runtime_kind"] = (
-                stored_runtime if stored_runtime in {"official", "prism_ml"}
+                stored_runtime if stored_runtime in {"official", "prism_ml", "strata"}
                 else self._runtime_for_model(model_id)
             )
         normalized_storage = {
@@ -92,7 +92,7 @@ class ExecutionProfileService:
                 raise ValueError("등록된 model_id를 선택해야 합니다")
             entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
             stored_runtime = str(entry.get("runtime_kind") or "")
-            runtime_kind = stored_runtime if stored_runtime in {"official", "prism_ml"} else self._runtime_for_model(model_id)
+            runtime_kind = stored_runtime if stored_runtime in {"official", "prism_ml", "strata"} else self._runtime_for_model(model_id)
             if not self.accepts(runtime_kind, model_id):
                 raise ValueError("선택한 모델은 해당 runtime과 호환되지 않습니다")
             prepared[role] = {

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import build_server_command, resolve_server_executable
+from .base import WorkerLaunch, build_server_command, resolve_server_executable
 
 
 class OfficialLlamaCppBackend:
@@ -31,3 +31,11 @@ class OfficialLlamaCppBackend:
     def build_command(self, executable: Path, port: int, model_id: str, entry: dict[str, Any],
                       options: dict[str, str], model_path: Path | None = None) -> list[str]:
         return build_server_command(executable, port, entry, model_path)
+
+    def build_launch(self, executable: Path, port: int, model_id: str, entry: dict[str, Any],
+                     options: dict[str, str], serving_model: str, option_args: list[str],
+                     model_path: Path | None = None) -> WorkerLaunch:
+        command = self.build_command(executable, port, model_id, entry, options, model_path)
+        command.extend(["--alias", serving_model])
+        command.extend(option_args)
+        return WorkerLaunch(command, executable.parent, port)

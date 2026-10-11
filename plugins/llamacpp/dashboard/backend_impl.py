@@ -441,6 +441,19 @@ def _server_executable_for_runtime(runtime_kind: str) -> Path | None:
     if normalized != "official":
         try:
             adapter = get_backend(normalized)
+            if normalized == "strata":
+                model_id = str(state.get("active_model_id") or "")
+                models = state.get("models") if isinstance(state.get("models"), dict) else {}
+                entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+                python_path = str(entry.get("python_path") or "").strip()
+                runtime_root = str(entry.get("runtime_root") or "").strip()
+                if python_path:
+                    executable = Path(python_path).expanduser().resolve()
+                    if not executable.is_file():
+                        raise RuntimeError("Strata Python executable was not found")
+                    return executable
+                if runtime_root:
+                    return adapter.resolve_executable(runtime_root)
             selected_path = state.get("runtime_path") or state.get("custom_runtime_path")
             if _runtime_kind(state) == normalized and selected_path:
                 raw_path = selected_path
@@ -850,10 +863,11 @@ def _server_startup(log_path: Path | None = None, runtime_kind: str | None = Non
     def active_runtime(state: dict[str, Any]) -> str:
         return selected_runtime or _runtime_kind(state)
 
-    def spawn(command: list[str], log: Any, executable: Path) -> subprocess.Popen[Any]:
+    def spawn(command: list[str], log: Any, working_directory: Path,
+              environment: dict[str, str] | None = None) -> subprocess.Popen[Any]:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                   cwd=str(executable.parent), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-                                   bufsize=0)
+                                   cwd=str(working_directory), creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                                   bufsize=0, env=environment)
         bind_child_to_owner_lifetime(process)
         start_activity_pump(process, Path(getattr(log, "name", log_path or SERVER_LOG_PATH)))
         publish_event("worker_starting", refresh=["status", "metrics", "logs"])
@@ -1054,6 +1068,8 @@ def _execution_profile_accepts(runtime_kind: str, model_id: str) -> bool:
     paths = [str(path) for path in model.get("paths", []) if path]
     if model.get("hf_file"):
         paths.append(str(model["hf_file"]))
+    if runtime_kind == "strata":
+        return get_backend("strata").accepts_model(repo_id, paths)
     version = str(state.get("prism_release_tag") or "") or None
     return _model_policy.accepts(runtime_kind, repo_id, paths, version)
 
@@ -1131,8 +1147,16 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
         _mutate_state(route)
         _transition_log("router-role-selected", role=role, model_id=model_id, runtime_kind=runtime_kind)
         return {"role": role, "model_id": model_id, "already_running": True, "router_managed": True}
-    if (state.get("active_role") == role and state.get("active_model_id") == model_id
+    if ((state.get("active_role") == role or runtime_kind == "strata")
+            and state.get("active_model_id") == model_id
             and _active_runtime_kind(state) == runtime_kind and _is_server_running()):
+        def reuse(current: dict[str, Any]) -> None:
+            current["active_role"] = role
+            current["transition_phase"] = "COMPRESSING" if role == "compression" else "MAIN_READY"
+            current["transition_error"] = None
+
+        _mutate_state(reuse)
+        _transition_log("worker-role-reused", role=role, model_id=model_id, runtime_kind=runtime_kind)
         return {"role": role, "model_id": model_id, "already_running": True}
 
     if role == "main":

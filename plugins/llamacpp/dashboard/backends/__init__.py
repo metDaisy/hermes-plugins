@@ -5,7 +5,8 @@ from typing import Any, Mapping
 from .base import BackendView
 from .official import OfficialLlamaCppBackend
 from .prism_ml import PrismMlBackend
-_BACKENDS = {"official": OfficialLlamaCppBackend(), "prism_ml": PrismMlBackend()}
+from .strata import StrataBackend
+_BACKENDS = {"official": OfficialLlamaCppBackend(), "prism_ml": PrismMlBackend(), "strata": StrataBackend()}
 _ALIASES = {"llamacpp": "official", "llama.cpp": "official", "custom": "prism_ml", "prism": "prism_ml", "prism-ml": "prism_ml"}
 def get_backend(kind: Any) -> Any:
     raw=str(kind or "official").strip().lower(); key=_ALIASES.get(raw, raw)

@@ -137,6 +137,21 @@ def create_router(context: ModelRouteContext) -> APIRouter:
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @router.post("/models/strata")
+    def register_strata(body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = context.lifecycle().register_strata(
+                str(body.get("model_id") or "strata-main"),
+                Path(str(body.get("runtime_root") or "")),
+                Path(str(body.get("config_path") or "")),
+                int(body.get("worker_port") or 18080),
+                str(body.get("serving_model") or "strata"),
+            )
+            context.publish("model_registered", ["status", "inventory"])
+            return result
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     return router
 
 

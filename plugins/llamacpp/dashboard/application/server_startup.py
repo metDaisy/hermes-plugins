@@ -137,19 +137,46 @@ class ServerStartupService:
                 raise RuntimeError(f"invalid server port: {options.get('port')}") from exc
             model_path = self._active_path(model_id)
             serving_model = self._serving_model_name(model_id)
-            command = self._backend(self._runtime_kind(state)).build_command(executable, port, model_id, entry if isinstance(entry, dict) else {}, options, model_path=model_path)
-            if "mmproj-auto" in options and "no-mmproj" not in options and self._log_path is not None:
+            adapter = self._backend(self._runtime_kind(state))
+            filtered_options = {key: value for key, value in options.items()
+                                if key not in {"port", "alias", "mmproj-auto"}}
+            if hasattr(adapter, "build_launch"):
+                launch = adapter.build_launch(
+                    executable, port, model_id, entry if isinstance(entry, dict) else {}, options,
+                    serving_model, self._option_args(filtered_options), model_path=model_path,
+                )
+                command = list(launch.command)
+                port = int(launch.port)
+                working_directory = launch.cwd
+                version = launch.version_label or self._server_version(executable)
+                startup_timeout = max(1, int(launch.startup_timeout))
+                launch_environment = launch.environment
+            else:
+                command = adapter.build_command(
+                    executable, port, model_id, entry if isinstance(entry, dict) else {}, options,
+                    model_path=model_path,
+                )
+                working_directory = executable.parent
+                version = self._server_version(executable)
+                startup_timeout = 60
+                launch_environment = None
+            if getattr(adapter, "key", "official") != "strata" and "mmproj-auto" in options and "no-mmproj" not in options and self._log_path is not None:
                 mmproj_path = _find_mmproj_near(model_path)
                 if mmproj_path is not None:
                     command.extend(["--mmproj", str(mmproj_path)])
                 else:
                     print("mmproj-auto enabled but no projector gguf found next to the model; starting without image support.", flush=True)
-            command.extend(["--alias", serving_model])
-            command.extend(self._option_args({key: value for key, value in options.items() if key not in {"port", "alias", "mmproj-auto"}}))
+            if not hasattr(adapter, "build_launch"):
+                command.extend(["--alias", serving_model])
+                command.extend(self._option_args(filtered_options))
+        if native_router is not None:
+            working_directory = executable.parent
+            version = self._server_version(executable)
+            startup_timeout = 60
+            launch_environment = None
         if self._log_path is None:
             raise RuntimeError("server log path is required")
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        version = self._server_version(executable)
         needs_separator = self._log_path.is_file() and self._log_path.stat().st_size > 0
         log = self._log_path.open("ab", buffering=0)
         role = "router" if native_router is not None else str(state.get("active_role") or "server")
@@ -157,7 +184,10 @@ class ServerStartupService:
         log.write(f"{separator}[Server] llama-server version: {version}\n".encode(errors="replace"))
         log.write(f"[{role}] --- llama-server start: model={model_id}, port={port} ---\n".encode())
         try:
-            process = self._spawn(command, log, executable)
+            if launch_environment is None:
+                process = self._spawn(command, log, working_directory)
+            else:
+                process = self._spawn(command, log, working_directory, launch_environment)
         except OSError as exc:
             log.write(f"llama-server spawn failed: {exc}\n".encode(errors="replace")); log.close(); raise
         log.close()
@@ -205,7 +235,7 @@ class ServerStartupService:
         except BaseException:
             terminate_and_clear_worker()
             raise
-        deadline = self._now() + 60
+        deadline = self._now() + startup_timeout
         while self._now() < deadline:
             if process.poll() is not None:
                 self._stop(preserve_log=True, keep_endpoint=True)
@@ -245,6 +275,6 @@ class ServerStartupService:
         self._stop(preserve_log=True, keep_endpoint=True)
         detail = _startup_failure_detail(self._log_tail(80))
         raise RuntimeError(
-            "llama-server did not become healthy within 60 seconds"
+            f"managed worker did not become healthy within {startup_timeout} seconds"
             + (f"\n{detail}" if detail else "")
         )

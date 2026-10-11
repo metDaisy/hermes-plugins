@@ -4,6 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+
+@dataclass(frozen=True)
+class WorkerLaunch:
+    command: list[str]
+    cwd: Path
+    port: int
+    version_label: str | None = None
+    startup_timeout: int = 60
+    environment: dict[str, str] | None = None
+
 @dataclass(frozen=True)
 class BackendView:
     key: str
@@ -22,6 +32,7 @@ class RuntimeBackend(Protocol):
     def resolve_executable(self, raw_path: Path | str) -> Path: ...
     def accepts_model(self, repo_id: str, paths: list[str]) -> bool: ...
     def build_command(self, executable: Path, port: int, model_id: str, entry: dict[str, Any], options: dict[str, str], model_path: Path | None = None) -> list[str]: ...
+    def build_launch(self, executable: Path, port: int, model_id: str, entry: dict[str, Any], options: dict[str, str], serving_model: str, option_args: list[str], model_path: Path | None = None) -> WorkerLaunch: ...
 
 def resolve_server_executable(raw_path: Path | str, candidates: list[Path] | None = None) -> Path:
     path = Path(str(raw_path)).expanduser()

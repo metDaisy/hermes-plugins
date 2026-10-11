@@ -15,7 +15,39 @@ class RuntimeAdapterTests(unittest.TestCase):
         self.assertEqual(get_runtime("llamacpp").key, "official")
         self.assertEqual(get_runtime("custom").key, "prism_ml")
         self.assertEqual(get_runtime("prism_ml").key, "prism_ml")
-        self.assertEqual(runtime_ids(), ("official", "prism_ml"))
+        self.assertEqual(get_runtime("strata").key, "strata")
+        self.assertEqual(runtime_ids(), ("official", "prism_ml", "strata"))
+
+    def test_strata_builds_complete_launch_on_non_default_port(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            python = root / ".venv" / "Scripts" / "python.exe"
+            server = root / "serve" / "server.py"
+            config = root / "strata-iq2_xs.json"
+            python.parent.mkdir(parents=True)
+            server.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            server.write_text("# server\n", encoding="utf-8")
+            config.write_text("{}\n", encoding="utf-8")
+
+            backend = get_runtime("strata")
+            executable = backend.resolve_executable(root)
+            launch = backend.build_launch(
+                executable, 18080, "strata-main",
+                {"runtime_root": str(root), "config_path": str(config)},
+                {}, "strata-main", [], model_path=config,
+            )
+
+            self.assertEqual(executable, python.resolve())
+            self.assertEqual(launch.cwd, root.resolve())
+            self.assertEqual(launch.port, 18080)
+            self.assertEqual(launch.command, [
+                str(python.resolve()), "-m", "serve.server", "--engine", "strata",
+                "--config", str(config.resolve()), "--host", "127.0.0.1", "--port", "18080",
+            ])
+            self.assertNotIn("8080", launch.command)
+            self.assertNotIn("--alias", launch.command)
+            self.assertNotIn("--model", launch.command)
 
     def test_backend_contract_exposes_managed_roots_and_versions(self) -> None:
         machine_root = Path("C:/Users/leee/AppData/Local/hermes")
