@@ -2434,6 +2434,35 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("선택한 preset 자체의 parameter를 저장합니다.", editor)
         self.assertIn("역할별 preset 선택은 운영 탭에서 변경합니다.", editor)
 
+    def test_parameter_editor_separates_runtime_formats_and_exposes_context_length(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        editor = source[source.index("function ModelSettingsEditor"):source.index("function RegisterWizard")]
+
+        self.assertIn("parameter_format", editor)
+        self.assertIn("runtime_kind", editor)
+        self.assertIn("context_length", editor)
+        self.assertIn("context 크기", editor)
+        self.assertIn("model_id=${encodeURIComponent(modelId)}", editor)
+        self.assertIn("preset.runtime_kind === parameterFormat", editor)
+
+    def test_strata_backend_updates_only_generated_max_context_argument(self) -> None:
+        from dashboard.backends.strata import StrataBackend
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            config = Path(raw_root) / "strata.json"
+            config.write_text(json.dumps({
+                "args": ["--spec", "4", "--max-context", "65536", "--kv", "int8"],
+                "tokenizer": "tokenizer-path",
+            }), encoding="utf-8")
+
+            backend = StrataBackend()
+            backend.write_context_length(config, 131072)
+            saved = json.loads(config.read_text(encoding="utf-8"))
+
+            self.assertEqual(backend.read_context_length(config), 131072)
+            self.assertEqual(saved["args"], ["--spec", "4", "--max-context", "131072", "--kv", "int8"])
+            self.assertEqual(saved["tokenizer"], "tokenizer-path")
+
     def test_model_cards_use_inline_download_panel_and_unregister_action(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
 

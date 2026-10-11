@@ -103,6 +103,10 @@ class ExecutionProfileService:
                 preset = self.resolve_preset(preset_id) if self.resolve_preset is not None else None
                 if self.resolve_preset is not None and preset is None:
                     raise ValueError("선택한 parameter preset을 찾을 수 없습니다")
+                preset_format = str((preset or {}).get("runtime_kind") or "")
+                model_format = "strata" if runtime_kind == "strata" else "llamacpp"
+                if preset_format and preset_format != model_format:
+                    raise ValueError("선택한 parameter preset의 runtime format이 모델과 다릅니다")
                 raw_options = (preset or {}).get("options")
                 if isinstance(raw_options, dict):
                     preset_options = {str(key): str(value) for key, value in raw_options.items()}

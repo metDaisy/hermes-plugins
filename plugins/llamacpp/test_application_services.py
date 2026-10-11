@@ -1771,6 +1771,23 @@ class PresetStoreMigrationTests(unittest.TestCase):
             }))
             self.assertEqual(set(store.presets()), {"saved"})
 
+    def test_presets_store_runtime_format_and_context_separately(self) -> None:
+        import tempfile
+        from dashboard.application.preset_store import PresetStore
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            store = PresetStore(Path(raw_root) / "presets.db")
+            store.create(
+                "strata-main", "Strata main", {"temp": "1"}, 1.0,
+                runtime_kind="strata", context_length=131072,
+            )
+
+            preset = store.get("strata-main")
+
+            self.assertEqual(preset["runtime_kind"], "strata")
+            self.assertEqual(preset["context_length"], 131072)
+            self.assertEqual(preset["options"], {"temp": "1"})
+
 
 class ParameterSettingsServiceTests(unittest.TestCase):
     class _MemoryPresetStore:
@@ -1782,16 +1799,19 @@ class ParameterSettingsServiceTests(unittest.TestCase):
         def presets(self): return self.state["parameter_presets"]
         def get(self, preset_id): return self.presets().get(preset_id)
 
-        def create(self, preset_id, name, options, now):
-            value = {"name": name, "model_id": None, "options": options, "created_at": now, "updated_at": now}
+        def create(self, preset_id, name, options, now, runtime_kind="llamacpp", context_length=None):
+            value = {"name": name, "model_id": None, "options": options, "runtime_kind": runtime_kind,
+                     "context_length": context_length, "created_at": now, "updated_at": now}
             self.presets()[preset_id] = value
             return value
 
-        def update(self, preset_id, name, options, now):
+        def update(self, preset_id, name, options, now, runtime_kind=None, context_length=None):
             value = self.get(preset_id)
             if value is None: return None
             if name is not None: value["name"] = name
             if options is not None: value["options"] = options
+            if runtime_kind is not None: value["runtime_kind"] = runtime_kind
+            if context_length is not None: value["context_length"] = context_length
             value["updated_at"] = now
             return value
 
@@ -1802,6 +1822,61 @@ class ParameterSettingsServiceTests(unittest.TestCase):
             return True
 
         def assign(self, model_id, preset_id): self.state["model_presets"][model_id] = preset_id
+
+    def test_strata_preset_uses_request_schema_and_applies_context_to_generated_config(self) -> None:
+        from dashboard.application.parameter_settings import ParameterSettingsService
+
+        state = {"parameter_presets": {}}
+        stored_options: dict[str, dict[str, str]] = {}
+        applied_contexts: list[tuple[str, str, int]] = []
+        llama_catalog = [{"key": "ctx-size", "requires_value": True, "choices": [], "value_kind": "integer"}]
+        strata_catalog = [{"key": "temp", "requires_value": True, "choices": [], "value_kind": "number"}]
+        service = ParameterSettingsService(
+            catalog=lambda: llama_catalog + strata_catalog,
+            catalog_for_runtime=lambda kind: strata_catalog if kind == "strata" else llama_catalog,
+            canonical=lambda _, value: str(value),
+            load_options=lambda: stored_options,
+            save_options=lambda value: stored_options.update(value),
+            preset_store=self._MemoryPresetStore(state),
+            error=lambda message: ValueError(message),
+            now=lambda: 1.0,
+            new_id=lambda: "new",
+            runtime_for_model=lambda _model_id: "strata",
+            read_context=lambda _model_id, _kind: 131072,
+            write_context=lambda model_id, kind, size: applied_contexts.append((model_id, kind, size)),
+        )
+
+        created = service.create_preset(
+            "strata-main", {"temp": "1"}, "strata-model", runtime_kind="strata", context_length=65536,
+        )
+        applied = service.apply_preset("new", "strata-model", runtime_kind="strata", requires_restart=False)
+
+        self.assertEqual(created["runtime_kind"], "strata")
+        self.assertEqual(created["context_length"], 65536)
+        self.assertEqual(applied_contexts, [("strata-model", "strata", 65536)])
+        self.assertEqual(applied["options"], {"temp": "1"})
+        with self.assertRaisesRegex(ValueError, "unsupported Strata request parameter"):
+            service.rename_preset("new", options={"ctx-size": "131072"})
+
+    def test_preset_runtime_must_match_selected_model_runtime(self) -> None:
+        from dashboard.application.parameter_settings import ParameterSettingsService
+
+        state = {"parameter_presets": {
+            "strata": {"name": "strata", "runtime_kind": "strata", "context_length": 131072,
+                       "options": {"temp": "1"}},
+        }}
+        strata_catalog = [{"key": "temp", "requires_value": True, "choices": [], "value_kind": "number"}]
+        service = ParameterSettingsService(
+            catalog=lambda: strata_catalog,
+            catalog_for_runtime=lambda _kind: strata_catalog,
+            canonical=lambda _, value: str(value),
+            load_options=lambda: {}, save_options=lambda _value: None,
+            preset_store=self._MemoryPresetStore(state), error=lambda message: ValueError(message),
+            now=lambda: 1.0, new_id=lambda: "new",
+        )
+
+        with self.assertRaisesRegex(ValueError, "runtime format"):
+            service.apply_preset("strata", "llama-model", runtime_kind="official", requires_restart=False)
     def test_apply_preset_replaces_twelve_model_parameters_with_six_preset_parameters(self) -> None:
         from dashboard.application.parameter_settings import ParameterSettingsService
 

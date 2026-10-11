@@ -25,6 +25,50 @@ class StrataBackend:
     def accepts_model(self, repo_id: str, paths: list[str]) -> bool:
         return bool(paths) and all(str(path).lower().endswith(".json") for path in paths)
 
+    @staticmethod
+    def read_context_length(config: Path) -> int | None:
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        args = data.get("args") if isinstance(data, dict) else None
+        if not isinstance(args, list):
+            return None
+        for index, value in enumerate(args[:-1]):
+            if value == "--max-context":
+                try:
+                    return int(args[index + 1])
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def write_context_length(config: Path, context_length: int) -> None:
+        if int(context_length) <= 0:
+            raise ValueError("context length must be greater than zero")
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Strata model config is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("Strata model config must contain a JSON object")
+        args = data.get("args")
+        if not isinstance(args, list):
+            raise RuntimeError("Strata model config args must be an array")
+        next_args = list(args)
+        try:
+            index = next_args.index("--max-context")
+        except ValueError:
+            next_args.extend(["--max-context", str(int(context_length))])
+        else:
+            if index + 1 >= len(next_args):
+                raise RuntimeError("Strata --max-context value is missing")
+            next_args[index + 1] = str(int(context_length))
+        data["args"] = next_args
+        temporary = config.with_suffix(config.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(config)
+
     def resolve_executable(self, raw_path: Path | str) -> Path:
         root = Path(str(raw_path)).expanduser().resolve()
         candidates = [

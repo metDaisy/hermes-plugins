@@ -18,6 +18,8 @@ class ParameterRouteContext:
     runtime_kind: Callable[[dict[str, Any]], str]
     state: Callable[[], dict[str, Any]]
     refresh_profile_preset: Callable[[str, dict[str, str] | None], None] = lambda _preset_id, _options: None
+    options_for_model: Callable[[str], list[dict[str, Any]]] | None = None
+    runtime_for_model: Callable[[str], str] | None = None
 
 
 # --- Framework-independent transport handlers -----------------------------
@@ -38,27 +40,43 @@ def save_model_settings(context: ParameterRouteContext, model_id: str, body: dic
 
 
 def presets(context: ParameterRouteContext, model_id: str = "") -> dict[str, Any]:
-    return {"presets": context.parameters().presets()}
+    rows = context.parameters().presets()
+    if model_id and context.runtime_for_model is not None:
+        parameter_format = "strata" if context.runtime_for_model(model_id) == "strata" else "llamacpp"
+        rows = [row for row in rows if str(row.get("runtime_kind") or "llamacpp") == parameter_format]
+    return {"presets": rows}
 
 
 def create_preset(context: ParameterRouteContext, body: dict[str, Any]) -> dict[str, Any]:
     return {"preset": context.parameters().create_preset(
         body.get("name"), body.get("options"), str(body.get("model_id") or "").strip(),
+        str(body.get("runtime_kind") or "").strip(), body.get("context_length"),
     )}
 
 
 def apply_preset(context: ParameterRouteContext, preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     row = next((row for row in context.parameters().presets() if row["id"] == preset_id), None)
     model_id = str(body.get("model_id") or (row or {}).get("model_id") or "").strip()
+    runtime_kind = (
+        context.runtime_for_model(model_id)
+        if context.runtime_for_model is not None else context.runtime_kind(context.state())
+    )
     return context.parameters().apply_preset(
-        preset_id, model_id, context.runtime_kind(context.state()),
+        preset_id, model_id, runtime_kind,
         context.server_requires_restart(),
     )
 
 
 def rename_preset(context: ParameterRouteContext, preset_id: str, body: dict[str, Any]) -> dict[str, Any]:
     options = body.get("options") if "options" in body else None
-    preset = context.parameters().rename_preset(preset_id, body.get("name"), options)
+    if "runtime_kind" in body or "context_length" in body:
+        preset = context.parameters().rename_preset(
+            preset_id, body.get("name"), options,
+            str(body.get("runtime_kind") or "").strip() or None,
+            body.get("context_length") if "context_length" in body else None,
+        )
+    else:
+        preset = context.parameters().rename_preset(preset_id, body.get("name"), options)
     context.refresh_profile_preset(preset_id, dict(preset.get("options") or {}))
     return {"preset": preset}
 
@@ -74,10 +92,11 @@ def create_router(context: ParameterRouteContext) -> APIRouter:
     router = APIRouter()
 
     @router.get("/settings")
-    def settings(q: str = "", limit: int = 50) -> dict[str, Any]:
+    def settings(q: str = "", limit: int = 50, model_id: str = "") -> dict[str, Any]:
         query = q.strip().lower()
+        catalog = context.options_for_model(model_id) if context.options_for_model is not None else context.options()
         options = [
-            option for option in context.options()
+            option for option in catalog
             if query and (query in option["key"].lower() or query in option["name"].lower()
                           or query in option["description"].lower())
         ]

@@ -18,6 +18,10 @@ class ParameterSettingsService:
         error: Callable[[str], Exception],
         now: Callable[[], float],
         new_id: Callable[[], str],
+        catalog_for_runtime: Callable[[str], list[dict[str, Any]]] | None = None,
+        runtime_for_model: Callable[[str], str] | None = None,
+        read_context: Callable[[str, str], int | None] | None = None,
+        write_context: Callable[[str, str, int], None] | None = None,
     ) -> None:
         self._catalog = catalog
         self._canonical = canonical
@@ -27,11 +31,24 @@ class ParameterSettingsService:
         self._error = error
         self._now = now
         self._new_id = new_id
+        self._catalog_for_runtime = catalog_for_runtime
+        self._runtime_for_model = runtime_for_model
+        self._read_context = read_context
+        self._write_context = write_context
 
-    def normalize(self, options: Any) -> dict[str, str]:
+    @staticmethod
+    def _format(runtime_kind: str) -> str:
+        return "strata" if str(runtime_kind) == "strata" else "llamacpp"
+
+    def _catalog_for(self, runtime_kind: str) -> list[dict[str, Any]]:
+        if self._catalog_for_runtime is not None and runtime_kind:
+            return self._catalog_for_runtime(runtime_kind)
+        return self._catalog()
+
+    def normalize(self, options: Any, runtime_kind: str = "") -> dict[str, str]:
         if not isinstance(options, dict):
             raise self._error("options must be an object")
-        catalog = self._catalog_by_key()
+        catalog = self._catalog_by_key(runtime_kind)
         normalized: dict[str, str] = {}
         for raw_key, value in options.items():
             key = str(raw_key).lstrip("-")
@@ -41,14 +58,15 @@ class ParameterSettingsService:
             if catalog.get(key, {}).get("requires_value") and not canonical.strip():
                 continue
             normalized[key] = canonical
-        self.validate(normalized)
+        self.validate(normalized, runtime_kind)
         return normalized
 
-    def validate(self, options: dict[str, str]) -> None:
-        catalog = self._catalog_by_key()
+    def validate(self, options: dict[str, str], runtime_kind: str = "") -> None:
+        catalog = self._catalog_by_key(runtime_kind)
         unknown = sorted(key for key in options if key not in catalog)
         if unknown:
-            raise self._error(f"unsupported llama-server parameter(s): {', '.join(unknown)}")
+            label = "Strata request" if self._format(runtime_kind) == "strata" else "llama-server"
+            raise self._error(f"unsupported {label} parameter(s): {', '.join(unknown)}")
         for key, value in options.items():
             metadata, text = catalog[key], str(value)
             if metadata["requires_value"] and not text.strip():
@@ -66,7 +84,8 @@ class ParameterSettingsService:
                     raise self._error(f"parameter '{key}' requires a number") from exc
 
     def model_settings(self, model_id: str) -> dict[str, Any]:
-        stored, catalog = self._load_options().get(model_id, {}), self._catalog()
+        runtime_kind = self._runtime_for_model(model_id) if self._runtime_for_model is not None else ""
+        stored, catalog = self._load_options().get(model_id, {}), self._catalog_for(runtime_kind)
         ordered = {}
         for option in catalog:
             key = option["key"]
@@ -76,11 +95,15 @@ class ParameterSettingsService:
             if option.get("requires_value") and not value.strip():
                 continue
             ordered[key] = value
-        return {"model_id": model_id, "options": ordered, "order": [option["key"] for option in catalog],
+        context_length = self._read_context(model_id, runtime_kind) if self._read_context is not None else None
+        return {"model_id": model_id, "runtime_kind": runtime_kind,
+                "parameter_format": self._format(runtime_kind), "context_length": context_length,
+                "options": ordered, "order": [option["key"] for option in catalog],
                 "metadata": {option["key"]: option for option in catalog}}
 
     def save_model(self, model_id: str, options: Any, requires_restart: bool) -> dict[str, Any]:
-        normalized, all_options = self.normalize(options), self._load_options()
+        runtime_kind = self._runtime_for_model(model_id) if self._runtime_for_model is not None else ""
+        normalized, all_options = self.normalize(options, runtime_kind), self._load_options()
         all_options[model_id] = normalized
         self._save_options(all_options)
         return {"model_id": model_id, "options": normalized, "applied": False,
@@ -90,12 +113,20 @@ class ParameterSettingsService:
         rows = [self._preset_row(preset_id, value) for preset_id, value in self._load_presets().items()]
         return sorted(rows, key=lambda item: (item["name"].lower(), item["id"]))
 
-    def create_preset(self, name: Any, options: Any, source_model_id: str = "") -> dict[str, Any]:
+    def create_preset(self, name: Any, options: Any, source_model_id: str = "",
+                      runtime_kind: str = "", context_length: Any = None) -> dict[str, Any]:
         name = self._valid_name(name)
+        runtime_kind = runtime_kind or (
+            self._runtime_for_model(source_model_id)
+            if self._runtime_for_model is not None and source_model_id else "official"
+        )
         if options is None:
             options = self._load_options().get(source_model_id, {})
         now, preset_id = self._now(), self._new_id()
-        stored = self._preset_store.create(preset_id, name, self.normalize(options), now)
+        stored = self._preset_store.create(
+            preset_id, name, self.normalize(options, runtime_kind), now,
+            self._format(runtime_kind), self._context_length(context_length),
+        )
         return self._preset_row(preset_id, stored)
 
     def apply_preset(self, preset_id: str, model_id: str, runtime_kind: str, requires_restart: bool) -> dict[str, Any]:
@@ -104,25 +135,35 @@ class ParameterSettingsService:
             raise self._error("preset not found")
         if not model_id:
             raise self._error("model_id is required to apply a preset")
-        applied = self.normalize(value.get("options") or {})
+        if str(value.get("runtime_kind") or "llamacpp") != self._format(runtime_kind):
+            raise self._error("preset runtime format does not match the selected model runtime format")
+        applied = self.normalize(value.get("options") or {}, runtime_kind)
         omitted = sorted(key for key in applied if runtime_kind == "prism_ml" and key.startswith("spec-"))
         applied = {key: value for key, value in applied.items() if key not in omitted}
-        self.validate(applied)
+        self.validate(applied, runtime_kind)
         all_options = self._load_options()
         all_options[model_id] = applied
         self._save_options(all_options)
         self._preset_store.assign(str(model_id), preset_id)
+        context_length = value.get("context_length")
+        if context_length is not None and self._write_context is not None:
+            self._write_context(model_id, runtime_kind, int(context_length))
         return {"preset_id": preset_id, "model_id": model_id, "options": applied, "omitted_options": omitted,
-                "applied": False, "requires_restart": requires_restart}
+                "context_length": context_length, "applied": False, "requires_restart": requires_restart}
 
-    def rename_preset(self, preset_id: str, name: Any = None, options: Any = None) -> dict[str, Any]:
-        if self._preset_store.get(preset_id) is None:
+    def rename_preset(self, preset_id: str, name: Any = None, options: Any = None,
+                      runtime_kind: str | None = None, context_length: Any = None) -> dict[str, Any]:
+        current = self._preset_store.get(preset_id)
+        if current is None:
             raise self._error("preset not found")
+        preset_runtime = runtime_kind or str(current.get("runtime_kind") or "llamacpp")
         stored = self._preset_store.update(
             preset_id,
             self._valid_name(name) if name is not None else None,
-            self.normalize(options) if options is not None else None,
+            self.normalize(options, preset_runtime) if options is not None else None,
             self._now(),
+            self._format(preset_runtime),
+            self._context_length(context_length) if context_length is not None else None,
         )
         return self._preset_row(preset_id, stored or {})
 
@@ -133,8 +174,19 @@ class ParameterSettingsService:
     def _load_presets(self) -> dict[str, dict[str, Any]]:
         return self._preset_store.presets()
 
-    def _catalog_by_key(self) -> dict[str, dict[str, Any]]:
-        return {option["key"]: option for option in self._catalog()}
+    def _catalog_by_key(self, runtime_kind: str = "") -> dict[str, dict[str, Any]]:
+        return {option["key"]: option for option in self._catalog_for(runtime_kind)}
+
+    def _context_length(self, value: Any) -> int | None:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            result = int(value)
+        except (TypeError, ValueError) as exc:
+            raise self._error("context length requires an integer") from exc
+        if result <= 0:
+            raise self._error("context length must be greater than zero")
+        return result
 
     def _valid_name(self, name: Any) -> str:
         value = str(name or "").strip()
@@ -147,5 +199,7 @@ class ParameterSettingsService:
     @staticmethod
     def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
         return {"id": preset_id, "name": str(value.get("name") or preset_id), "model_id": value.get("model_id"),
+                "runtime_kind": str(value.get("runtime_kind") or "llamacpp"),
+                "context_length": value.get("context_length"),
                 "options": dict(value.get("options") or {}), "created_at": value.get("created_at"),
                 "updated_at": value.get("updated_at")}

@@ -232,6 +232,14 @@ def _presets_store() -> PresetStore:
         state.pop("parameter_presets", None)
         state.pop("model_presets", None)
         _save_state(state)
+    profiles = state.get("execution_profiles") if isinstance(state.get("execution_profiles"), dict) else {}
+    for profile in profiles.values():
+        if not isinstance(profile, dict) or str(profile.get("runtime_kind") or "") != "strata":
+            continue
+        preset_id = str(profile.get("preset_id") or "")
+        preset = _preset_store.get(preset_id) if preset_id else None
+        if preset is not None and str(preset.get("runtime_kind") or "llamacpp") == "llamacpp":
+            _preset_store.set_runtime_kind(preset_id, "strata")
     return _preset_store
 
 
@@ -1240,6 +1248,12 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
             current["model_settings"] = options
 
     _mutate_state(select)
+    selected_preset_id = str(profile.get("preset_id") or "")
+    if selected_preset_id:
+        selected_preset = _presets_store().get(selected_preset_id)
+        context_length = (selected_preset or {}).get("context_length")
+        if context_length is not None:
+            _write_parameter_context(model_id, runtime_kind, int(context_length))
     log_path = ACTIVITY_LOG_PATH
     try:
         _server_startup(log_path, runtime_kind).start()
@@ -1418,6 +1432,65 @@ def _strata_request_option_catalog() -> list[dict[str, Any]]:
         }
         for key, request_key, value_kind in rows
     ]
+
+
+def _runtime_for_model_id(model_id: str) -> str:
+    state = _state()
+    models = state.get("models") if isinstance(state.get("models"), dict) else {}
+    entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+    stored = str(entry.get("runtime_kind") or "")
+    if stored in {"official", "prism_ml", "strata"}:
+        return stored
+    if str(model_id).startswith("Ternary-Bonsai"):
+        return "prism_ml"
+    selected = _runtime_kind(state)
+    return selected if selected in {"official", "prism_ml", "strata"} else "official"
+
+
+def _option_list_for_runtime(runtime_kind: str) -> list[dict[str, Any]]:
+    if runtime_kind == "strata":
+        return _copy_options(_strata_request_option_catalog())
+    return _copy_options([
+        option for option in _option_list()
+        if not str(option.get("description") or "").startswith("Strata request parameter:")
+    ])
+
+
+def _options_for_model(model_id: str) -> list[dict[str, Any]]:
+    return _option_list_for_runtime(_runtime_for_model_id(model_id))
+
+
+def _read_parameter_context(model_id: str, runtime_kind: str) -> int | None:
+    if runtime_kind == "strata":
+        state = _state()
+        models = state.get("models") if isinstance(state.get("models"), dict) else {}
+        entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+        config_path = str(entry.get("config_path") or "")
+        return get_backend("strata").read_context_length(Path(config_path)) if config_path else None
+    settings = _load_options().get(model_id, {})
+    try:
+        return int(settings.get("ctx-size")) if settings.get("ctx-size") is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _write_parameter_context(model_id: str, runtime_kind: str, context_length: int) -> None:
+    if runtime_kind == "strata":
+        if _is_server_running():
+            raise RuntimeError("stop the server before changing Strata context")
+        state = _state()
+        models = state.get("models") if isinstance(state.get("models"), dict) else {}
+        entry = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+        config_path = str(entry.get("config_path") or "")
+        if not config_path:
+            raise RuntimeError("Strata model config was not found")
+        get_backend("strata").write_context_length(Path(config_path), int(context_length))
+        return
+    all_options = _load_options()
+    options = dict(all_options.get(model_id, {}))
+    options["ctx-size"] = str(int(context_length))
+    all_options[model_id] = options
+    _save_options(all_options)
 
 
 def _with_strata_request_options(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1614,6 +1687,10 @@ def _parameters() -> ParameterSettingsService:
     return ParameterSettingsService(
         _option_list, _canonical_option_value, _load_options, _save_options, _presets_store(),
         _parameter_error, time.time, lambda: uuid.uuid4().hex[:12],
+        catalog_for_runtime=_option_list_for_runtime,
+        runtime_for_model=_runtime_for_model_id,
+        read_context=_read_parameter_context,
+        write_context=_write_parameter_context,
     )
 
 
@@ -1656,12 +1733,14 @@ def _parameter_route_context() -> ParameterRouteContext:
         options=_option_list, executable=_server_executable, parameters=_parameters,
         server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
         refresh_profile_preset=_refresh_execution_profile_preset,
+        options_for_model=_options_for_model, runtime_for_model=_runtime_for_model_id,
     )
 
 
 def _load_presets() -> dict[str, dict[str, Any]]:
     return {row["id"]: {
         "name": row["name"], "model_id": row["model_id"], "options": row["options"],
+        "runtime_kind": row["runtime_kind"], "context_length": row["context_length"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     } for row in _parameters().presets()}
 
@@ -1705,6 +1784,7 @@ def delete_preset(preset_id: str) -> dict[str, Any]:
 router.include_router(create_parameter_router(ParameterRouteContext(
     options=_option_list, executable=_server_executable, parameters=_parameters,
     server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
+    options_for_model=_options_for_model, runtime_for_model=_runtime_for_model_id,
 )))
 router.include_router(create_runtime_router(RuntimeRouteContext(
     status=status, runtime_info=runtime_info, save=save_runtime, hardware=hardware, catalog=catalog,
