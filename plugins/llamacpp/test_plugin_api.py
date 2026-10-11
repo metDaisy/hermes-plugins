@@ -2173,6 +2173,15 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertEqual(list(status["logs"]), ["activity"])
         self.assertTrue(status["logs"]["activity"].endswith("activity.log"))
 
+    def test_auxiliary_execution_profile_controls_stay_on_one_line(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        profile_row = source[source.index("function ExecutionProfileRow"):source.index("function ExecutionProfilesPanel")]
+
+        self.assertIn("className: 'flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto", profile_row)
+        self.assertIn("flex: '1 1 10rem'", profile_row)
+        self.assertIn("flex: '0 0 10rem'", profile_row)
+        self.assertIn("className: 'shrink-0', children: jsx(Badge", profile_row)
+
     def test_operations_ui_displays_singleton_proxy_and_cancellation_contract(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn("Singleton proxy", source)
