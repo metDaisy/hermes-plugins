@@ -19,8 +19,10 @@ from starlette.background import BackgroundTask
 
 try:
     from .application.execution_lease import ExecutionLeaseCoordinator
+    from .application.owned_process import process_tree_owns_listener
 except ImportError:  # pragma: no cover - direct module loading fallback
     from application.execution_lease import ExecutionLeaseCoordinator
+    from application.owned_process import process_tree_owns_listener
 
 router = APIRouter()
 
@@ -68,11 +70,7 @@ def _worker_identity_ok(state: dict[str, Any]) -> bool:
         expected_executable = os.path.normcase(os.path.abspath(str(identity.get("executable") or "")))
         actual_executable = os.path.normcase(os.path.abspath(process.exe()))
         port = int(state.get("port") or 0)
-        owns_port = any(
-            connection.status == psutil.CONN_LISTEN
-            and connection.laddr and int(connection.laddr.port) == port
-            for connection in process.net_connections(kind="tcp")
-        )
+        owns_port = process_tree_owns_listener(process, port, psutil)
         return (port > 0 and owns_port and abs(process.create_time() - expected_time) < 0.01
                 and actual_executable == expected_executable)
     except (ImportError, OSError, TypeError, ValueError):

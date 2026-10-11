@@ -1780,6 +1780,40 @@ class LlamaCppManagerTests(unittest.TestCase):
         with patch.dict(sys.modules, {"psutil": fake_psutil}):
             self.assertFalse(inference_proxy._worker_identity_ok(state))
 
+    def test_worker_identity_accepts_listener_owned_by_verified_python_child(self) -> None:
+        import types
+        from dashboard import inference_proxy
+
+        class ChildProcess:
+            def net_connections(self, kind: str):
+                return [types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=18080))]
+
+        class ParentProcess:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+
+            def create_time(self) -> float:
+                return 100.0
+
+            def exe(self) -> str:
+                return sys.executable
+
+            def net_connections(self, kind: str):
+                return []
+
+            def children(self, recursive: bool):
+                return [ChildProcess()]
+
+        fake_psutil = types.SimpleNamespace(Process=ParentProcess, CONN_LISTEN="LISTEN")
+        state = {
+            "pid": 42,
+            "port": 18080,
+            "worker_identity": {"pid": 42, "create_time": 100.0, "executable": sys.executable},
+        }
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            self.assertTrue(api._worker_identity_matches(state))
+            self.assertTrue(inference_proxy._worker_identity_ok(state))
+
     def test_worker_identity_requires_identity_pid_to_match_state_pid(self) -> None:
         import types
         from dashboard import inference_proxy

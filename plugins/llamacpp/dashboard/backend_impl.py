@@ -40,6 +40,7 @@ try:
     from .application.model_policy import ModelPolicyService
     from .application.native_router import NativeRouterPlan, build_native_router_plan
     from .application.option_catalog import ServerOptionCatalog
+    from .application.owned_process import process_tree_owns_listener
     from .application.official_runtime import OfficialRuntimeService
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
@@ -89,6 +90,7 @@ except ImportError:
     from application.model_policy import ModelPolicyService
     from application.native_router import NativeRouterPlan, build_native_router_plan
     from application.option_catalog import ServerOptionCatalog
+    from application.owned_process import process_tree_owns_listener
     from application.official_runtime import OfficialRuntimeService
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
@@ -516,12 +518,7 @@ def _worker_identity_matches(state: dict[str, Any]) -> bool:
             or os.path.normcase(os.path.abspath(process.exe())) != expected_executable
         ):
             return False
-        return any(
-            connection.status == psutil.CONN_LISTEN
-            and connection.laddr
-            and int(connection.laddr.port) == port
-            for connection in process.net_connections(kind="tcp")
-        )
+        return process_tree_owns_listener(process, port, psutil)
     except Exception:  # noqa: BLE001 - identity uncertainty must fail closed
         return False
 
