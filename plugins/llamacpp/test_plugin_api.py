@@ -2177,9 +2177,12 @@ class LlamaCppManagerTests(unittest.TestCase):
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         profile_row = source[source.index("function ExecutionProfileRow"):source.index("function ExecutionProfilesPanel")]
 
-        self.assertIn("className: 'flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto", profile_row)
-        self.assertIn("flex: '1 1 10rem'", profile_row)
-        self.assertIn("flex: '0 0 10rem'", profile_row)
+        self.assertIn("className: 'flex min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto", profile_row)
+        self.assertIn("className: 'w-16 shrink-0'", profile_row)
+        self.assertIn("width: '4.75rem', flex: '0 0 4.75rem'", profile_row)
+        self.assertIn("className: 'flex h-8 w-20 shrink-0", profile_row)
+        self.assertIn("minWidth: '7rem', flex: '1 1 7rem'", profile_row)
+        self.assertIn("width: '7rem', minWidth: '7rem', flex: '0 0 7rem'", profile_row)
         self.assertIn("className: 'shrink-0', children: jsx(Badge", profile_row)
 
     def test_operations_ui_displays_singleton_proxy_and_cancellation_contract(self) -> None:
