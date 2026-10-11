@@ -21,6 +21,8 @@ class RuntimeInspector:
         models_root: Path, model_presets: Callable[[], dict[str, str]],
         latest_official: Callable[[], Any] | None = None,
         latest_prism: Callable[[], Any] | None = None,
+        current_strata: Callable[[], Any] | None = None,
+        latest_strata: Callable[[], Any] | None = None,
     ) -> None:
         self._load_state, self._save_state = load_state, save_state
         self._runtime_kind, self._executable = runtime_kind, executable
@@ -32,6 +34,8 @@ class RuntimeInspector:
         self._model_presets = model_presets
         self._latest_official = latest_official or (lambda: None)
         self._latest_prism = latest_prism or (lambda: None)
+        self._current_strata = current_strata or (lambda: None)
+        self._latest_strata = latest_strata or (lambda: None)
 
     def info(self) -> dict[str, Any]:
         state = self._load_state()
@@ -66,10 +70,19 @@ class RuntimeInspector:
         match = re.search(r"(?:^|-)b(\d+)(?:-|$)", str(tag or ""))
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _semantic_version(tag: str | None) -> tuple[int, ...] | None:
+        import re
+        match = re.fullmatch(r"v?(\d+(?:\.\d+)+)", str(tag or "").strip())
+        return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
     @classmethod
     def _update_available(cls, current: str | None, latest: str | None) -> bool:
         current_number, latest_number = cls._release_number(current), cls._release_number(latest)
-        return latest_number is not None and current_number is not None and latest_number > current_number
+        if current_number is not None or latest_number is not None:
+            return latest_number is not None and current_number is not None and latest_number > current_number
+        current_version, latest_version = cls._semantic_version(current), cls._semantic_version(latest)
+        return latest_version is not None and current_version is not None and latest_version > current_version
 
     def status(self) -> dict[str, Any]:
         state = self._load_state()
@@ -96,12 +109,22 @@ class RuntimeInspector:
 
         official_latest, official_error = self._release_info(self._latest_official())
         prism_latest, prism_error = self._release_info(self._latest_prism())
+        strata_current_info = self._current_strata()
+        if not isinstance(strata_current_info, dict):
+            strata_current_info = {"version": strata_current_info, "installed": bool(strata_current_info)}
+        strata_latest, strata_error = self._release_info(self._latest_strata())
         official_current = str(state.get("installed_tag") or "") or None
         prism_current = str(state.get("prism_release_tag") or "") or None
+        strata_current = str(strata_current_info.get("version") or "") or None
         official_update = self._update_available(official_current, official_latest)
         prism_update = self._update_available(prism_current, prism_latest)
-        current_latest = prism_latest if runtime["kind"] == "prism_ml" else official_latest
-        current_update = prism_update if runtime["kind"] == "prism_ml" else official_update
+        strata_update = self._update_available(strata_current, strata_latest)
+        current_latest = {
+            "official": official_latest, "prism_ml": prism_latest, "strata": strata_latest,
+        }.get(runtime["kind"])
+        current_update = {
+            "official": official_update, "prism_ml": prism_update, "strata": strata_update,
+        }.get(runtime["kind"], False)
         prism_installed = self._executable_in(self._prism_root) is not None
         if runtime["kind"] == "prism_ml":
             prism_installed = prism_installed or self._executable() is not None
@@ -125,6 +148,11 @@ class RuntimeInspector:
                     "version": prism_current, "latest_version": prism_latest,
                     "update_available": prism_update, "release_check_error": prism_error,
                     "installed": prism_installed,
+                },
+                "strata": {
+                    "version": strata_current, "latest_version": strata_latest,
+                    "update_available": strata_update, "release_check_error": strata_error,
+                    "installed": bool(strata_current_info.get("installed")),
                 },
             },
             "devices": self._devices(), "server_running": running,

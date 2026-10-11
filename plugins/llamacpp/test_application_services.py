@@ -830,24 +830,105 @@ class RuntimeRouteAdapterTests(unittest.TestCase):
         self.assertTrue({"/status", "/runtime", "/hardware", "/catalog", "/runtime/open", "/runtime/install"}.issubset(paths))
 
 
+class StrataRuntimeServiceTests(unittest.TestCase):
+    def test_detects_version_and_updates_clean_windows_checkout(self) -> None:
+        from dashboard.application.strata_runtime import StrataRuntimeService
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Strata"
+            root.mkdir()
+            (root / "UPDATE.bat").write_text("@echo off\n", encoding="utf-8")
+            state: dict[str, object] = {
+                "models": {"strata-model": {"runtime_kind": "strata", "runtime_root": str(root)}}
+            }
+            commands: list[list[str]] = []
+
+            def run(argv: list[str], _cwd: Path, _timeout: int) -> tuple[int, str]:
+                commands.append(argv)
+                if "status" in argv:
+                    return 0, ""
+                if "describe" in argv:
+                    return 0, "v0.1.42\n"
+                return 0, "updated"
+
+            service = StrataRuntimeService(
+                load_state=lambda: state,
+                save_state=lambda value: state.update(value),
+                run=run,
+                platform_name=lambda: "Windows",
+            )
+
+            self.assertEqual(service.current(), {"version": "v0.1.42", "installed": True})
+            self.assertEqual(service.update(), "v0.1.42")
+            self.assertIn("UPDATE.bat", commands[-2][-1])
+            self.assertEqual(state["strata_version"], "v0.1.42")
+            self.assertEqual(state["models"]["strata-model"]["strata_version"], "v0.1.42")
+
+    def test_resolves_latest_semver_tag_from_origin(self) -> None:
+        from dashboard.application.strata_runtime import StrataRuntimeService
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Strata"
+            root.mkdir()
+            state = {"models": {"model": {"runtime_kind": "strata", "runtime_root": str(root)}}}
+
+            def run(argv: list[str], _cwd: Path, _timeout: int) -> tuple[int, str]:
+                if "ls-remote" in argv:
+                    return 0, "aaa\trefs/tags/v0.1.9\nbbb\trefs/tags/v0.1.42\nccc\trefs/tags/preview\n"
+                return 0, ""
+
+            service = StrataRuntimeService(
+                load_state=lambda: state, save_state=lambda _value: None,
+                run=run, platform_name=lambda: "Windows",
+            )
+
+            self.assertEqual(service.latest(), {"tag": "v0.1.42"})
+
+    def test_refuses_update_when_strata_checkout_has_tracked_changes(self) -> None:
+        from dashboard.application.strata_runtime import StrataRuntimeService
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Strata"
+            root.mkdir()
+            (root / "UPDATE.bat").write_text("@echo off\n", encoding="utf-8")
+            state = {"models": {"model": {"runtime_kind": "strata", "runtime_root": str(root)}}}
+
+            def run(argv: list[str], _cwd: Path, _timeout: int) -> tuple[int, str]:
+                return (0, " M settings.json\n") if "status" in argv else (0, "v0.1.42\n")
+
+            service = StrataRuntimeService(
+                load_state=lambda: state, save_state=lambda _value: None,
+                run=run, platform_name=lambda: "Windows",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "tracked changes"):
+                service.update()
+
+
 class RuntimeManagementWorkflowTests(unittest.TestCase):
-    def test_external_strata_runtime_cannot_use_llamacpp_installer(self) -> None:
+    def test_strata_runtime_update_routes_to_external_updater_only_while_stopped(self) -> None:
         from dashboard.application.runtime_management import RuntimeManagementWorkflow
 
         class Backend:
             key = "strata"
 
+        state: dict[str, object] = {"pid": None}
+        updates: list[str] = []
         workflow = RuntimeManagementWorkflow(
-            load_state=lambda: {}, save_state=lambda _value: None,
+            load_state=lambda: state, save_state=lambda _value: None,
             get_backend=lambda _kind: Backend(), machine_root=Path("C:/runtime"),
             runtime_kind=lambda _state: "strata", runtime_info=lambda: {},
-            pid_alive=lambda _pid: False, open_directory=lambda _path: None,
+            pid_alive=lambda pid: pid == 42, open_directory=lambda _path: None,
             install_prism=lambda: {}, runtime_target=lambda *_: ("b1", "cpu"),
             create_job=lambda *_: {}, launch=lambda *_: None, finish=lambda *_: None,
             install_official=lambda *_: None, download_archive=lambda *_: None,
+            update_strata=lambda: updates.append("updated") or {"job_id": "strata-job", "kind": "strata"},
         )
 
-        with self.assertRaisesRegex(RuntimeError, "externally installed"):
+        self.assertEqual(workflow.install({"kind": "strata"})["job_id"], "strata-job")
+        self.assertEqual(updates, ["updated"])
+        state["pid"] = 42
+        with self.assertRaisesRegex(RuntimeError, "stop the server"):
             workflow.install({"kind": "strata"})
 
     def test_selects_custom_runtime_and_projects_installed_state(self) -> None:
@@ -1440,7 +1521,7 @@ class RuntimeInspectorTests(unittest.TestCase):
         self.assertTrue(status["server_running"])
 
 
-    def test_exposes_github_update_for_official_and_prism_runtimes(self) -> None:
+    def test_exposes_github_update_for_official_prism_and_strata_runtimes(self) -> None:
         from dashboard.application.runtime_inspector import RuntimeInspector
 
         state: dict[str, object] = {
@@ -1463,6 +1544,8 @@ class RuntimeInspectorTests(unittest.TestCase):
             unregister_endpoint=lambda: None, devices=lambda: [], server_rows=lambda: [],
             models_root=Path("models"), model_presets=lambda: {},
             latest_official=lambda: "b10982", latest_prism=lambda: "prism-b10743-adfffbe",
+            current_strata=lambda: {"version": "v0.1.41", "installed": True},
+            latest_strata=lambda: "v0.1.42",
         )
 
         status = inspector.status()
@@ -1471,6 +1554,10 @@ class RuntimeInspectorTests(unittest.TestCase):
         self.assertEqual(status["latest_tag"], "prism-b10743-adfffbe")
         self.assertTrue(status["runtime_options"]["prism_ml"]["update_available"])
         self.assertTrue(status["runtime_options"]["official"]["update_available"])
+        self.assertEqual(status["runtime_options"]["strata"]["version"], "v0.1.41")
+        self.assertEqual(status["runtime_options"]["strata"]["latest_version"], "v0.1.42")
+        self.assertTrue(status["runtime_options"]["strata"]["installed"])
+        self.assertTrue(status["runtime_options"]["strata"]["update_available"])
 
 
 class DeviceDiscoveryServiceTests(unittest.TestCase):

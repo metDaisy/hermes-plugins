@@ -23,6 +23,7 @@ REQUIRED = (
     "dashboard/application/server_lifecycle.py",
     "dashboard/application/server_startup.py",
     "dashboard/application/state_store.py",
+    "dashboard/application/strata_runtime.py",
     "dashboard/child_lifecycle.py",
     "dashboard/routes/execution_profile_routes.py",
     "desktop/plugin.js",

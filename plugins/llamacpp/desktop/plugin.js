@@ -640,15 +640,17 @@ function CoordinatorStatusPanel({ status }) {
   ] })
 }
 
-function RuntimeUpdateControl({ kind, label, option, disabled, onInstall }) {
+function RuntimeUpdateControl({ kind, label, option, disabled, disabledReason, onInstall }) {
   const installed = Boolean(option?.installed)
   const actionable = Boolean(option) && (!installed || Boolean(option?.update_available))
   const version = option?.version || '미설치'
   const latest = option?.latest_version
   const actionLabel = installed ? '업데이트' : '설치'
-  const title = actionable
-    ? `${label} runtime ${actionLabel}${latest ? ` · 최신 ${latest}` : ''}`
-    : `${label} runtime 최신 상태${latest ? ` · ${latest}` : ''}`
+  const title = disabled && disabledReason
+    ? disabledReason
+    : actionable
+      ? `${label} runtime ${actionLabel}${latest ? ` · 최신 ${latest}` : ''}`
+      : `${label} runtime 최신 상태${latest ? ` · ${latest}` : ''}`
   return jsxs('button', {
     type: 'button',
     className: `inline-flex items-center gap-1 rounded px-1.5 py-1 font-mono text-xs transition disabled:cursor-not-allowed disabled:opacity-50 ${actionable ? 'text-(--ui-text-primary) hover:bg-(--ui-bg-tertiary)' : 'text-(--ui-text-tertiary)'}`,
@@ -663,14 +665,15 @@ function RuntimeUpdateControl({ kind, label, option, disabled, onInstall }) {
 function RuntimeCard({ status, jobs, onRefresh, pushConnected }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  const runtimeJob = (jobs || []).find(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && job.status === 'running') || (jobs || []).find(job => ['runtime-install', 'prism-runtime-install'].includes(job.kind) && ['error', 'done'].includes(job.status))
+  const runtimeJobKinds = ['runtime-install', 'prism-runtime-install', 'strata-runtime-update']
+  const runtimeJob = (jobs || []).find(job => runtimeJobKinds.includes(job.kind) && job.status === 'running') || (jobs || []).find(job => runtimeJobKinds.includes(job.kind) && ['error', 'done'].includes(job.status))
   const serverJob = (jobs || []).find(job => job.kind === 'server-start')
   const runtimeBusy = busy || runtimeJob?.status === 'running'
   const serverBusy = serverJob?.status === 'running'
 
   useEffect(() => { if (runtimeJob?.status === 'done') { setMessage('runtime 준비가 완료되었습니다.'); onRefresh() } }, [runtimeJob?.job_id, runtimeJob?.status])
   const install = async kind => {
-    const label = kind === 'prism_ml' ? 'Prism-ML' : 'Official'
+    const label = kind === 'strata' ? 'Strata' : kind === 'prism_ml' ? 'Prism-ML' : 'Official'
     setBusy(true); setMessage('')
     try {
       await api('/runtime/install', { method: 'POST', body: { kind } })
@@ -685,7 +688,14 @@ function RuntimeCard({ status, jobs, onRefresh, pushConnected }) {
       jsxs('div', { className: 'flex flex-wrap items-center justify-end gap-1', 'aria-label': 'runtime 버전 및 업데이트', children: [
         jsx(RuntimeUpdateControl, { kind: 'official', label: 'Official', option: status?.runtime_options?.official, disabled: runtimeBusy || serverBusy, onInstall: install }),
         jsx('span', { className: 'text-(--ui-text-tertiary)', 'aria-hidden': true, children: '|' }),
-        jsx(RuntimeUpdateControl, { kind: 'prism_ml', label: 'Prism-ML', option: status?.runtime_options?.prism_ml, disabled: runtimeBusy || serverBusy, onInstall: install })
+        jsx(RuntimeUpdateControl, { kind: 'prism_ml', label: 'Prism-ML', option: status?.runtime_options?.prism_ml, disabled: runtimeBusy || serverBusy, onInstall: install }),
+        jsx('span', { className: 'text-(--ui-text-tertiary)', 'aria-hidden': true, children: '|' }),
+        jsx(RuntimeUpdateControl, {
+          kind: 'strata', label: 'Strata', option: status?.runtime_options?.strata,
+          disabled: runtimeBusy || serverBusy || status?.server_running,
+          disabledReason: status?.server_running ? 'Strata 업데이트 전에 server를 중지하세요.' : undefined,
+          onInstall: install
+        })
       ] })
     ] }),
     jsx(ExecutionProfilesPanel, { status, onRefresh }),

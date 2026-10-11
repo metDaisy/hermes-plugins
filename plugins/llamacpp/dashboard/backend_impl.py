@@ -53,6 +53,7 @@ try:
     from .application.prism_runtime import PrismRuntimeInstaller
     from .application.runtime_inspector import RuntimeInspector
     from .application.runtime_management import RuntimeManagementWorkflow
+    from .application.strata_runtime import StrataRuntimeService
     from .application.server_lifecycle import ServerLifecycleService
     from .application.server_startup import ServerStartupService
     from .application.state_store import StateStore
@@ -104,6 +105,7 @@ except ImportError:
     from application.prism_runtime import PrismRuntimeInstaller
     from application.runtime_inspector import RuntimeInspector
     from application.runtime_management import RuntimeManagementWorkflow
+    from application.strata_runtime import StrataRuntimeService
     from application.server_lifecycle import ServerLifecycleService
     from application.server_startup import ServerStartupService
     from application.state_store import StateStore
@@ -172,6 +174,9 @@ _official_runtime_service: OfficialRuntimeService | None = None
 _official_runtime_root: Path | None = None
 _prism_runtime_service: PrismRuntimeInstaller | None = None
 _prism_runtime_root: Path | None = None
+_strata_runtime_service: StrataRuntimeService | None = None
+_strata_release_cache: tuple[float, dict[str, Any]] | None = None
+_strata_release_lock = threading.RLock()
 _endpoint_config = ManagedEndpointConfig(CUSTOM_ENDPOINT_KEY, CUSTOM_ENDPOINT_BEGIN, CUSTOM_ENDPOINT_END)
 RESOURCE_HISTORY = ResourceHistoryStore(RESOURCE_HISTORY_PATH)
 
@@ -412,6 +417,45 @@ def _latest_prism_release() -> dict[str, Any]:
         return {"tag": tag, "backend": backend}
     except Exception as exc:  # noqa: BLE001
         return {"tag": None, "error": str(exc)}
+
+
+def _run_strata_command(argv: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
+    result = subprocess.run(
+        argv, cwd=str(cwd), capture_output=True, check=False, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+    )
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
+def _strata_runtime() -> StrataRuntimeService:
+    global _strata_runtime_service
+    if _strata_runtime_service is None:
+        _strata_runtime_service = StrataRuntimeService(
+            load_state=_state, save_state=_save_state,
+            run=_run_strata_command, platform_name=platform.system,
+        )
+    return _strata_runtime_service
+
+
+def _latest_strata_release() -> dict[str, Any]:
+    global _strata_release_cache
+    with _strata_release_lock:
+        if _strata_release_cache and time.time() - _strata_release_cache[0] < 300:
+            return dict(_strata_release_cache[1])
+        result = _strata_runtime().latest()
+        _strata_release_cache = (time.time(), result)
+        return dict(result)
+
+
+def _install_strata_runtime() -> dict[str, Any]:
+    job = _job("strata-runtime-update", "Strata update")
+
+    def run() -> None:
+        version = _strata_runtime().update()
+        _finish(job, f"Strata {version} ready")
+
+    _spawn(job, run, "strata-runtime-update")
+    return {"job_id": job["job_id"], "kind": "strata"}
 
 
 def _installed_target() -> tuple[str, str] | None:
@@ -1052,6 +1096,7 @@ def _runtime_inspector() -> RuntimeInspector:
         unregister_endpoint=_unregister_custom_endpoint, devices=_detected_devices,
         server_rows=_server_rows, models_root=MODELS_ROOT, model_presets=_presets_store().model_preset_map,
         latest_official=_latest_official_release, latest_prism=_latest_prism_release,
+        current_strata=_strata_runtime().current, latest_strata=_latest_strata_release,
     )
 
 
@@ -1064,7 +1109,7 @@ def _runtime_management() -> RuntimeManagementWorkflow:
         _state, _save_state, get_backend, MACHINE_ROOT, _runtime_kind, _runtime_info, _pid_alive,
         lambda path: os.startfile(str(path)), _install_prism_runtime, _runtime_target, _job, _spawn,
         _finish, lambda tag, backend, job, download: _official_runtime().install(tag, backend, job, download),
-        _download_archive,
+        _download_archive, _install_strata_runtime,
     )
 
 

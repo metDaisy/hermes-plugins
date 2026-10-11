@@ -2185,6 +2185,15 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("width: '7rem', minWidth: '7rem', flex: '0 0 7rem'", profile_row)
         self.assertIn("className: 'shrink-0', children: jsx(Badge", profile_row)
 
+    def test_runtime_header_exposes_strata_version_and_update_control(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+        runtime_card = source[source.index("function RuntimeUpdateControl"):source.index("function ParameterControl")]
+
+        self.assertIn("kind: 'strata', label: 'Strata'", runtime_card)
+        self.assertIn("status?.runtime_options?.strata", runtime_card)
+        self.assertIn("'strata-runtime-update'", runtime_card)
+        self.assertIn("kind === 'strata' ? 'Strata'", runtime_card)
+
     def test_operations_ui_displays_singleton_proxy_and_cancellation_contract(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn("Singleton proxy", source)

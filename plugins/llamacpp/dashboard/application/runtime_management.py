@@ -25,6 +25,7 @@ class RuntimeManagementWorkflow:
         finish: Callable[[dict[str, Any], str], None],
         install_official: Callable[[str, str, dict[str, Any], Callable[..., None]], None],
         download_archive: Callable[..., None],
+        update_strata: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._load_state = load_state
         self._save_state = save_state
@@ -41,6 +42,7 @@ class RuntimeManagementWorkflow:
         self._finish = finish
         self._install_official = install_official
         self._download_archive = download_archive
+        self._update_strata = update_strata
 
     def select(self, body: dict[str, Any]) -> dict[str, Any]:
         requested = body.get("kind") or body.get("mode") or "llamacpp"
@@ -71,6 +73,12 @@ class RuntimeManagementWorkflow:
         kind = self._get_backend(str(body.get("kind") or "official")).key
         if kind == "prism_ml":
             return self._install_prism()
+        if kind == "strata":
+            if self._pid_alive(self._load_state().get("pid")):
+                raise RuntimeError("stop the server before updating Strata")
+            if self._update_strata is None:
+                raise RuntimeError("Strata updater is unavailable")
+            return self._update_strata()
         if kind != "official":
             raise RuntimeError(f"{kind} is externally installed and cannot be installed by this plugin")
         tag, backend = self._runtime_target(True, body.get("backend"))
