@@ -1,6 +1,6 @@
 name: llamacpp
-version: 0.3.24
-description: Unified llama.cpp manager with official and Prism-ML backends.
+version: 0.3.25
+description: Unified local model manager with official llama.cpp, Prism-ML, and external Strata backends.
 kind: standalone
 provides_hooks:
   - pre_auxiliary_call
