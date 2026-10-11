@@ -62,6 +62,35 @@ class NativeRouterPlanTests(unittest.TestCase):
 
 
 class ActivityLogProjectionTests(unittest.TestCase):
+    def test_projects_allowlisted_strata_progress_without_arbitrary_output(self) -> None:
+        import json
+        from dashboard.application.activity_log_projection import project_activity_lines
+
+        result = project_activity_lines([
+            json.dumps({
+                "type": "hermes_request_context", "role": "main", "profile": "main",
+                "session": "session-1", "request_id": "request-1", "recorded_at": 1000.0,
+            }),
+            "[strata] reading the prompt: 70,940 of 70,945 tokens, 1 s so far",
+            "[strata] thinking: 137 of max 60,119 tokens, 72.6 tok/s, 3 s",
+            "[strata] answering: 635 of max 60,119 tokens, 88.6 tok/s, 8 s",
+            "[strata] done: 635 tokens in 8 s (88.6 tok/s) (stop, cancel=False), expert cache 86.6% hit",
+            "[strata] arbitrary PRIVATE PROMPT CONTENT api_key=secret",
+        ])
+
+        self.assertEqual(result["lines"], [
+            "[Main][main][session-1] prompt 처리 99% · 70,940 / 70,945 tok",
+            "[Main][main][session-1] reasoning 137 tok · 72.6 tok/s · 3초",
+            "[Main][main][session-1] 답변 생성 635 tok · 88.6 tok/s · 8초",
+            "[Main][main][session-1] 요청 완료 · 635 tok · 8초 · 88.6 tok/s · expert cache 86.6%",
+        ])
+        self.assertNotIn("PRIVATE PROMPT CONTENT", "\n".join(result["lines"]))
+        self.assertNotIn("secret", "\n".join(result["lines"]))
+        self.assertEqual(
+            [event["event"] for event in result["events"]],
+            ["prompt_progress", "generation_progress", "generation_progress", "inference_completed"],
+        )
+
     def test_truncates_long_session_display_but_preserves_full_event_identity(self) -> None:
         import json
         from dashboard.application.activity_log_projection import project_activity_lines
@@ -290,6 +319,61 @@ class ActivityLogProjectionTests(unittest.TestCase):
 
 
 class ResourceMetricsTests(unittest.TestCase):
+    def test_reads_privacy_safe_strata_metrics_allowlist(self) -> None:
+        import json
+        from dashboard.application.resource_metrics import read_strata_metrics
+
+        payload = {
+            "live": {
+                "state": "generating", "phase": "answering", "prompt_tokens": 80000,
+                "prompt_read": 79900, "generated": 600, "tok_s": 88.6,
+                "prefill_tok_s_mean": 1240.5, "queued": 2, "prompt": "PRIVATE",
+            },
+            "totals": {
+                "requests": 15, "prompt_tokens": 931488, "output_tokens": 15936,
+                "reused": 740901, "drafts_offered": 13697, "drafts_accepted": 8364,
+            },
+            "engine": {"max_context": 131072, "mtp_max": 4, "model": "safe-model", "config": "PRIVATE"},
+            "hardware": {
+                "gpu_util": 58, "gpu_mem_used": 16603049984, "gpu_mem_total": 17094934528,
+                "gpu_temp": 47, "gpu_power": 109.156, "cpu": 44.6, "ram_used": 58663505920,
+                "ram_total": 66125660160,
+            },
+            "requests": [{"decode_tok_s": 88.6, "hit_rate": 0.866, "prompt": "PRIVATE"}],
+            "api_key": "secret",
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read() -> bytes:
+                return json.dumps(payload).encode("utf-8")
+
+        captured = []
+
+        def open_url(request, timeout):
+            captured.append((request.full_url, request.headers.get("Accept"), timeout))
+            return Response()
+
+        result = read_strata_metrics(18080, opener=open_url)
+
+        self.assertEqual(captured, [("http://127.0.0.1:18080/metrics", "application/json", 0.75)])
+        self.assertEqual(result["kind"], "strata")
+        self.assertEqual(result["live"]["generation_tokens_per_second"], 88.6)
+        self.assertEqual(result["live"]["context_tokens"], 80600)
+        self.assertEqual(result["totals"]["draft_acceptance_percent"], 61.064)
+        self.assertEqual(result["hardware"]["gpu_util_percent"], 58.0)
+        self.assertEqual(result["last_request"], {"decode_tokens_per_second": 88.6, "expert_cache_hit_percent": 86.6})
+        encoded = json.dumps(result)
+        self.assertNotIn("PRIVATE", encoded)
+        self.assertNotIn("secret", encoded)
+        self.assertNotIn("api_key", encoded)
+
     def test_reads_active_worker_slot_context_without_prompt_content(self) -> None:
         import json
         from dashboard.application.resource_metrics import read_worker_slot_context

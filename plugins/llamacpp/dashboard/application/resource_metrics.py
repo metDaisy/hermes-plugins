@@ -7,6 +7,98 @@ import urllib.request
 from typing import Any, Callable
 
 
+def read_strata_metrics(
+    port: int,
+    *,
+    opener: Callable[..., Any] | None = None,
+) -> dict[str, Any] | None:
+    """Read Strata's JSON metrics and return only privacy-safe numeric/status fields."""
+    open_url = opener or urllib.request.urlopen
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{int(port)}/metrics",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with open_url(request, timeout=0.75) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - unavailable telemetry is represented as missing
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    live = payload.get("live") if isinstance(payload.get("live"), dict) else {}
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+    engine = payload.get("engine") if isinstance(payload.get("engine"), dict) else {}
+    hardware = payload.get("hardware") if isinstance(payload.get("hardware"), dict) else {}
+    requests = payload.get("requests") if isinstance(payload.get("requests"), list) else []
+    last = requests[0] if requests and isinstance(requests[0], dict) else {}
+
+    def number(value: Any) -> float | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def integer(value: Any) -> int | None:
+        numeric = number(value)
+        return int(numeric) if numeric is not None else None
+
+    prompt_tokens = integer(live.get("prompt_tokens"))
+    generated = integer(live.get("generated"))
+    context_tokens = (
+        max(0, prompt_tokens or 0) + max(0, generated or 0)
+        if prompt_tokens is not None or generated is not None else None
+    )
+    offered = integer(totals.get("drafts_offered"))
+    accepted = integer(totals.get("drafts_accepted"))
+    acceptance = round(accepted / offered * 100.0, 3) if offered and accepted is not None else None
+    hit_rate = number(last.get("hit_rate"))
+
+    return {
+        "kind": "strata",
+        "live": {
+            "state": str(live.get("state") or "unknown")[:32],
+            "phase": str(live.get("phase") or "")[:64],
+            "prompt_tokens": prompt_tokens,
+            "prompt_read": integer(live.get("prompt_read")),
+            "generated_tokens": generated,
+            "context_tokens": context_tokens,
+            "prompt_tokens_per_second": number(live.get("prefill_tok_s_mean")),
+            "generation_tokens_per_second": number(live.get("tok_s")),
+            "queued_requests": integer(live.get("queued")) or 0,
+        },
+        "totals": {
+            "requests": integer(totals.get("requests")) or 0,
+            "prompt_tokens": integer(totals.get("prompt_tokens")) or 0,
+            "output_tokens": integer(totals.get("output_tokens")) or 0,
+            "reused_prompt_tokens": integer(totals.get("reused")) or 0,
+            "drafts_offered": offered or 0,
+            "drafts_accepted": accepted or 0,
+            "draft_acceptance_percent": acceptance,
+        },
+        "engine": {
+            "max_context": integer(engine.get("max_context") or engine.get("context")),
+            "mtp_max": integer(engine.get("mtp_max")),
+        },
+        "hardware": {
+            "gpu_util_percent": number(hardware.get("gpu_util")),
+            "gpu_memory_used_bytes": integer(hardware.get("gpu_mem_used")),
+            "gpu_memory_total_bytes": integer(hardware.get("gpu_mem_total")),
+            "gpu_temperature_c": number(hardware.get("gpu_temp")),
+            "gpu_power_watts": number(hardware.get("gpu_power")),
+            "cpu_percent": number(hardware.get("cpu")),
+            "ram_used_bytes": integer(hardware.get("ram_used")),
+            "ram_total_bytes": integer(hardware.get("ram_total")),
+        },
+        "last_request": {
+            "decode_tokens_per_second": number(last.get("decode_tok_s")),
+            "expert_cache_hit_percent": round(hit_rate * 100.0, 3) if hit_rate is not None else None,
+        },
+    }
+
+
 def read_worker_slot_context(
     port: int,
     *,

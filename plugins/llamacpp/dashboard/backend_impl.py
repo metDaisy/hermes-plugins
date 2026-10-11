@@ -45,7 +45,7 @@ try:
     from .application.parameter_settings import ParameterSettingsService
     from .application.preset_store import PresetStore
     from .application.activity_log_projection import compression_call_page, contextual_activity_tail, project_activity_lines
-    from .application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
+    from .application.resource_metrics import aggregate_profile_metrics, read_strata_metrics, read_worker_slot_context
     from .application.resource_history import RESOURCE_SAMPLER_SIGNAL, ResourceHistoryStore, worker_memory_sample
     from .application.event_bus import publish_event, start_activity_pump
     from .application.profile_endpoint import ManagedEndpointConfig, apply_worker_model_policy, write_text_atomically
@@ -95,7 +95,7 @@ except ImportError:
     from application.parameter_settings import ParameterSettingsService
     from application.preset_store import PresetStore
     from application.activity_log_projection import compression_call_page, contextual_activity_tail, project_activity_lines
-    from application.resource_metrics import aggregate_profile_metrics, read_worker_slot_context
+    from application.resource_metrics import aggregate_profile_metrics, read_strata_metrics, read_worker_slot_context
     from application.resource_history import RESOURCE_SAMPLER_SIGNAL, ResourceHistoryStore, worker_memory_sample
     from application.event_bus import publish_event, start_activity_pump
     from application.profile_endpoint import ManagedEndpointConfig, apply_worker_model_policy, write_text_atomically
@@ -948,6 +948,28 @@ def _resource_metrics(window: int = 1800, compression_cursor: str | None = None,
     active_metric = role_metrics.get(active_role) if isinstance(role_metrics.get(active_role), dict) else None
     if active_metric is not None and slot_context is not None:
         active_metric.update(slot_context)
+    active_runtime = str(active_profile.get("runtime_kind") or "") if isinstance(active_profile, dict) else ""
+    runtime_metrics = (
+        read_strata_metrics(int(state.get("port") or 18080))
+        if running and active_runtime == "strata" else None
+    )
+    if runtime_metrics is not None:
+        result["runtime"] = runtime_metrics
+        live = runtime_metrics.get("live") if isinstance(runtime_metrics.get("live"), dict) else {}
+        engine = runtime_metrics.get("engine") if isinstance(runtime_metrics.get("engine"), dict) else {}
+        if active_metric is not None:
+            active_metric.update({
+                "prompt_tokens": int(live.get("prompt_tokens") or 0),
+                "generated_tokens": int(live.get("generated_tokens") or 0),
+                "tokens_per_minute": int(live.get("prompt_tokens") or 0) + int(live.get("generated_tokens") or 0),
+                "prompt_tokens_per_second": live.get("prompt_tokens_per_second"),
+                "generation_tokens_per_second": live.get("generation_tokens_per_second"),
+                "last_activity_at": float(result.get("sampled_at") or time.time()),
+            })
+            if active_metric.get("context_tokens") is None and live.get("context_tokens") is not None:
+                active_metric["context_tokens"] = int(live["context_tokens"])
+            if not active_metric.get("context_limit") and engine.get("max_context"):
+                active_metric["context_limit"] = int(engine["max_context"])
     worker_pid = int(state.get("pid") or 0) if running else 0
     result["worker"] = {
         "running": running,

@@ -398,6 +398,31 @@ function CompressionCallsSummary({ calls, canPrevious, canNext, onPrevious, onNe
   ] })
 }
 
+function StrataMetricsSummary({ runtime }) {
+  if (runtime?.kind !== 'strata') return null
+  const live = runtime.live || {}
+  const totals = runtime.totals || {}
+  const hardware = runtime.hardware || {}
+  const memoryUsed = Number(hardware.gpu_memory_used_bytes || 0)
+  const memoryTotal = Number(hardware.gpu_memory_total_bytes || 0)
+  const memory = memoryTotal ? `${(memoryUsed / 1024 ** 3).toFixed(1)} / ${(memoryTotal / 1024 ** 3).toFixed(1)} GiB` : '—'
+  const acceptance = totals.draft_acceptance_percent == null ? '—' : `${Number(totals.draft_acceptance_percent).toFixed(1)}%`
+  const gpu = hardware.gpu_util_percent == null ? '—' : `${Number(hardware.gpu_util_percent).toFixed(0)}% · ${memory}`
+  const rows = [
+    ['State', `${live.state || 'unknown'}${live.phase ? ` · ${live.phase}` : ''}`],
+    ['Draft acceptance', `${acceptance} (${Number(totals.drafts_accepted || 0).toLocaleString()} / ${Number(totals.drafts_offered || 0).toLocaleString()})`],
+    ['GPU', gpu],
+    ['Requests', Number(totals.requests || 0).toLocaleString()]
+  ]
+  return jsxs('section', { className: 'border-t border-(--ui-stroke-secondary) px-3 py-3', 'aria-label': 'Strata metric', children: [
+    jsx('h3', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'Strata metric' }),
+    jsx('dl', { className: 'mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-[11px]', children: rows.flatMap(([label, value]) => [
+      jsx('dt', { className: 'text-(--ui-text-tertiary)', children: label }, `${label}-label`),
+      jsx('dd', { className: 'text-right tabular-nums text-(--ui-text-secondary)', children: value }, `${label}-value`)
+    ]) })
+  ] })
+}
+
 function ResourceMetricsPanel({ status, pushConnected }) {
   const [showDetails, setShowDetails] = useState(false)
   const [windowSeconds, setWindowSeconds] = useState(1800)
@@ -430,6 +455,7 @@ function ResourceMetricsPanel({ status, pushConnected }) {
     ] }),
     !serverStopped && metricsQuery.error ? jsx('p', { className: 'px-3 py-3 text-xs text-(--dt-destructive)', role: 'alert', children: String(metricsQuery.error.message || metricsQuery.error) }) : null,
     jsx(RoleMetricsSummary, { roles, serverRunning: !serverStopped }),
+    jsx(StrataMetricsSummary, { runtime: snapshot?.runtime }),
     jsx(CompressionCallsSummary, {
       calls: compressionCalls,
       canPrevious: compressionCursors.length > 0,

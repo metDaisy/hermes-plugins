@@ -184,6 +184,80 @@ def project_activity_lines(raw_lines: list[str], *, latest_observed_at: float | 
         if not text:
             continue
 
+        strata_prompt = re.fullmatch(
+            r"\[strata\]\s+reading the prompt:\s*([\d,]+) of ([\d,]+) tokens,\s*(\d+) s so far",
+            text,
+            re.IGNORECASE,
+        )
+        if strata_prompt:
+            current = int(strata_prompt.group(1).replace(",", ""))
+            total = int(strata_prompt.group(2).replace(",", ""))
+            progress = min(1.0, current / total) if total else 0.0
+            percent = 100 if current >= total else min(99, round(progress * 100))
+            _emit(
+                events, lines, current_role, "prompt_progress",
+                f"prompt 처리 {percent}% · {current:,} / {total:,} tok",
+                contexts=contexts, progress=progress, prompt_tokens=current, prompt_total=total,
+            )
+            continue
+
+        strata_generation = re.fullmatch(
+            r"\[strata\]\s+(thinking|answering):\s*([\d,]+) of max ([\d,]+) tokens,\s*([0-9.]+) tok/s,\s*(\d+) s",
+            text,
+            re.IGNORECASE,
+        )
+        if strata_generation:
+            phase = strata_generation.group(1).lower()
+            tokens = int(strata_generation.group(2).replace(",", ""))
+            rate = float(strata_generation.group(4))
+            elapsed = int(strata_generation.group(5))
+            label = "reasoning" if phase == "thinking" else "답변 생성"
+            _emit(
+                events, lines, current_role, "generation_progress",
+                f"{label} {tokens:,} tok · {rate:.1f} tok/s · {elapsed}초",
+                contexts=contexts, generated_tokens=tokens,
+                generation_tokens_per_second=rate, phase=phase, elapsed_seconds=elapsed,
+            )
+            continue
+
+        strata_tool = re.fullmatch(
+            r"\[strata\]\s+writing a tool call:\s*[^:]+:\s*([\d,]+) of max ([\d,]+) tokens,\s*([0-9.]+) tok/s,\s*(\d+) s",
+            text,
+            re.IGNORECASE,
+        )
+        if strata_tool:
+            tokens = int(strata_tool.group(1).replace(",", ""))
+            rate = float(strata_tool.group(3))
+            elapsed = int(strata_tool.group(4))
+            _emit(
+                events, lines, current_role, "generation_progress",
+                f"tool call 생성 {tokens:,} tok · {rate:.1f} tok/s · {elapsed}초",
+                contexts=contexts, generated_tokens=tokens,
+                generation_tokens_per_second=rate, phase="tool_call", elapsed_seconds=elapsed,
+            )
+            continue
+
+        strata_done = re.fullmatch(
+            r"\[strata\]\s+done:\s*([\d,]+) tokens in (\d+) s \(([0-9.]+) tok/s\).*?"
+            r"(?:,\s*expert cache ([0-9.]+)% hit(?:.*)?)?",
+            text,
+            re.IGNORECASE,
+        )
+        if strata_done:
+            tokens = int(strata_done.group(1).replace(",", ""))
+            elapsed = int(strata_done.group(2))
+            rate = float(strata_done.group(3))
+            cache_hit = float(strata_done.group(4)) if strata_done.group(4) else None
+            suffix = f" · expert cache {cache_hit:.1f}%" if cache_hit is not None else ""
+            _emit(
+                events, lines, current_role, "inference_completed",
+                f"요청 완료 · {tokens:,} tok · {elapsed}초 · {rate:.1f} tok/s{suffix}",
+                contexts=contexts, total_tokens=tokens, total_ms=elapsed * 1000.0,
+                generated_tokens=tokens, generation_tokens_per_second=rate,
+                expert_cache_hit_percent=cache_hit,
+            )
+            continue
+
         version = re.search(r"\[Server\]\s+llama-server version:\s*(.+)", text, re.IGNORECASE)
         if version:
             _emit(events, lines, "server", "llama_server_version", f"llama-server version: {version.group(1).strip()}")
