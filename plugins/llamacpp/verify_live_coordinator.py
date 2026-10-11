@@ -12,7 +12,7 @@ from pathlib import Path
 HERMES_ROOT = Path.home() / "AppData" / "Local" / "hermes"
 HEALTH = "http://127.0.0.1:18380/__llamacpp_backend_health"
 EXPECTED_SERVICE = "hermes-llamacpp-coordinator"
-EXPECTED_PROTOCOL = 1
+EXPECTED_PROTOCOL = 2
 
 
 def load_proxy(profile: str):
