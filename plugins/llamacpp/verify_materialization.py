@@ -19,13 +19,16 @@ REQUIRED = (
     "dashboard/application/coordinator_lock.py",
     "dashboard/application/desktop_leases.py",
     "dashboard/application/execution_profiles.py",
+    "dashboard/application/parameter_settings.py",
     "dashboard/application/profile_endpoint.py",
     "dashboard/application/server_lifecycle.py",
     "dashboard/application/server_startup.py",
     "dashboard/application/state_store.py",
     "dashboard/application/strata_runtime.py",
+    "dashboard/backends/strata.py",
     "dashboard/child_lifecycle.py",
     "dashboard/routes/execution_profile_routes.py",
+    "dashboard/routes/parameter_routes.py",
     "desktop/plugin.js",
 )
 
