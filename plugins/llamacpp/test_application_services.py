@@ -481,8 +481,10 @@ class ManagedEndpointConfigTests(unittest.TestCase):
             "models": {"strata-iq3_xxs": {"runtime_kind": "strata"}},
         }
         presets = {
-            "main-preset": {"options": {"temp": "0.7", "top-p": "0.9"}},
-            "compress-preset": {"options": {"temp": "0", "top-p": "1"}},
+            "main-preset": {"runtime_kind": "strata", "context_length": 131072,
+                            "options": {"temp": "0.7", "top-p": "0.9"}},
+            "compress-preset": {"runtime_kind": "strata", "context_length": 131072,
+                                "options": {"temp": "0", "top-p": "1"}},
         }
         service = ExecutionProfileService(
             load_state=lambda: state,
@@ -500,6 +502,29 @@ class ManagedEndpointConfigTests(unittest.TestCase):
         self.assertEqual(result["profiles"]["compression"]["preset_options"], {"temp": "0", "top-p": "1"})
         self.assertEqual(state["execution_profiles"]["main"]["preset_id"], "main-preset")
         self.assertEqual(state["execution_profiles"]["compression"]["preset_id"], "compress-preset")
+
+    def test_shared_strata_worker_rejects_conflicting_preset_contexts(self) -> None:
+        from dashboard.application.execution_profiles import ExecutionProfileService
+
+        state: dict[str, object] = {
+            "models": {"strata-iq3_xxs": {"runtime_kind": "strata"}},
+        }
+        presets = {
+            "main-preset": {"runtime_kind": "strata", "context_length": 131072, "options": {"temp": "1"}},
+            "compress-preset": {"runtime_kind": "strata", "context_length": 65536, "options": {"temp": "0"}},
+        }
+        service = ExecutionProfileService(
+            load_state=lambda: state,
+            save_state=lambda value: state.update(value),
+            accepts=lambda kind, _model_id: kind == "strata",
+            resolve_preset=presets.get,
+        )
+
+        with self.assertRaisesRegex(ValueError, "context"):
+            service.save_many({
+                "main": {"model_id": "strata-iq3_xxs", "preset_id": "main-preset"},
+                "compression": {"model_id": "strata-iq3_xxs", "preset_id": "compress-preset"},
+            })
 
     def test_execution_profile_rejects_unknown_preset(self) -> None:
         from dashboard.application.execution_profiles import ExecutionProfileService

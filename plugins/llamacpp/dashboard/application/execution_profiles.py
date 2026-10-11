@@ -81,7 +81,7 @@ class ExecutionProfileService:
     def save_many(self, bindings: dict[str, dict[str, Any]]) -> dict[str, Any]:
         state = self.load_state()
         models = state.get("models") if isinstance(state.get("models"), dict) else {}
-        prepared: dict[str, dict[str, str] | None] = {}
+        prepared: dict[str, dict[str, Any] | None] = {}
         for raw_role, body in bindings.items():
             role = str(raw_role or "").strip().lower()
             if role not in ROLES:
@@ -116,6 +116,25 @@ class ExecutionProfileService:
                 "preset_id": preset_id,
                 "preset_options": preset_options,
             }
+
+        effective = dict(state.get("execution_profiles") or {})
+        for role, profile in prepared.items():
+            if profile is None:
+                effective.pop(role, None)
+            else:
+                effective[role] = profile
+        strata_contexts: dict[str, set[int]] = {}
+        if self.resolve_preset is not None:
+            for profile in effective.values():
+                if not isinstance(profile, dict) or str(profile.get("runtime_kind") or "") != "strata":
+                    continue
+                preset_id = str(profile.get("preset_id") or "")
+                preset = self.resolve_preset(preset_id) if preset_id else None
+                context_length = (preset or {}).get("context_length")
+                if context_length is not None:
+                    strata_contexts.setdefault(str(profile.get("model_id") or ""), set()).add(int(context_length))
+        if any(len(values) > 1 for values in strata_contexts.values()):
+            raise ValueError("같은 Strata worker를 공유하는 preset의 context 크기는 같아야 합니다")
 
         def apply(current: dict[str, Any]) -> None:
             stored = current.get("execution_profiles")
