@@ -866,10 +866,10 @@ class StrataRuntimeServiceTests(unittest.TestCase):
             state: dict[str, object] = {
                 "models": {"strata-model": {"runtime_kind": "strata", "runtime_root": str(root)}}
             }
-            commands: list[list[str]] = []
+            commands: list[tuple[list[str], Path]] = []
 
-            def run(argv: list[str], _cwd: Path, _timeout: int) -> tuple[int, str]:
-                commands.append(argv)
+            def run(argv: list[str], cwd: Path, _timeout: int) -> tuple[int, str]:
+                commands.append((argv, cwd))
                 if "status" in argv:
                     return 0, ""
                 if "describe" in argv:
@@ -885,7 +885,10 @@ class StrataRuntimeServiceTests(unittest.TestCase):
 
             self.assertEqual(service.current(), {"version": "v0.1.42", "installed": True})
             self.assertEqual(service.update(), "v0.1.42")
-            self.assertIn("UPDATE.bat", commands[-2][-1])
+            self.assertEqual(
+                commands[-2],
+                (["cmd.exe", "/d", "/s", "/c", "UPDATE.bat", "--yes", "<nul"], root),
+            )
             self.assertEqual(state["strata_version"], "v0.1.42")
             self.assertEqual(state["models"]["strata-model"]["strata_version"], "v0.1.42")
 
@@ -899,7 +902,7 @@ class StrataRuntimeServiceTests(unittest.TestCase):
 
             def run(argv: list[str], _cwd: Path, _timeout: int) -> tuple[int, str]:
                 if "ls-remote" in argv:
-                    return 0, "aaa\trefs/tags/v0.1.9\nbbb\trefs/tags/v0.1.42\nccc\trefs/tags/preview\n"
+                    return 0, "aaa\trefs/tags/v0.1.9\nbbb\trefs/tags/v0.1.42\nccc\trefs/tags/v0.1.43.1\nddd\trefs/tags/preview\n"
                 return 0, ""
 
             service = StrataRuntimeService(
@@ -907,7 +910,7 @@ class StrataRuntimeServiceTests(unittest.TestCase):
                 run=run, platform_name=lambda: "Windows",
             )
 
-            self.assertEqual(service.latest(), {"tag": "v0.1.42"})
+            self.assertEqual(service.latest(), {"tag": "v0.1.43.1"})
 
     def test_refuses_update_when_strata_checkout_has_tracked_changes(self) -> None:
         from dashboard.application.strata_runtime import StrataRuntimeService

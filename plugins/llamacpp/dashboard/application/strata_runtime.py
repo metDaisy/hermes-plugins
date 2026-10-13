@@ -63,9 +63,9 @@ class StrataRuntimeService:
         tags = []
         for line in output.splitlines():
             ref = line.rsplit("refs/tags/", 1)[-1].strip() if "refs/tags/" in line else ""
-            match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", ref)
+            match = re.fullmatch(r"v?(\d+(?:\.\d+){2,})", ref)
             if match:
-                tags.append((tuple(int(part) for part in match.groups()), ref))
+                tags.append((tuple(int(part) for part in match.group(1).split(".")), ref))
         if not tags:
             return {"tag": None, "error": "no semantic Strata release tags found"}
         return {"tag": max(tags)[1]}
@@ -91,7 +91,7 @@ class StrataRuntimeService:
         if not updater.is_file():
             raise RuntimeError(f"Strata updater is missing: {updater.name}")
         command = (
-            ["cmd.exe", "/d", "/s", "/c", f'call "{updater}" --yes <nul']
+            ["cmd.exe", "/d", "/s", "/c", updater.name, "--yes", "<nul"]
             if windows
             else ["bash", str(updater), "--yes"]
         )
