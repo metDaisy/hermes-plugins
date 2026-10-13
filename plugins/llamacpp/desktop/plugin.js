@@ -729,16 +729,19 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
   const [presetName, setPresetName] = useState('')
   const [presetRename, setPresetRename] = useState('')
   const [selectedPresetId, setSelectedPresetId] = useState('')
-  const [contextLength, setContextLength] = useState('')
-  const settings = useQuery({ queryKey: [ID, 'model-settings', modelId], queryFn: () => api(`/settings/${encodeURIComponent(modelId)}`), enabled: open, refetchOnWindowFocus: false })
-  const runtimeKind = settings.data?.runtime_kind || 'official'
-  const parameterFormat = settings.data?.parameter_format || (runtimeKind === 'strata' ? 'strata' : 'llamacpp')
-  const options = useQuery({ queryKey: [ID, 'model-settings-options', modelId, query], queryFn: () => api(`/settings?q=${encodeURIComponent(query)}&limit=20&model_id=${encodeURIComponent(modelId)}`), enabled: open && query.trim().length > 0, refetchOnWindowFocus: false })
-  const presetsQuery = useQuery({ queryKey: [ID, 'presets', modelId], queryFn: () => api(`/presets?model_id=${encodeURIComponent(modelId)}`), enabled: open, staleTime: 0, refetchOnMount: 'always', refetchOnWindowFocus: true })
+  const [strataPreset, setStrataPreset] = useState(false)
+  const baseSettings = useQuery({ queryKey: [ID, 'model-settings-base', modelId], queryFn: () => api(`/settings/${encodeURIComponent(modelId)}`), enabled: open, refetchOnWindowFocus: false })
+  const baseRuntimeKind = baseSettings.data?.runtime_kind || 'official'
+  const editorRuntimeKind = strataPreset ? 'strata' : baseRuntimeKind === 'strata' ? 'official' : baseRuntimeKind
+  const parameterFormat = strataPreset ? 'strata' : 'llamacpp'
+  const settings = useQuery({ queryKey: [ID, 'model-settings', modelId, editorRuntimeKind], queryFn: () => api(`/settings/${encodeURIComponent(modelId)}?runtime_kind=${encodeURIComponent(editorRuntimeKind)}`), enabled: open && Boolean(baseSettings.data), refetchOnWindowFocus: false })
+  const options = useQuery({ queryKey: [ID, 'model-settings-options', modelId, editorRuntimeKind, query], queryFn: () => api(`/settings?q=${encodeURIComponent(query)}&limit=20&model_id=${encodeURIComponent(modelId)}&runtime_kind=${encodeURIComponent(editorRuntimeKind)}`), enabled: open && query.trim().length > 0, refetchOnWindowFocus: false })
+  const presetsQuery = useQuery({ queryKey: [ID, 'presets', parameterFormat], queryFn: () => api(`/presets?runtime_kind=${encodeURIComponent(editorRuntimeKind)}`), enabled: open && Boolean(baseSettings.data), staleTime: 0, refetchOnMount: 'always', refetchOnWindowFocus: true })
   const compatiblePresets = (presetsQuery.data?.presets || []).filter(preset => preset.runtime_kind === parameterFormat)
   const selectedPreset = compatiblePresets.find(preset => preset.id === selectedPresetId)
   const availableOptions = (options.data?.options || []).filter(option => !Object.prototype.hasOwnProperty.call(draft, option.key))
   const selected = availableOptions.find(option => option.key === selectedKey)
+  useEffect(() => { if (baseSettings.data) setStrataPreset(baseSettings.data.parameter_format === 'strata') }, [modelId, open, baseSettings.data?.parameter_format])
   useEffect(() => {
     setSelectedPresetId(appliedPresetId)
     setDraft({})
@@ -749,11 +752,10 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
   useEffect(() => {
     const next = selectedPreset ? { ...(selectedPreset.options || {}) } : {}
     setDraft(next)
-    setContextLength(selectedPreset?.context_length == null ? String(settings.data?.context_length || '') : String(selectedPreset.context_length))
     setFieldErrors({})
     setSelectedKey('')
     setValue('')
-  }, [selectedPresetId, selectedPreset?.updated_at, settings.data?.context_length])
+  }, [selectedPresetId, selectedPreset?.updated_at, parameterFormat])
   useEffect(() => { setPresetRename(selectedPreset?.name || '') }, [selectedPresetId, selectedPreset?.name])
   const validateDraft = (next, extraMetadata = {}) => {
     const metadata = { ...(settings.data?.metadata || {}), ...extraMetadata }
@@ -766,7 +768,7 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
     setSaving(true)
     setMessage('')
     try {
-      await api(`/presets/${encodeURIComponent(selectedPresetId)}`, { method: 'PATCH', body: { options: next, runtime_kind: runtimeKind, context_length: contextLength } })
+      await api(`/presets/${encodeURIComponent(selectedPresetId)}`, { method: 'PATCH', body: { options: next, runtime_kind: editorRuntimeKind } })
       await presetsQuery.refetch()
       setDraft(next)
       setFieldErrors({})
@@ -796,7 +798,7 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
   const savePreset = async () => {
     if (!presetName.trim()) { setMessage('preset 이름을 입력하세요.'); return }
     try {
-      const result = await api('/presets', { method: 'POST', body: { name: presetName.trim(), options: draft, model_id: modelId, runtime_kind: runtimeKind, context_length: contextLength } })
+      const result = await api('/presets', { method: 'POST', body: { name: presetName.trim(), options: draft, model_id: modelId, runtime_kind: editorRuntimeKind } })
       await Promise.all([presetsQuery.refetch(), queryClient.invalidateQueries({ queryKey: [ID, 'presets'] })])
       setSelectedPresetId(result.preset.id)
       setPresetName('')
@@ -829,9 +831,9 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
   return open ? jsxs('div', { className: 'mt-3 rounded-md border border-(--ui-stroke-secondary) p-3 sm:p-4', children: [
       jsx('p', { className: `mb-2 text-xs ${muted}`, children: 'preset을 선택하면 해당 preset의 parameter만 표시됩니다. preset 선택을 해제하면 parameter가 비워집니다.' }),
       jsxs('div', { className: 'mb-4 rounded-md bg-(--ui-bg-tertiary) p-3', children: [
-        jsxs('div', { className: 'mb-1 flex items-center gap-2', children: [jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'parameter preset' }), jsx(Badge, { children: parameterFormat === 'strata' ? 'Strata request' : 'llama.cpp CLI' })] }),
+        jsxs('div', { className: 'mb-2 flex flex-wrap items-center justify-between gap-2', children: [jsxs('div', { className: 'flex items-center gap-2', children: [jsx('p', { className: 'text-xs font-medium text-(--ui-text-primary)', children: 'parameter preset' }), jsx(Badge, { children: parameterFormat === 'strata' ? 'Strata request' : 'llama.cpp CLI' })] }), jsxs('label', { className: 'flex cursor-pointer items-center gap-2 rounded-md border border-(--ui-stroke-secondary) px-2.5 py-1.5 text-xs font-medium text-(--ui-text-secondary)', children: [jsx('input', { type: 'checkbox', checked: strataPreset, disabled: saving, 'aria-label': 'Strata 모델 preset', onChange: event => { setStrataPreset(event.target.checked); setSelectedPresetId(''); setDraft({}); setQuery(''); setSelectedKey(''); setValue('') } }), 'Strata 모델 preset'] })] }),
         jsx('p', { className: `mb-1 text-xs ${muted}`, children: '저장은 선택한 preset 자체의 parameter를 저장합니다. 역할별 preset 선택은 운영 탭에서 변경합니다.' }),
-        jsx('p', { className: `mb-2 text-xs ${muted}`, children: parameterFormat === 'strata' ? 'Strata sampling은 request JSON 형식이며 context는 생성된 Strata config의 --max-context에 저장됩니다.' : 'llama.cpp parameter는 llama-server CLI 형식이며 context는 --ctx-size로 적용됩니다.' }),
+        jsx('p', { className: `mb-2 text-xs ${muted}`, children: parameterFormat === 'strata' ? 'Strata sampling과 --max-context를 아래 parameter 추가에서 설정합니다.' : 'llama.cpp CLI parameter와 --ctx-size를 아래 parameter 추가에서 설정합니다.' }),
         jsxs('div', { className: 'flex items-stretch gap-2', 'data-testid': 'preset-actions', children: [
           jsx('select', { className: `${compactInput} min-w-0 flex-1`, style: { ...themedSelect(), width: 'auto', minWidth: 0, flex: '1 1 auto' }, value: selectedPresetId, 'aria-label': `${modelId} parameter preset 선택`, onChange: event => setSelectedPresetId(event.target.value), children: [jsx('option', { style: themedOption, value: '', children: presetsQuery.isLoading ? 'preset 불러오는 중…' : 'preset 선택' }), ...compatiblePresets.map(preset => jsx('option', { style: themedOption, value: preset.id, children: preset.name }, preset.id))] }),
           jsx('button', { className: `${compactPrimary} shrink-0`, disabled: !selectedPresetId || saving, onClick: saveSelectedPreset, children: '저장' }),
@@ -842,13 +844,12 @@ function ModelSettingsEditor({ modelId, appliedPresetId = '', refresh, open }) {
           selectedPreset ? jsx('button', { className: `${compactPrimary} shrink-0`, disabled: saving || !presetRename.trim(), onClick: renamePreset, children: '이름 변경' }) : null,
           jsx('input', { className: `${compactInput} min-w-0 flex-1`, value: presetName, 'aria-label': `${modelId} 새 preset 이름`, placeholder: '새 preset 이름', onChange: event => setPresetName(event.target.value), onKeyDown: event => { if (event.key === 'Enter') savePreset() } }),
           jsx('button', { className: `${compactPrimary} shrink-0`, disabled: saving || !presetName.trim(), onClick: savePreset, children: '새 preset 만들기' })
-        ] }),
-        jsxs('div', { className: 'mt-2 flex items-center gap-2', children: [jsx('label', { className: 'w-24 shrink-0 text-xs font-medium text-(--ui-text-primary)', htmlFor: `preset-context-${modelId}`, children: 'context 크기' }), jsx('input', { id: `preset-context-${modelId}`, className: `${compactInput} min-w-0 flex-1`, type: 'number', min: '1', step: '1', value: contextLength, 'aria-label': `${modelId} preset context 크기`, placeholder: String(settings.data?.context_length || 131072), onChange: event => setContextLength(event.target.value) }), jsx('span', { className: `shrink-0 text-[11px] ${muted}`, children: parameterFormat === 'strata' ? '--max-context' : '--ctx-size' })] })
+        ] })
       ] }),
       settings.isLoading ? jsx('p', { className: muted, role: 'status', children: '현재 설정을 불러오는 중…' }) : null,
       jsx('div', { className: 'grid gap-x-4 gap-y-1 sm:grid-cols-2', children: Object.entries(draft).map(([key, current]) => jsxs('div', { className: 'flex min-w-0 items-start gap-2 border-b border-(--ui-stroke-secondary) py-1.5', children: [jsx('label', { className: 'w-24 shrink-0 truncate pt-2 text-xs font-medium text-(--ui-text-primary)', htmlFor: `parameter-${modelId}-${key}`, children: key }), jsxs('div', { className: 'min-w-0 flex-1', children: [jsxs('div', { className: 'flex min-w-0 items-center gap-1.5', children: [jsx(ParameterControl, { id: `parameter-${modelId}-${key}`, option: settings.data?.metadata?.[key], value: current, className: compactInput, error: fieldErrors[key], describedBy: fieldErrors[key] ? `parameter-error-${modelId}-${key}` : undefined, ariaLabel: `${key} 값`, onChange: event => update(key, event.target.value), onBlur: event => commit(key, event.target.value) }), jsx('button', { className: compactDanger, disabled: saving, onClick: () => remove(key), 'aria-label': `${key} parameter 삭제`, children: '삭제' })] }), fieldErrors[key] ? jsx('p', { id: `parameter-error-${modelId}-${key}`, className: 'mt-1 text-[11px] text-(--dt-destructive)', role: 'alert', children: fieldErrors[key] }) : null] })] }, key)) }),
       jsx('div', { className: 'mt-4 border-t border-(--ui-stroke-secondary) pt-3', children: jsx('p', { className: 'mb-2 text-xs font-medium text-(--ui-text-primary)', children: 'parameter 추가' }) }),
-      jsx('input', { className: compactInput, type: 'search', value: query, 'aria-label': `추가할 ${parameterFormat} parameter 검색`, placeholder: parameterFormat === 'strata' ? 'Strata request parameter 검색 (예: temp, top-k, min-p)' : 'llama.cpp CLI parameter 검색 (예: flash, batch)', onChange: event => setQuery(event.target.value) }),
+      jsx('input', { className: compactInput, type: 'search', value: query, 'aria-label': `추가할 ${parameterFormat} parameter 검색`, placeholder: parameterFormat === 'strata' ? 'Strata parameter 검색 (예: max-context, temp, top-k)' : 'llama.cpp CLI parameter 검색 (예: ctx-size, flash, batch)', onChange: event => setQuery(event.target.value) }),
       availableOptions.length ? jsx('div', { className: 'mt-2 max-h-40 overflow-y-auto rounded-md border border-(--ui-stroke-secondary)', role: 'listbox', 'aria-label': 'llama-server parameter 검색 결과', children: availableOptions.map(option => jsx('button', { className: `flex w-full items-start justify-between gap-3 border-b border-(--ui-stroke-secondary) px-3 py-2 text-left text-sm last:border-0 hover:bg-(--ui-bg-tertiary) ${selectedKey === option.key ? 'bg-(--ui-bg-tertiary)' : ''}`, type: 'button', role: 'option', 'aria-selected': selectedKey === option.key, onClick: () => { setSelectedKey(option.key); setValue(Object.prototype.hasOwnProperty.call(draft, option.key) ? String(draft[option.key]) : option.default_value || '') }, children: [jsx('code', { children: option.name }), jsx('span', { className: `shrink-0 max-w-[55%] truncate text-right text-xs ${muted}`, title: option.choices?.length ? option.choices.join(' | ') : undefined, children: option.requires_value ? option.choices?.length ? option.choices.join(' | ') : option.default_value ? `기본값 ${option.default_value}` : option.key : 'flag' })] }, option.key)) }) : query.trim() && !options.isLoading ? jsx('p', { className: `mt-2 text-xs ${muted}`, role: 'status', children: '일치하는 parameter가 없습니다.' }) : null,
       selected ? jsxs('div', { className: 'mt-2 flex gap-2', children: [selected.requires_value ? jsx(ParameterControl, { id: `new-parameter-${selected.key}`, option: selected, value, className: compactInput, allowEmpty: true, ariaLabel: `${selected.key} 값`, onChange: event => setValue(event.target.value), onKeyDown: event => { if (event.key === 'Enter') add() } }) : jsx('span', { className: `flex flex-1 items-center px-2 text-xs ${muted}`, role: 'status', children: '값이 없는 flag parameter' }), jsx('button', { className: compactPrimary, disabled: saving || (selected.requires_value && !value.trim()), onClick: add, 'aria-label': `${selected.key} parameter 추가 또는 수정`, children: '추가/수정' })] }) : null,
       message ? jsx('p', { className: `mt-3 text-xs ${message.startsWith('반영 실패') || message === '입력값을 확인하세요.' ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null

@@ -149,14 +149,15 @@ class PresetStore:
         return self.get(preset_id) or {}
 
     def update(self, preset_id: str, name: str | None, options: dict[str, str] | None, now: float,
-               runtime_kind: str | None = None, context_length: int | None = None) -> dict[str, Any] | None:
+               runtime_kind: str | None = None, context_length: int | None = None,
+               replace_context: bool = False) -> dict[str, Any] | None:
         current = self.get(preset_id)
         if current is None:
             return None
         next_name = name if name is not None else str(current["name"])
         next_options = options if options is not None else dict(current["options"])
         next_runtime = runtime_kind if runtime_kind is not None else str(current.get("runtime_kind") or "llamacpp")
-        next_context = context_length if context_length is not None else current.get("context_length")
+        next_context = context_length if replace_context else current.get("context_length")
         with self._lock, self._connection() as connection:
             connection.execute(
                 """UPDATE parameter_presets

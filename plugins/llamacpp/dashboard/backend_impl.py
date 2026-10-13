@@ -1540,7 +1540,18 @@ def _strata_request_option_catalog() -> list[dict[str, Any]]:
         ("presence-penalty", "presence_penalty", "number"),
         ("seed", "seed", "integer"),
     ]
-    return [
+    return [{
+        "key": "max-context",
+        "name": "--max-context",
+        "aliases": ["--max-context"],
+        "value_hint": "N",
+        "description": "Strata worker context size",
+        "requires_value": True,
+        "default_value": None,
+        "choices": [],
+        "value_kind": "integer",
+        "toggle": False,
+    }] + [
         {
             "key": key,
             "name": f"--{key}",
@@ -1856,7 +1867,8 @@ def _parameter_route_context() -> ParameterRouteContext:
         options=_option_list, executable=_server_executable, parameters=_parameters,
         server_requires_restart=_server_requires_restart, runtime_kind=_runtime_kind, state=_state,
         refresh_profile_preset=_refresh_execution_profile_preset,
-        options_for_model=_options_for_model, runtime_for_model=_runtime_for_model_id,
+        options_for_model=_options_for_model, options_for_runtime=_option_list_for_runtime,
+        runtime_for_model=_runtime_for_model_id,
     )
 
 

@@ -19,6 +19,7 @@ class ParameterRouteContext:
     state: Callable[[], dict[str, Any]]
     refresh_profile_preset: Callable[[str, dict[str, str] | None], None] = lambda _preset_id, _options: None
     options_for_model: Callable[[str], list[dict[str, Any]]] | None = None
+    options_for_runtime: Callable[[str], list[dict[str, Any]]] | None = None
     runtime_for_model: Callable[[str], str] | None = None
 
 
@@ -29,8 +30,8 @@ class ParameterRouteContext:
 # facade re-exports them (bound to its context) so the public entrypoint keeps
 # its ``api.<name>(...)`` contract without duplicating any transport logic.
 
-def model_settings(context: ParameterRouteContext, model_id: str) -> dict[str, Any]:
-    return context.parameters().model_settings(model_id)
+def model_settings(context: ParameterRouteContext, model_id: str, runtime_kind: str = "") -> dict[str, Any]:
+    return context.parameters().model_settings(model_id, runtime_kind)
 
 
 def save_model_settings(context: ParameterRouteContext, model_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -39,10 +40,13 @@ def save_model_settings(context: ParameterRouteContext, model_id: str, body: dic
     )
 
 
-def presets(context: ParameterRouteContext, model_id: str = "") -> dict[str, Any]:
+def presets(context: ParameterRouteContext, model_id: str = "", runtime_kind: str = "") -> dict[str, Any]:
     rows = context.parameters().presets()
-    if model_id and context.runtime_for_model is not None:
-        parameter_format = "strata" if context.runtime_for_model(model_id) == "strata" else "llamacpp"
+    selected_runtime = runtime_kind
+    if not selected_runtime and model_id and context.runtime_for_model is not None:
+        selected_runtime = context.runtime_for_model(model_id)
+    if selected_runtime:
+        parameter_format = "strata" if selected_runtime == "strata" else "llamacpp"
         rows = [row for row in rows if str(row.get("runtime_kind") or "llamacpp") == parameter_format]
     return {"presets": rows}
 
@@ -92,9 +96,12 @@ def create_router(context: ParameterRouteContext) -> APIRouter:
     router = APIRouter()
 
     @router.get("/settings")
-    def settings(q: str = "", limit: int = 50, model_id: str = "") -> dict[str, Any]:
+    def settings(q: str = "", limit: int = 50, model_id: str = "", runtime_kind: str = "") -> dict[str, Any]:
         query = q.strip().lower()
-        catalog = context.options_for_model(model_id) if context.options_for_model is not None else context.options()
+        if runtime_kind and context.options_for_runtime is not None:
+            catalog = context.options_for_runtime(runtime_kind)
+        else:
+            catalog = context.options_for_model(model_id) if context.options_for_model is not None else context.options()
         options = [
             option for option in catalog
             if query and (query in option["key"].lower() or query in option["name"].lower()
@@ -107,16 +114,16 @@ def create_router(context: ParameterRouteContext) -> APIRouter:
         }
 
     @router.get("/settings/{model_id}")
-    def settings_model(model_id: str) -> dict[str, Any]:
-        return model_settings(context, model_id)
+    def settings_model(model_id: str, runtime_kind: str = "") -> dict[str, Any]:
+        return model_settings(context, model_id, runtime_kind)
 
     @router.put("/settings/{model_id}")
     def save_settings(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return save_model_settings(context, model_id, body)
 
     @router.get("/presets")
-    def presets_route(model_id: str = "") -> dict[str, Any]:
-        return presets(context, model_id)
+    def presets_route(model_id: str = "", runtime_kind: str = "") -> dict[str, Any]:
+        return presets(context, model_id, runtime_kind)
 
     @router.post("/presets")
     def create_preset_route(body: dict[str, Any]) -> dict[str, Any]:

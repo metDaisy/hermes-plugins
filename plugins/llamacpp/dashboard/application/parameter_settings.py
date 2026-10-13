@@ -83,8 +83,8 @@ class ParameterSettingsService:
                 except ValueError as exc:
                     raise self._error(f"parameter '{key}' requires a number") from exc
 
-    def model_settings(self, model_id: str) -> dict[str, Any]:
-        runtime_kind = self._runtime_for_model(model_id) if self._runtime_for_model is not None else ""
+    def model_settings(self, model_id: str, runtime_kind: str = "") -> dict[str, Any]:
+        runtime_kind = runtime_kind or (self._runtime_for_model(model_id) if self._runtime_for_model is not None else "")
         stored, catalog = self._load_options().get(model_id, {}), self._catalog_for(runtime_kind)
         ordered = {}
         for option in catalog:
@@ -96,6 +96,10 @@ class ParameterSettingsService:
                 continue
             ordered[key] = value
         context_length = self._read_context(model_id, runtime_kind) if self._read_context is not None else None
+        if context_length is not None:
+            context_key = self._context_key(runtime_kind)
+            if context_key not in ordered:
+                ordered[context_key] = str(context_length)
         return {"model_id": model_id, "runtime_kind": runtime_kind,
                 "parameter_format": self._format(runtime_kind), "context_length": context_length,
                 "options": ordered, "order": [option["key"] for option in catalog],
@@ -122,10 +126,12 @@ class ParameterSettingsService:
         )
         if options is None:
             options = self._load_options().get(source_model_id, {})
+        normalized, option_context = self._normalize_preset_options(options, runtime_kind)
+        stored_context = self._context_length(context_length) if context_length is not None else option_context
         now, preset_id = self._now(), self._new_id()
         stored = self._preset_store.create(
-            preset_id, name, self.normalize(options, runtime_kind), now,
-            self._format(runtime_kind), self._context_length(context_length),
+            preset_id, name, normalized, now,
+            self._format(runtime_kind), stored_context,
         )
         return self._preset_row(preset_id, stored)
 
@@ -157,13 +163,23 @@ class ParameterSettingsService:
         if current is None:
             raise self._error("preset not found")
         preset_runtime = runtime_kind or str(current.get("runtime_kind") or "llamacpp")
+        normalized_options = None
+        next_context = None
+        replace_context = False
+        if options is not None:
+            normalized_options, next_context = self._normalize_preset_options(options, preset_runtime)
+            replace_context = True
+        elif context_length is not None:
+            next_context = self._context_length(context_length)
+            replace_context = True
         stored = self._preset_store.update(
             preset_id,
             self._valid_name(name) if name is not None else None,
-            self.normalize(options, preset_runtime) if options is not None else None,
+            normalized_options,
             self._now(),
             self._format(preset_runtime),
-            self._context_length(context_length) if context_length is not None else None,
+            next_context,
+            replace_context,
         )
         return self._preset_row(preset_id, stored or {})
 
@@ -188,6 +204,18 @@ class ParameterSettingsService:
             raise self._error("context length must be greater than zero")
         return result
 
+    def _normalize_preset_options(self, options: Any, runtime_kind: str) -> tuple[dict[str, str], int | None]:
+        normalized = self.normalize(options, runtime_kind)
+        context_key = self._context_key(runtime_kind)
+        raw_context = normalized.get(context_key)
+        context_length = self._context_length(raw_context) if raw_context is not None else None
+        if self._format(runtime_kind) == "strata":
+            normalized.pop(context_key, None)
+        return normalized, context_length
+
+    def _context_key(self, runtime_kind: str) -> str:
+        return "max-context" if self._format(runtime_kind) == "strata" else "ctx-size"
+
     def _valid_name(self, name: Any) -> str:
         value = str(name or "").strip()
         if not value:
@@ -198,8 +226,14 @@ class ParameterSettingsService:
 
     @staticmethod
     def _preset_row(preset_id: str, value: dict[str, Any]) -> dict[str, Any]:
+        runtime_kind = str(value.get("runtime_kind") or "llamacpp")
+        options = dict(value.get("options") or {})
+        context_length = value.get("context_length")
+        context_key = "max-context" if runtime_kind == "strata" else "ctx-size"
+        if context_length is not None and context_key not in options:
+            options[context_key] = str(context_length)
         return {"id": preset_id, "name": str(value.get("name") or preset_id), "model_id": value.get("model_id"),
-                "runtime_kind": str(value.get("runtime_kind") or "llamacpp"),
+                "runtime_kind": runtime_kind,
                 "context_length": value.get("context_length"),
-                "options": dict(value.get("options") or {}), "created_at": value.get("created_at"),
+                "options": options, "created_at": value.get("created_at"),
                 "updated_at": value.get("updated_at")}

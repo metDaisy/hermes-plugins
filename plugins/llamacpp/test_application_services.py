@@ -1013,6 +1013,41 @@ class ParameterRouteAdapterTests(unittest.TestCase):
         self.assertTrue({"/settings", "/settings/{model_id}", "/presets", "/presets/{preset_id}/apply", "/presets/{preset_id}"}.issubset(routes))
         self.assertEqual(routes["/settings"]("ctx", 50)["options"], [option])
 
+    def test_parameter_catalog_and_presets_can_be_selected_by_runtime_format(self) -> None:
+        from dashboard.routes.parameter_routes import ParameterRouteContext, create_router
+
+        llama_option = {"key": "ctx-size", "name": "--ctx-size", "description": "context"}
+        strata_option = {"key": "max-context", "name": "--max-context", "description": "Strata context"}
+
+        class Parameters:
+            @staticmethod
+            def presets():
+                return [
+                    {"id": "llama", "runtime_kind": "llamacpp"},
+                    {"id": "strata", "runtime_kind": "strata"},
+                ]
+
+            @staticmethod
+            def model_settings(model_id, runtime_kind=""):
+                return {"model_id": model_id, "runtime_kind": runtime_kind}
+
+        context = ParameterRouteContext(
+            options=lambda: [llama_option], executable=lambda: None, parameters=lambda: Parameters(),
+            server_requires_restart=lambda: False, runtime_kind=lambda _state: "official", state=lambda: {},
+            options_for_runtime=lambda kind: [strata_option] if kind == "strata" else [llama_option],
+        )
+        route_list = create_router(context).routes
+        settings_search = next(route.endpoint for route in route_list if route.path == "/settings")
+        settings_model = next(
+            route.endpoint for route in route_list
+            if route.path == "/settings/{model_id}" and "GET" in route.methods
+        )
+        presets_route = next(route.endpoint for route in route_list if route.path == "/presets" and "GET" in route.methods)
+
+        self.assertEqual(settings_search("context", 50, "", "strata")["options"], [strata_option])
+        self.assertEqual(settings_model("model", "strata")["runtime_kind"], "strata")
+        self.assertEqual([row["id"] for row in presets_route("", "strata")["presets"]], ["strata"])
+
     def test_preset_edits_refresh_role_snapshots_and_delete_clears_them(self) -> None:
         from dashboard.routes.parameter_routes import ParameterRouteContext, create_router
 
@@ -1830,13 +1865,14 @@ class ParameterSettingsServiceTests(unittest.TestCase):
             self.presets()[preset_id] = value
             return value
 
-        def update(self, preset_id, name, options, now, runtime_kind=None, context_length=None):
+        def update(self, preset_id, name, options, now, runtime_kind=None, context_length=None,
+                   replace_context=False):
             value = self.get(preset_id)
             if value is None: return None
             if name is not None: value["name"] = name
             if options is not None: value["options"] = options
             if runtime_kind is not None: value["runtime_kind"] = runtime_kind
-            if context_length is not None: value["context_length"] = context_length
+            if replace_context: value["context_length"] = context_length
             value["updated_at"] = now
             return value
 
@@ -1882,6 +1918,43 @@ class ParameterSettingsServiceTests(unittest.TestCase):
         self.assertEqual(applied["options"], {"temp": "1"})
         with self.assertRaisesRegex(ValueError, "unsupported Strata request parameter"):
             service.rename_preset("new", options={"ctx-size": "131072"})
+
+    def test_strata_context_is_a_virtual_parameter_not_a_request_sampling_option(self) -> None:
+        from dashboard.application.parameter_settings import ParameterSettingsService
+
+        state = {"parameter_presets": {}}
+        applied_contexts: list[tuple[str, str, int]] = []
+        strata_catalog = [
+            {"key": "temp", "requires_value": True, "choices": [], "value_kind": "number"},
+            {"key": "max-context", "requires_value": True, "choices": [], "value_kind": "integer"},
+        ]
+        service = ParameterSettingsService(
+            catalog=lambda: strata_catalog,
+            catalog_for_runtime=lambda _kind: strata_catalog,
+            canonical=lambda _, value: str(value),
+            load_options=lambda: {}, save_options=lambda _value: None,
+            preset_store=self._MemoryPresetStore(state), error=lambda message: ValueError(message),
+            now=lambda: 1.0, new_id=lambda: "strata-preset",
+            write_context=lambda model_id, kind, size: applied_contexts.append((model_id, kind, size)),
+        )
+
+        created = service.create_preset(
+            "Strata", {"temp": "0.7", "max-context": "131072"}, runtime_kind="strata",
+        )
+        raw = state["parameter_presets"]["strata-preset"]
+        applied = service.apply_preset(
+            "strata-preset", "strata-model", runtime_kind="strata", requires_restart=False,
+        )
+
+        self.assertEqual(created["options"], {"temp": "0.7", "max-context": "131072"})
+        self.assertEqual(created["context_length"], 131072)
+        self.assertEqual(raw["options"], {"temp": "0.7"})
+        self.assertEqual(applied["options"], {"temp": "0.7"})
+        self.assertEqual(applied_contexts, [("strata-model", "strata", 131072)])
+
+        updated = service.rename_preset("strata-preset", options={"temp": "0.5"}, runtime_kind="strata")
+        self.assertIsNone(updated["context_length"])
+        self.assertNotIn("max-context", updated["options"])
 
     def test_preset_runtime_must_match_selected_model_runtime(self) -> None:
         from dashboard.application.parameter_settings import ParameterSettingsService

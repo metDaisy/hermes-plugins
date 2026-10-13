@@ -2087,8 +2087,10 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertEqual(
             set(catalog),
-            {"temp", "top-p", "top-k", "min-p", "repeat-penalty", "frequency-penalty", "presence-penalty", "seed"},
+            {"max-context", "temp", "top-p", "top-k", "min-p", "repeat-penalty", "frequency-penalty", "presence-penalty", "seed"},
         )
+        self.assertEqual(catalog["max-context"]["name"], "--max-context")
+        self.assertEqual(catalog["max-context"]["value_kind"], "integer")
         self.assertEqual(catalog["temp"]["value_kind"], "number")
         self.assertEqual(catalog["top-k"]["value_kind"], "integer")
         self.assertTrue(all(item["requires_value"] for item in catalog.values()))
@@ -2579,16 +2581,20 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("선택한 preset 자체의 parameter를 저장합니다.", editor)
         self.assertIn("역할별 preset 선택은 운영 탭에서 변경합니다.", editor)
 
-    def test_parameter_editor_separates_runtime_formats_and_exposes_context_length(self) -> None:
+    def test_parameter_editor_uses_strata_checkbox_and_context_parameter(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
         editor = source[source.index("function ModelSettingsEditor"):source.index("function RegisterWizard")]
 
         self.assertIn("parameter_format", editor)
         self.assertIn("runtime_kind", editor)
-        self.assertIn("context_length", editor)
-        self.assertIn("context 크기", editor)
-        self.assertIn("model_id=${encodeURIComponent(modelId)}", editor)
+        self.assertIn("type: 'checkbox'", editor)
+        self.assertIn("Strata 모델 preset", editor)
+        self.assertIn("runtime_kind=${encodeURIComponent(editorRuntimeKind)}", editor)
         self.assertIn("preset.runtime_kind === parameterFormat", editor)
+        self.assertNotIn("preset-context-", editor)
+        self.assertNotIn("context 크기", editor)
+        self.assertNotIn("context_length:", editor)
+        self.assertIn("--max-context", editor)
 
     def test_strata_backend_updates_only_generated_max_context_argument(self) -> None:
         from dashboard.backends.strata import StrataBackend
