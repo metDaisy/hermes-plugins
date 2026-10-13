@@ -1636,7 +1636,8 @@ class LlamaCppManagerTests(unittest.TestCase):
                 config_path.write_text(original, encoding="utf-8")
                 paths.append(config_path)
 
-            with patch.object(api, "_profile_config_paths", return_value=paths), \
+            with patch.object(api, "_state", return_value={}), \
+                    patch.object(api, "_profile_config_paths", return_value=paths), \
                     patch.object(api, "_profile_provider_models", return_value={
                         "main-local": 32768,
                         "compression-local": 8192,
@@ -1677,6 +1678,130 @@ class LlamaCppManagerTests(unittest.TestCase):
                 else:
                     self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", updated)
                     self.assertIn("    provider: openai-codex\n    model: gpt-5.6-luna\n", updated)
+
+    def test_profile_model_policy_settings_control_main_and_selected_auxiliary_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            paths = []
+            original = (
+                "model:\n"
+                "  provider: openai-codex\n"
+                "  default: gpt-5.6-luna\n"
+                "plugins:\n"
+                "  enabled: []\n"
+                "  disabled: []\n"
+                "auxiliary:\n"
+                "  compression:\n"
+                "    provider: openai-codex\n"
+                "    model: gpt-5.6-luna\n"
+            )
+            for profile_name in ("project-manager", "coder", "reviewer", "comfy-master", "main"):
+                config_path = root / profile_name / "config.yaml"
+                config_path.parent.mkdir(parents=True)
+                config_path.write_text(original, encoding="utf-8")
+                paths.append(config_path)
+
+            state = {
+                "profile_model_policy": {
+                    "project-manager": {
+                        "enabled": False,
+                        "main_model": "main-local",
+                        "auxiliary_models": {"compression": "compression-local"},
+                    },
+                    "coder": {
+                        "enabled": True,
+                        "main_model": "",
+                        "auxiliary_models": {"compression": "compression-local"},
+                    },
+                    "reviewer": {
+                        "enabled": True,
+                        "main_model": "main-local",
+                        "auxiliary_models": {"compression": "", "vision": "main-local"},
+                    },
+                    "comfy-master": {
+                        "enabled": True,
+                        "main_model": "compression-local",
+                        "auxiliary_models": {"skills_hub": "main-local"},
+                    },
+                }
+            }
+            with patch.object(api, "_state", return_value=state), \
+                    patch.object(api, "_profile_config_paths", return_value=paths), \
+                    patch.object(api, "_profile_provider_models", return_value={
+                        "main-local": 32768,
+                        "compression-local": 8192,
+                    }), patch.object(api, "execution_profiles", return_value={
+                        "profiles": {"main": {"model_id": "main-physical"}},
+                    }):
+                api._sync_execution_profile_endpoint()
+
+            project_manager = paths[0].read_text(encoding="utf-8")
+            coder = paths[1].read_text(encoding="utf-8")
+            reviewer = paths[2].read_text(encoding="utf-8")
+            comfy_master = paths[3].read_text(encoding="utf-8")
+            main = paths[4].read_text(encoding="utf-8")
+            self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", project_manager)
+            self.assertIn("    provider: openai-codex\n    model: gpt-5.6-luna\n", project_manager)
+            self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", coder)
+            self.assertIn('    provider: "llamacpp-local"\n    model: "compression-local"', coder)
+            self.assertIn('  provider: "llamacpp-local"\n  default: "main-local"', reviewer)
+            self.assertIn("    provider: openai-codex\n    model: gpt-5.6-luna\n", reviewer)
+            self.assertIn(
+                '  vision:\n    provider: "llamacpp-local"\n    model: "main-local"',
+                reviewer,
+            )
+            self.assertIn('  provider: "llamacpp-local"\n  default: "compression-local"', comfy_master)
+            self.assertIn(
+                '  skills_hub:\n    provider: "llamacpp-local"\n    model: "main-local"',
+                comfy_master,
+            )
+            self.assertIn("  provider: openai-codex\n  default: gpt-5.6-luna\n", main)
+
+    def test_profile_model_policy_settings_persist_validated_rows(self) -> None:
+        state: dict[str, object] = {}
+        saved: list[dict[str, object]] = []
+        paths = [Path("profiles") / name / "config.yaml"
+                 for name in ("coder", "comfy-master", "main", "project-manager", "reviewer")]
+
+        with patch.object(api, "_state", return_value=state), \
+                patch.object(api, "_save_state", side_effect=lambda value: saved.append(dict(value))), \
+                patch.object(api, "_profile_config_paths", return_value=paths):
+            initial = api.profile_policy_settings()
+            result = api.save_profile_policy_settings({
+                "profiles": {
+                    "comfy-master": {
+                        "enabled": True,
+                        "main_model": "compression-local",
+                        "auxiliary_models": {"skills_hub": "main-local", "compression": "compression-local"},
+                    },
+                    "coder": {
+                        "enabled": False,
+                        "main_model": "main-local",
+                        "auxiliary_models": {"compression": "compression-local"},
+                    },
+                }
+            })
+
+        self.assertEqual([row["profile"] for row in initial["profiles"]], [
+            "coder", "comfy-master", "main", "project-manager", "reviewer",
+        ])
+        self.assertEqual(
+            {row["profile"]: row["enabled"] for row in initial["profiles"]},
+            {"coder": True, "comfy-master": False, "main": False, "project-manager": True, "reviewer": True},
+        )
+        self.assertFalse(result["profiles"][0]["enabled"])
+        self.assertEqual(result["profiles"][1]["main_model"], "compression-local")
+        self.assertEqual(result["profiles"][1]["auxiliary_models"]["skills_hub"], "main-local")
+        self.assertIn("vision", {task["key"] for task in result["auxiliary_tasks"]})
+        self.assertIn("profile_describer", {task["key"] for task in result["auxiliary_tasks"]})
+        self.assertEqual(saved[-1]["profile_model_policy"]["coder"]["enabled"], False)
+
+        with patch.object(api, "_state", return_value=state), \
+                patch.object(api, "_profile_config_paths", return_value=paths):
+            with self.assertRaisesRegex(ValueError, "unsupported auxiliary task"):
+                api.save_profile_policy_settings({
+                    "profiles": {"coder": {"enabled": True, "main_model": "main-local", "auxiliary_models": {"made_up": "main-local"}}}
+                })
 
 
     def test_worker_reasoning_policy_uses_xhigh_only_for_bonsai2_and_disables_compression(self) -> None:
@@ -2387,7 +2512,7 @@ class LlamaCppManagerTests(unittest.TestCase):
     def test_parameter_preset_tab_uses_configured_main_model_while_server_is_stopped(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
 
-        self.assertIn("['parameters', 'parameter preset']", source)
+        self.assertIn("['parameters', '파라미터']", source)
         self.assertIn(
             "const parameterModel = models.find(model => model.id === data?.active_model_id) || "
             "models.find(model => model.id === data?.profiles?.main?.model_id) || models[0]",
@@ -2400,6 +2525,26 @@ class LlamaCppManagerTests(unittest.TestCase):
         self.assertIn("ModelSettingsEditor, { modelId: parameterModel.id", parameter_tab)
         self.assertIn("appliedPresetId: data?.profiles?.main?.preset_id || ''", parameter_tab)
         self.assertNotIn("activeModel ?", parameter_tab)
+
+    def test_desktop_exposes_korean_parameter_tab_and_profile_settings_tab(self) -> None:
+        source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+        self.assertIn("['parameters', '파라미터']", source)
+        self.assertNotIn("['parameters', 'parameter preset']", source)
+        self.assertIn("['settings', '설정']", source)
+        self.assertIn("function ProfilePolicySettings", source)
+        self.assertIn("api('/profile-policy-settings'", source)
+        self.assertIn("다음 서버 시작부터 적용됩니다.", source)
+        settings = source[source.index("function ProfilePolicySettings"):source.index("function TabBar")]
+        self.assertIn("Profile 선택", settings)
+        self.assertIn("Auxiliary 작업", settings)
+        self.assertIn("Main Local", settings)
+        self.assertIn("Compress Local", settings)
+        self.assertIn("selectedProfile", settings)
+        self.assertIn("selectedAuxTask", settings)
+        self.assertIn("configuredAuxiliary", settings)
+        self.assertNotIn("profileLabels", settings)
+        self.assertNotIn("...rows.map(row", settings)
 
     def test_parameter_preset_actions_and_flag_rows_stay_inline(self) -> None:
         source = (Path(__file__).parent / "desktop" / "plugin.js").read_text(encoding="utf-8")

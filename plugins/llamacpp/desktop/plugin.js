@@ -925,8 +925,81 @@ function DownloadedModelRow({ model, onRegister, onDelete }) {
   ] })
 }
 
+function ProfilePolicySettings() {
+  const settings = useQuery({ queryKey: [ID, 'profile-policy-settings'], queryFn: () => api('/profile-policy-settings'), refetchOnWindowFocus: false })
+  const [profiles, setProfiles] = useState([])
+  const [selectedProfile, setSelectedProfile] = useState('')
+  const [selectedAuxTask, setSelectedAuxTask] = useState('compression')
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+  useEffect(() => {
+    if (!settings.data?.profiles) return
+    const next = settings.data.profiles.map(row => ({ ...row, auxiliary_models: { ...(row.auxiliary_models || {}) } }))
+    setProfiles(next)
+    setSelectedProfile(current => next.some(row => row.profile === current) ? current : (next[0]?.profile || ''))
+  }, [settings.data])
+  const current = profiles.find(row => row.profile === selectedProfile)
+  const tasks = settings.data?.auxiliary_tasks || []
+  const selectedTask = tasks.find(task => task.key === selectedAuxTask) || tasks[0]
+  const modelOptions = settings.data?.model_options || [
+    { value: '', label: '변경하지 않음' },
+    { value: 'main-local', label: 'Main Local' },
+    { value: 'compression-local', label: 'Compress Local' }
+  ]
+  const configuredAuxiliary = tasks.filter(task => current?.auxiliary_models?.[task.key])
+  const updateCurrent = patch => setProfiles(rows => rows.map(row => row.profile === selectedProfile ? { ...row, ...patch } : row))
+  const updateAuxiliary = value => updateCurrent({ auxiliary_models: { ...(current?.auxiliary_models || {}), [selectedAuxTask]: value } })
+  const save = async () => {
+    setSaving(true)
+    setMessage('')
+    try {
+      const payload = Object.fromEntries(profiles.map(row => [row.profile, {
+        enabled: row.enabled,
+        main_model: row.main_model,
+        auxiliary_models: row.auxiliary_models || {}
+      }]))
+      const result = await api('/profile-policy-settings', { method: 'PUT', body: { profiles: payload } })
+      setProfiles((result.profiles || []).map(row => ({ ...row, auxiliary_models: { ...(row.auxiliary_models || {}) } })))
+      setMessage('저장했습니다. 다음 서버 시작부터 적용됩니다.')
+    } catch (cause) {
+      setMessage(`설정 저장 실패: ${cause?.message || String(cause)}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+  return jsxs('section', { className: `${card} p-4 sm:p-5`, 'aria-labelledby': 'profile-policy-title', children: [
+    jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-3', children: [
+      jsx('div', { className: 'min-w-0', children: [jsx('h2', { id: 'profile-policy-title', className: 'text-lg font-semibold', children: 'Profile 모델 라우팅' }), jsx('p', { className: `mt-1 ${muted}`, children: '서버 시작 시 각 Profile의 Main 및 Auxiliary 작업을 로컬 모델에 연결합니다.' })] }),
+      profiles.length ? jsx(Badge, { children: `${profiles.length} Profiles` }) : null
+    ] }),
+    jsx('p', { className: `mt-2 text-xs ${muted}`, children: '“변경하지 않음”은 기존 Hermes 설정을 유지합니다. 저장한 내용은 다음 서버 시작부터 적용됩니다.' }),
+    settings.isLoading ? jsx('p', { className: `mt-5 ${muted}`, role: 'status', children: 'Profile 설정을 불러오는 중…' }) : null,
+    settings.error ? jsx('p', { className: 'mt-5 text-sm text-(--dt-destructive)', role: 'alert', children: String(settings.error.message || settings.error) }) : null,
+    profiles.length && current ? jsxs('div', { className: 'mt-5 space-y-4', children: [
+      jsxs('div', { className: 'grid gap-3 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary) p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end', children: [
+        jsxs('label', { className: 'block min-w-0', children: [jsx('span', { className: 'mb-1.5 block text-xs font-medium text-(--ui-text-secondary)', children: 'Profile 선택' }), jsx('select', { className: compactInput, style: themedSelect(), value: selectedProfile, disabled: saving, onChange: event => setSelectedProfile(event.target.value), children: profiles.map(row => jsx('option', { style: themedOption, value: row.profile, children: row.profile }, row.profile)) })] }),
+        jsxs('button', { type: 'button', role: 'switch', 'aria-checked': Boolean(current.enabled), className: `flex h-9 min-w-32 items-center justify-center gap-2 rounded-md border px-3 text-xs font-medium ${current.enabled ? 'border-(--ui-accent) bg-(--ui-accent)/10 text-(--ui-text-primary)' : 'border-(--ui-stroke-secondary) text-(--ui-text-secondary)'}`, disabled: saving, onClick: () => updateCurrent({ enabled: !current.enabled }), children: [jsx('span', { className: `h-2 w-2 rounded-full ${current.enabled ? 'bg-(--ui-accent)' : 'bg-(--ui-text-tertiary)'}` }), current.enabled ? '자동 적용 켜짐' : '자동 적용 꺼짐'] })
+      ] }),
+      jsxs('div', { className: `grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] ${current.enabled ? '' : 'opacity-50'}`, children: [
+        jsxs('section', { className: 'rounded-md border border-(--ui-stroke-secondary) p-4', 'aria-labelledby': 'main-route-title', children: [
+          jsx('h3', { id: 'main-route-title', className: 'text-sm font-semibold', children: 'Main 모델' }),
+          jsx('p', { className: `mt-1 text-xs ${muted}`, children: '이 Profile의 기본 대화 모델을 선택합니다.' }),
+          jsx('div', { className: 'mt-3 grid gap-2', children: modelOptions.map(option => jsxs('button', { type: 'button', disabled: saving || !current.enabled, className: `flex items-center justify-between rounded-md border px-3 py-2.5 text-left text-sm ${current.main_model === option.value ? 'border-(--ui-accent) bg-(--ui-accent)/10' : 'border-(--ui-stroke-secondary) hover:bg-(--ui-bg-tertiary)'}`, onClick: () => updateCurrent({ main_model: option.value }), children: [jsx('span', { className: 'font-medium', children: option.label }), jsx('span', { className: `font-mono text-[11px] ${muted}`, children: option.value || '기존 설정 유지' })] }, option.value || 'unchanged')) })
+        ] }),
+        jsxs('section', { className: 'rounded-md border border-(--ui-stroke-secondary) p-4', 'aria-labelledby': 'aux-route-title', children: [
+          jsxs('div', { className: 'flex flex-wrap items-start justify-between gap-2', children: [jsx('div', { children: [jsx('h3', { id: 'aux-route-title', className: 'text-sm font-semibold', children: 'Auxiliary 모델' }), jsx('p', { className: `mt-1 text-xs ${muted}`, children: '작업 하나를 골라 Main Local 또는 Compress Local에 연결합니다.' })] }), configuredAuxiliary.length ? jsx(Badge, { children: `${configuredAuxiliary.length}개 설정됨` }) : null] }),
+          jsxs('label', { className: 'mt-3 block', children: [jsx('span', { className: 'mb-1.5 block text-xs font-medium text-(--ui-text-secondary)', children: 'Auxiliary 작업' }), jsx('select', { className: compactInput, style: themedSelect(), value: selectedAuxTask, disabled: saving || !current.enabled, onChange: event => setSelectedAuxTask(event.target.value), children: tasks.map(task => jsx('option', { style: themedOption, value: task.key, children: `${task.label} — ${task.hint}` }, task.key)) })] }),
+          selectedTask ? jsxs('div', { className: 'mt-3 rounded-md bg-(--ui-bg-tertiary) p-3', children: [jsxs('div', { children: [jsx('p', { className: 'text-sm font-medium', children: selectedTask.label }), jsx('p', { className: `mt-0.5 text-xs ${muted}`, children: selectedTask.hint })] }), jsx('div', { className: 'mt-3 grid gap-2 sm:grid-cols-3', children: modelOptions.map(option => jsx('button', { type: 'button', disabled: saving || !current.enabled, className: `rounded-md border px-2.5 py-2 text-xs font-medium ${String(current.auxiliary_models?.[selectedAuxTask] || '') === option.value ? 'border-(--ui-accent) bg-(--ui-accent)/10 text-(--ui-text-primary)' : 'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--ui-bg-secondary)'}`, onClick: () => updateAuxiliary(option.value), children: option.label }, option.value || 'unchanged')) })] }) : null,
+          configuredAuxiliary.length ? jsxs('div', { className: 'mt-4 border-t border-(--ui-stroke-secondary) pt-3', children: [jsx('p', { className: `mb-2 text-[11px] font-medium uppercase tracking-wide ${muted}`, children: '설정된 작업' }), jsx('div', { className: 'flex flex-wrap gap-2', children: configuredAuxiliary.map(task => jsx('button', { type: 'button', className: `rounded-full border px-2.5 py-1 text-[11px] ${selectedAuxTask === task.key ? 'border-(--ui-accent) text-(--ui-text-primary)' : 'border-(--ui-stroke-secondary) text-(--ui-text-secondary)'}`, onClick: () => setSelectedAuxTask(task.key), children: `${task.label} · ${current.auxiliary_models[task.key] === 'main-local' ? 'Main' : 'Compress'}` }, task.key)) })] }) : jsx('p', { className: `mt-4 border-t border-(--ui-stroke-secondary) pt-3 text-xs ${muted}`, children: '아직 로컬 모델에 연결한 Auxiliary 작업이 없습니다.' })
+        ] })
+      ] }),
+      jsxs('div', { className: 'flex flex-wrap items-center gap-3 border-t border-(--ui-stroke-secondary) pt-4', children: [jsx('button', { className: primary, disabled: saving || settings.isLoading, onClick: save, children: saving ? '저장 중…' : '변경사항 저장' }), message ? jsx('p', { className: `text-xs ${message.startsWith('설정 저장 실패') ? 'text-(--dt-destructive)' : muted}`, role: 'status', children: message }) : null] })
+    ] }) : null
+  ] })
+}
+
 function TabBar({ active, setActive }) {
-  const tabs = [['runtime', '운영'], ['models', '모델'], ['parameters', 'parameter preset']]
+  const tabs = [['runtime', '운영'], ['models', '모델'], ['parameters', '파라미터'], ['settings', '설정']]
   return jsx('nav', { className: 'mb-5 flex gap-1 border-b border-(--ui-stroke-secondary)', 'aria-label': 'llama.cpp 관리 탭', children: tabs.map(([id, label]) => jsx('button', { className: `border-b-2 px-3 py-2 text-sm ${active === id ? 'border-(--ui-accent) text-(--ui-text-primary)' : 'border-transparent text-(--ui-text-secondary) hover:text-(--ui-text-primary)'}`, onClick: () => setActive(id), 'aria-current': active === id ? 'page' : undefined, children: label }, id)) })
 }
 
@@ -948,7 +1021,8 @@ function Page() {
   const parameterModel = models.find(model => model.id === data?.active_model_id) || models.find(model => model.id === data?.profiles?.main?.model_id) || models[0]
   return jsxs('main', { className: 'llamacpp-selectable mx-auto max-w-5xl p-4 sm:p-6', draggable: false, children: [jsx('style', { children: SELECTABLE_TEXT_STYLE }), jsx(TabBar, { active: tab, setActive: setTab }), tab === 'runtime' ? jsx(RuntimeCard, { status: data, jobs: runtimeJobs, onRefresh: refreshStatus, pushConnected }) : null,
     tab === 'models' ? jsxs('div', { children: [jsxs('div', { className: 'flex items-end justify-between gap-4', children: [jsx('div', { children: [jsx('h2', { className: 'text-lg font-semibold', children: '모델' }), jsx('p', { className: `mt-1 ${muted}`, children: '다운받은 HF cache 모델과 모델 다운로드만 관리합니다.' })] }), jsx('button', { className: primary, onClick: openDownload, children: '+ 모델 다운로드' })] }), wizard ? jsx(RegisterWizard, { close: () => setWizard(null), refresh: refreshWizard, initialRepo: wizard.repo, mode: wizard.mode, pushConnected }) : null, jsxs('section', { className: `${card} mt-5 px-5`, children: [jsxs('div', { className: 'flex items-center justify-between gap-3 py-4', children: [jsx('h2', { className: 'text-lg font-semibold', children: '다운받은 모델' }), jsx('button', { className: button, disabled: hfModels.isFetching, onClick: () => hfModels.refetch(), children: '새로고침' })] }), hfModels.isLoading ? jsx('p', { className: `pb-5 ${muted}`, children: 'inventory를 불러오는 중…' }) : localModels.length ? localModels.map(model => jsx(DownloadedModelRow, { model, onRegister: openRegister, onDelete: deleteDownloaded }, model.repo_id)) : jsx('p', { className: `pb-5 ${muted}`, children: '다운받은 모델이 없습니다.' })] })] }) : null,
-    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: 'parameter preset' }), jsx('p', { className: `mt-1 ${muted}`, children: 'preset을 만들고 편집한 뒤 운영 탭에서 Main과 Auxiliary에 각각 선택합니다. Strata sampling parameter는 request마다 역할별로 적용됩니다.' }), parameterModel ? jsx(ModelSettingsEditor, { modelId: parameterModel.id, appliedPresetId: data?.profiles?.main?.preset_id || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '등록된 모델이 없습니다.' })] }) : null
+    tab === 'parameters' ? jsxs('section', { className: `${card} p-4 sm:p-5`, children: [jsx('h2', { className: 'text-lg font-semibold', children: '파라미터' }), jsx('p', { className: `mt-1 ${muted}`, children: 'preset을 만들고 편집한 뒤 운영 탭에서 Main과 Auxiliary에 각각 선택합니다. Strata sampling parameter는 request마다 역할별로 적용됩니다.' }), parameterModel ? jsx(ModelSettingsEditor, { modelId: parameterModel.id, appliedPresetId: data?.profiles?.main?.preset_id || '', refresh: refreshStatus, open: true }) : jsx('p', { className: `mt-6 rounded-md bg-(--ui-bg-tertiary) p-4 ${muted}`, children: '등록된 모델이 없습니다.' })] }) : null,
+    tab === 'settings' ? jsx(ProfilePolicySettings, {}) : null
   ] })
 }
 export default {

@@ -261,10 +261,10 @@ async def _stopped_response(request: Request, path: str) -> JSONResponse | None:
     method = request.method
     allowed = (
         (method == "GET" and (
-            normalized in {"status", "logs", "metrics", "jobs", "hf-models", "presets", "settings"}
+            normalized in {"status", "logs", "metrics", "jobs", "hf-models", "presets", "settings", "profile-policy-settings"}
             or normalized.startswith("settings/")
         ))
-        or (method == "PUT" and normalized.startswith("settings/"))
+        or (method == "PUT" and (normalized.startswith("settings/") or normalized == "profile-policy-settings"))
         or (method == "POST" and (
             normalized == "presets"
             or (len(parts) == 3 and parts[0] == "presets" and parts[2] == "apply")

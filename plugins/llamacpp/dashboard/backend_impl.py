@@ -155,6 +155,23 @@ CUSTOM_ENDPOINT_KEY = "llamacpp-local"
 COORDINATOR_PORT = 18380
 CUSTOM_ENDPOINT_BEGIN = "# BEGIN llamacpp endpoint (managed)"
 CUSTOM_ENDPOINT_END = "# END llamacpp endpoint (managed)"
+LEGACY_AUTO_PROFILE_TARGETS = frozenset({"project-manager", "coder", "reviewer"})
+PROFILE_MODEL_ALIASES = frozenset({"", "main-local", "compression-local"})
+AUXILIARY_TASKS = (
+    {"key": "vision", "label": "Vision", "hint": "이미지 분석"},
+    {"key": "compression", "label": "Compression", "hint": "컨텍스트 압축"},
+    {"key": "skills_hub", "label": "Skills hub", "hint": "Skill 검색"},
+    {"key": "approval", "label": "Approval", "hint": "자동 승인 판단"},
+    {"key": "mcp", "label": "MCP", "hint": "MCP 도구 라우팅"},
+    {"key": "title_generation", "label": "Title generation", "hint": "세션 제목 생성"},
+    {"key": "review", "label": "Review", "hint": "리뷰 작업"},
+    {"key": "voice_chat", "label": "Voice chat", "hint": "음성 모드 응답"},
+    {"key": "triage_specifier", "label": "Triage specifier", "hint": "Kanban 명세 구체화"},
+    {"key": "kanban_decomposer", "label": "Kanban decomposer", "hint": "작업 분해"},
+    {"key": "profile_describer", "label": "Profile describer", "hint": "Profile 설명 생성"},
+    {"key": "curator", "label": "Curator", "hint": "Skill 사용 검토"},
+)
+AUXILIARY_TASK_KEYS = frozenset(task["key"] for task in AUXILIARY_TASKS)
 _custom_endpoint_lock = threading.RLock()
 _SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}$", re.IGNORECASE)
 _QUANT_SUFFIX_RE = re.compile(r"-(?:P?Q\d+(?:_[A-Za-z0-9]+)*|IQ\d+(?:_[A-Za-z0-9]+)*|F(?:16|32)|BF16)$", re.IGNORECASE)
@@ -658,7 +675,7 @@ def _profile_config_paths() -> list[Path]:
     """Return every local profile config served by this Hermes home."""
     profiles_root = PROFILE_ROOT.parent
     paths = [path / "config.yaml" for path in profiles_root.iterdir()
-             if path.is_dir() and (path / "config.yaml").is_file()]
+             if path.is_dir() and not path.name.startswith(".") and (path / "config.yaml").is_file()]
     current = _endpoint_config_path()
     if current.is_file() and current not in paths:
         paths.append(current)
@@ -727,6 +744,103 @@ def _profile_provider_models() -> dict[str, int]:
     return profile_models
 
 
+def _profile_policy_map() -> dict[str, dict[str, Any]]:
+    state = _state()
+    saved = state.get("profile_model_policy")
+    raw = saved if isinstance(saved, dict) else {}
+    policy: dict[str, dict[str, Any]] = {}
+    for path in _profile_config_paths():
+        profile = path.parent.name
+        value = raw.get(profile)
+        row = value if isinstance(value, dict) else {}
+        legacy_enabled = profile in LEGACY_AUTO_PROFILE_TARGETS
+        legacy_main = "main-local" if legacy_enabled else ""
+        main_model = str(row.get("main_model", row.get("default_model", legacy_main))).strip()
+        auxiliary = row.get("auxiliary_models")
+        if isinstance(auxiliary, dict):
+            auxiliary_models = {
+                str(task): str(model).strip()
+                for task, model in auxiliary.items()
+                if str(task) in AUXILIARY_TASK_KEYS and str(model).strip() in PROFILE_MODEL_ALIASES
+            }
+        else:
+            legacy_compression = row.get("compression_model", "compression-local" if legacy_enabled else "")
+            auxiliary_models = {"compression": str(legacy_compression).strip()} if legacy_compression else {}
+        policy[profile] = {
+            "enabled": bool(row.get("enabled", legacy_enabled)),
+            "main_model": main_model if main_model in PROFILE_MODEL_ALIASES else legacy_main,
+            "auxiliary_models": auxiliary_models,
+        }
+    return policy
+
+
+def profile_policy_settings() -> dict[str, Any]:
+    policy = _profile_policy_map()
+    return {
+        "profiles": [
+            {"profile": profile, **policy[profile]}
+            for profile in sorted(policy, key=str.lower)
+        ],
+        "model_options": [
+            {"value": "", "label": "변경하지 않음"},
+            {"value": "main-local", "label": "Main Local"},
+            {"value": "compression-local", "label": "Compress Local"},
+        ],
+        "auxiliary_tasks": list(AUXILIARY_TASKS),
+    }
+
+
+def save_profile_policy_settings(body: dict[str, Any]) -> dict[str, Any]:
+    profiles = body.get("profiles")
+    if not isinstance(profiles, dict):
+        raise ValueError("profiles must be an object")
+    policy = _profile_policy_map()
+    unknown = sorted(set(profiles) - set(policy))
+    if unknown:
+        raise ValueError(f"unsupported profile: {unknown[0]}")
+    for profile, value in profiles.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"profile settings must be an object: {profile}")
+        main_model = str(value.get("main_model", policy[profile]["main_model"])).strip()
+        if main_model not in PROFILE_MODEL_ALIASES:
+            raise ValueError(f"unsupported main model: {main_model}")
+        requested_auxiliary = value.get("auxiliary_models", policy[profile]["auxiliary_models"])
+        if not isinstance(requested_auxiliary, dict):
+            raise ValueError(f"auxiliary_models must be an object: {profile}")
+        unknown_tasks = sorted(set(requested_auxiliary) - AUXILIARY_TASK_KEYS)
+        if unknown_tasks:
+            raise ValueError(f"unsupported auxiliary task: {unknown_tasks[0]}")
+        auxiliary_models: dict[str, str] = {}
+        for task, model in requested_auxiliary.items():
+            alias = str(model).strip()
+            if alias not in PROFILE_MODEL_ALIASES:
+                raise ValueError(f"unsupported auxiliary model: {alias}")
+            if alias:
+                auxiliary_models[str(task)] = alias
+        policy[profile] = {
+            "enabled": bool(value.get("enabled", policy[profile]["enabled"])),
+            "main_model": main_model,
+            "auxiliary_models": auxiliary_models,
+        }
+    state = _state()
+    state["profile_model_policy"] = policy
+    _save_state(state)
+    return profile_policy_settings()
+
+
+@router.get("/profile-policy-settings")
+def profile_policy_settings_route() -> dict[str, Any]:
+    return profile_policy_settings()
+
+
+@router.put("/profile-policy-settings")
+def save_profile_policy_settings_route(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return save_profile_policy_settings(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]:
     """Register local Main/Aux models everywhere and assign worker defaults."""
     base_url = f"http://127.0.0.1:{COORDINATOR_PORT}/v1"
@@ -748,13 +862,20 @@ def _sync_execution_profile_endpoint(fallback_model: str = "") -> dict[str, Any]
         if logical_model in execution_models
     }
     default_model = "main-local"
+    profile_policy = _profile_policy_map()
     with _custom_endpoint_lock:
         updates: list[tuple[Path, str, str]] = []
         for path in _profile_config_paths():
             text = path.read_text(encoding="utf-8")
             updated = _config_with_execution_profiles(text, base_url, default_model, provider_models)
-            if path.parent.name in {"project-manager", "coder", "reviewer"}:
-                updated = apply_worker_model_policy(updated, main_model_id)
+            policy = profile_policy.get(path.parent.name)
+            if policy and policy["enabled"]:
+                updated = apply_worker_model_policy(
+                    updated,
+                    main_model_id,
+                    default_model=policy["main_model"],
+                    auxiliary_models=policy["auxiliary_models"],
+                )
             if updated != text:
                 updates.append((path, text, updated))
         _apply_profile_updates(updates)
@@ -1253,6 +1374,8 @@ def ensure_execution_role(role: str) -> dict[str, Any]:
         selected_preset = _presets_store().get(selected_preset_id)
         context_length = (selected_preset or {}).get("context_length")
         if context_length is not None:
+            if runtime_kind == "strata" and _is_server_running():
+                _stop_server(preserve_log=True, keep_endpoint=True)
             _write_parameter_context(model_id, runtime_kind, int(context_length))
     log_path = ACTIVITY_LOG_PATH
     try:

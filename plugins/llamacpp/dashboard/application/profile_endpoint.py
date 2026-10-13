@@ -119,7 +119,14 @@ class ManagedEndpointConfig:
         return begin, end
 
 
-def apply_worker_model_policy(text: str, main_model_id: str) -> str:
+def apply_worker_model_policy(
+    text: str,
+    main_model_id: str,
+    *,
+    default_model: str = "main-local",
+    compression_model: str = "compression-local",
+    auxiliary_models: dict[str, str] | None = None,
+) -> str:
     """Assign managed local Main/Aux routes and model-specific reasoning defaults."""
     newline = chr(13) + chr(10) if chr(13) + chr(10) in text else chr(10)
     lines = text.splitlines()
@@ -233,44 +240,56 @@ def apply_worker_model_policy(text: str, main_model_id: str) -> str:
                         lines[index].strip()[2:].strip().strip("\"'") == "llamacpp":
                     del lines[index]
 
-    model = section("model", 0)
-    if model is None:
-        lines[0:0] = [
-            "model:", '  provider: "llamacpp-local"', '  default: "main-local"',
-            f'  reasoning_effort: "{main_reasoning_effort}"',
-        ]
-    else:
-        update_scalars(
-            model, 0,
-            {"provider": "llamacpp-local", "default": "main-local",
-             "reasoning_effort": main_reasoning_effort},
-            {"base_url", "api_base", "api_mode"},
-        )
-
-    auxiliary = section("auxiliary", 0)
-    if auxiliary is None:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.extend([
-            "auxiliary:", "  compression:", '    provider: "llamacpp-local"',
-            '    model: "compression-local"', '    reasoning_effort: "none"',
-        ])
-    else:
-        compression = section("compression", 2, auxiliary[0] + 1, auxiliary[1])
-        if compression is None:
-            lines[auxiliary[1]:auxiliary[1]] = [
-                "  compression:", '    provider: "llamacpp-local"',
-                '    model: "compression-local"', '    reasoning_effort: "none"',
+    if default_model:
+        model = section("model", 0)
+        if model is None:
+            lines[0:0] = [
+                "model:", '  provider: "llamacpp-local"',
+                f"  default: {json.dumps(default_model, ensure_ascii=False)}",
+                f'  reasoning_effort: "{main_reasoning_effort}"',
             ]
         else:
             update_scalars(
-                compression, 2,
-                {"provider": "llamacpp-local", "model": "compression-local", "reasoning_effort": "none"},
+                model, 0,
+                {"provider": "llamacpp-local", "default": default_model,
+                 "reasoning_effort": main_reasoning_effort},
                 {"base_url", "api_base", "api_mode"},
             )
 
-    update_plugin_list("enabled", include=True)
-    update_plugin_list("disabled", include=False)
+    selected_auxiliary = dict(auxiliary_models or {})
+    if auxiliary_models is None and compression_model:
+        selected_auxiliary["compression"] = compression_model
+    if selected_auxiliary:
+        if section("auxiliary", 0) is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append("auxiliary:")
+        for task, model in selected_auxiliary.items():
+            if not model:
+                continue
+            auxiliary = section("auxiliary", 0)
+            if auxiliary is None:
+                continue
+            task_section = section(task, 2, auxiliary[0] + 1, auxiliary[1])
+            values = {"provider": "llamacpp-local", "model": model}
+            if task == "compression":
+                values["reasoning_effort"] = "none"
+            if task_section is None:
+                encoded_model = json.dumps(model, ensure_ascii=False)
+                new_lines = [
+                    f"  {task}:", '    provider: "llamacpp-local"', f"    model: {encoded_model}",
+                ]
+                if task == "compression":
+                    new_lines.append('    reasoning_effort: "none"')
+                lines[auxiliary[1]:auxiliary[1]] = new_lines
+            else:
+                update_scalars(
+                    task_section, 2, values, {"base_url", "api_base", "api_mode"},
+                )
+
+    if default_model or any(selected_auxiliary.values()):
+        update_plugin_list("enabled", include=True)
+        update_plugin_list("disabled", include=False)
 
     return newline.join(lines) + (newline if text.endswith((chr(10), chr(13))) else "")
 
