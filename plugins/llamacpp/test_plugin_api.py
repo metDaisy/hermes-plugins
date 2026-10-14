@@ -2087,13 +2087,15 @@ class LlamaCppManagerTests(unittest.TestCase):
 
         self.assertEqual(
             set(catalog),
-            {"max-context", "temp", "top-p", "top-k", "min-p", "repeat-penalty", "frequency-penalty", "presence-penalty", "seed"},
+            {"max-context", "vision", "temp", "top-p", "top-k", "min-p", "repeat-penalty", "frequency-penalty", "presence-penalty", "seed"},
         )
         self.assertEqual(catalog["max-context"]["name"], "--max-context")
         self.assertEqual(catalog["max-context"]["value_kind"], "integer")
+        self.assertFalse(catalog["vision"]["requires_value"])
+        self.assertTrue(catalog["vision"]["toggle"])
         self.assertEqual(catalog["temp"]["value_kind"], "number")
         self.assertEqual(catalog["top-k"]["value_kind"], "integer")
-        self.assertTrue(all(item["requires_value"] for item in catalog.values()))
+        self.assertTrue(all(item["requires_value"] for key, item in catalog.items() if key != "vision"))
 
     def test_explicit_strata_request_sampling_overrides_role_preset(self) -> None:
         from dashboard.inference_proxy import rewrite_logical_model
@@ -2612,6 +2614,41 @@ class LlamaCppManagerTests(unittest.TestCase):
 
             self.assertEqual(backend.read_context_length(config), 131072)
             self.assertEqual(saved["args"], ["--spec", "4", "--max-context", "131072", "--kv", "int8"])
+            self.assertEqual(saved["tokenizer"], "tokenizer-path")
+
+    def test_strata_backend_enables_configured_vision_from_parameter_preset(self) -> None:
+        from dashboard.backends.strata import StrataBackend
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            config = root / "strata.json"
+            vision = {
+                "exe": str(root / "strata-vision.exe"),
+                "mmproj": str(root / "mmproj.gguf"),
+                "model": str(root / "model.gguf"),
+                "gpu": True,
+            }
+            python = root / ".venv" / "Scripts" / "python.exe"
+            server = root / "serve" / "server.py"
+            python.parent.mkdir(parents=True)
+            server.parent.mkdir(parents=True)
+            python.write_bytes(b"python")
+            server.write_text("# server\n", encoding="utf-8")
+            config.write_text(json.dumps({
+                "args": ["--spec", "4"],
+                "vision": vision,
+                "tokenizer": "tokenizer-path",
+            }), encoding="utf-8")
+
+            StrataBackend().build_launch(
+                python, 18080, "strata-model",
+                {"runtime_root": str(root), "config_path": str(config)},
+                {"vision": ""}, "strata", [], model_path=config,
+            )
+            saved = json.loads(config.read_text(encoding="utf-8"))
+
+            self.assertIn("--vision", saved["args"])
+            self.assertEqual(saved["vision"], vision)
             self.assertEqual(saved["tokenizer"], "tokenizer-path")
 
     def test_model_cards_use_inline_download_panel_and_unregister_action(self) -> None:

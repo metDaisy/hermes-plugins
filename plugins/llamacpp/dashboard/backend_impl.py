@@ -1551,6 +1551,17 @@ def _strata_request_option_catalog() -> list[dict[str, Any]]:
         "choices": [],
         "value_kind": "integer",
         "toggle": False,
+    }, {
+        "key": "vision",
+        "name": "--vision",
+        "aliases": ["--vision"],
+        "value_hint": "",
+        "description": "Enable the configured Strata vision encoder and mmproj",
+        "requires_value": False,
+        "default_value": None,
+        "choices": [],
+        "value_kind": "string",
+        "toggle": True,
     }] + [
         {
             "key": key,

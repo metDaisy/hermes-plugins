@@ -69,6 +69,27 @@ class StrataBackend:
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(config)
 
+    @staticmethod
+    def ensure_vision_enabled(config: Path) -> None:
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Strata model config is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("Strata model config must contain a JSON object")
+        args = data.get("args")
+        if not isinstance(args, list):
+            raise RuntimeError("Strata model config args must be an array")
+        vision = data.get("vision")
+        if not isinstance(vision, dict) or not all(str(vision.get(key) or "").strip() for key in ("exe", "mmproj", "model")):
+            raise RuntimeError("Strata vision encoder and mmproj are not configured")
+        if "--vision" in args:
+            return
+        data["args"] = [*args, "--vision"]
+        temporary = config.with_suffix(config.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(config)
+
     def resolve_executable(self, raw_path: Path | str) -> Path:
         root = Path(str(raw_path)).expanduser().resolve()
         candidates = [
@@ -111,6 +132,9 @@ class StrataBackend:
                      model_path: Path | None = None) -> WorkerLaunch:
         runtime_root = Path(str(entry.get("runtime_root") or "")).expanduser().resolve()
         worker_port = int(entry.get("worker_port") or self.default_port)
+        config = Path(str(entry.get("config_path") or model_path or "")).expanduser().resolve()
+        if "vision" in options:
+            self.ensure_vision_enabled(config)
         command = self.build_command(executable, worker_port, model_id, entry, {}, model_path)
         version = str(entry.get("strata_version") or "Strata")
         environment = {key: value for key, value in os.environ.items() if key.upper() != "STRATA_API_KEY"}
