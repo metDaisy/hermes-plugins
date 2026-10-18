@@ -1,0 +1,526 @@
+{
+  "schema": "backend-implementation-card-v6",
+  "trace": {
+    "triage_digest": "8e0dcc7ed4e02735a0b83de55ed27c88c4b6fcc77ec255f34b43bd7adabeba65",
+    "slice_id": "SLICE-005",
+    "requirement_ids": [
+      "CHANGE-002",
+      "CHANGE-006",
+      "CHANGE-005"
+    ],
+    "observable_ids": [
+      "OBS-005",
+      "OBS-008",
+      "OBS-009",
+      "OBS-007",
+      "OBS-010",
+      "OBS-012",
+      "OBS-014"
+    ],
+    "gap_ids": [
+      "GAP-003"
+    ]
+  },
+  "objective": {
+    "outcome": "Cart aggregate의 이름 있는 병합 behavior가 전체 candidate의 collection-level 검증과 mutation을 원자적으로 수행하고 CartService는 Offer 검증, transaction, ownership과 결과 mapping만 조정한다."
+  },
+  "boundary": {
+    "in_scope": [
+      "Cart#mergeItems가 전체 candidate의 Offer별·50종·1,000개 제한을 mutation 전에 검증하고 전체 적용 또는 상태 불변을 반환한다.",
+      "CartService#mergeGuestCart는 Offer 검증, owner Cart lock 조회, aggregate 1회 호출, 결과 mapping과 성공 시 guest 삭제만 조정한다.",
+      "기존 expiration, payment cleanup, Cart 공개 API, repository lock/transaction과 schema 계약을 회귀 검증한다."
+    ],
+    "out_of_scope": [
+      "병합 result code, conflict detail, ownership, expiration, cookie, locking, transaction 또는 cleanup 의미 변경",
+      "Auth·Order 내부 구현, Offer 내부 구현, 프런트엔드 변경",
+      "실제 schema 변경 없이 Flyway migration 추가",
+      "Cart 전면 재작성과 무관한 정리"
+    ]
+  },
+  "obligations": [
+    {
+      "id": "OB-AGGREGATE-BATCH",
+      "kind": "behavior",
+      "given": [
+        "기존 Offer와 신규 Offer candidate가 같은 batch에 존재한다.",
+        "Offer별 maxPurchaseQuantity, 최대 50종, 전체 1,000개와 quantity 양수 조건을 서로 독립적으로 도달 가능하게 구성한다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.domain.entity.Cart#mergeItems",
+        "invocation_count": 1
+      },
+      "expected": [
+        "성공 시 기존 CartItem ID를 보존한 정확한 CartItem ID→quantity map과 신규 item을 반환한다.",
+        "Offer 한도와 collection 한도가 동시에 충돌하면 두 Offer ID를 정확히 반환하고 Cart 상태를 변경하지 않는다.",
+        "quantity가 0 이하인 candidate는 CART_INVALID_INPUT으로 거절하고 Cart 상태를 변경하지 않는다."
+      ],
+      "observables": [
+        {
+          "target": "successful Cart items",
+          "source": "in-memory-state",
+          "comparison": "exact-map",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "existing item quantity is incremented and new item quantity is inserted"
+        },
+        {
+          "target": "combined conflict Offer IDs",
+          "source": "return-value",
+          "comparison": "exact-set",
+          "identity": [],
+          "values": [],
+          "expected": "maxOfferId and collectionOfferId"
+        },
+        {
+          "target": "Cart items after rejected batch",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "before-state CartItem.id→quantity map"
+        }
+      ]
+    },
+    {
+      "id": "OB-SERVICE-COMBINED-CONFLICT",
+      "kind": "behavior",
+      "given": [
+        "member Cart는 정확히 50종이며 maxOfferId를 수량 1로 포함한다.",
+        "guest Cart는 maxOfferId와 신규 collectionOfferId를 각각 수량 1로 포함한다.",
+        "두 Offer는 존재하고 ACTIVE이며 maxOfferId의 maxPurchaseQuantity는 1, collectionOfferId는 10이어서 Offer 한도와 collection 한도 충돌이 동시에 성립한다.",
+        "missing, unavailable 등 target이 아닌 guard는 모두 통과하도록 중립화한다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.application.service.CartService#mergeGuestCart",
+        "invocation_count": 1
+      },
+      "expected": [
+        "한 번의 production merge 호출이 Offer 한도와 collection 한도 충돌을 함께 평가한다.",
+        "결과는 두 conflict Offer ID를 정확히 반환한다.",
+        "member와 guest의 정확한 CartItem ID→quantity map 및 guest Cart ID가 보존된다.",
+        "aggregate merge는 정확히 한 번 호출되고 repository save/delete는 호출되지 않는다."
+      ],
+      "observables": [
+        {
+          "target": "merge conflict Offer IDs",
+          "source": "return-value",
+          "comparison": "exact-set",
+          "identity": [],
+          "values": [],
+          "expected": "maxOfferId and collectionOfferId"
+        },
+        {
+          "target": "member CartItem state",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "member before-state map"
+        },
+        {
+          "target": "guest CartItem state",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "guest before-state map"
+        },
+        {
+          "target": "guest Cart identity",
+          "source": "in-memory-state",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "guestCartId"
+        },
+        {
+          "target": "Cart.mergeItems calls",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "1"
+        },
+        {
+          "target": "CartRepository save calls",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "0"
+        },
+        {
+          "target": "CartRepository delete calls",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "0"
+        }
+      ]
+    },
+    {
+      "id": "OB-CONCURRENT-MERGE",
+      "kind": "behavior",
+      "given": [
+        "member와 guest Cart가 persisted 되어 있고 member owner row의 write lock을 별도 transaction이 보유한다.",
+        "competingStarted 신호는 경쟁 production merge 호출 직전에 발생한다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.application.port.in.CartMergeApi#merge",
+        "invocation_count": 1
+      },
+      "expected": [
+        "경쟁 merge는 owner lock 해제 전 완료되지 않는다.",
+        "lock 해제 후 member의 정확한 CartItem ID→quantity map과 guest 삭제가 하나의 결과로 commit된다."
+      ],
+      "observables": [
+        {
+          "target": "concurrent call ordering",
+          "source": "concurrency",
+          "comparison": "ordered",
+          "identity": [],
+          "values": [],
+          "expected": "owner lock acquired → competingStarted → pre-release timeout → release → merge completed"
+        },
+        {
+          "target": "persisted member CartItem state",
+          "source": "persisted-reload",
+          "comparison": "exact-map",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "original member item quantity 2 and merged guest item quantity 3"
+        },
+        {
+          "target": "persisted guest Cart",
+          "source": "persisted-reload",
+          "comparison": "absent",
+          "identity": [],
+          "values": [],
+          "expected": "guestCartId is absent after commit"
+        }
+      ]
+    },
+    {
+      "id": "OB-FAILED-MERGE-EXPIRATION",
+      "kind": "preservation",
+      "given": [
+        "mutable clock으로 생성한 guest Cart가 Offer 한도 conflict를 일으킨다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.application.service.CartService#mergeGuestCart",
+        "invocation_count": 1
+      },
+      "expected": [
+        "실패 merge는 guest expiresAt, member/guest item 상태와 guest identity를 변경하지 않고 save/delete를 수행하지 않는다."
+      ],
+      "observables": [
+        {
+          "target": "guest expiration after conflict",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [],
+          "values": [],
+          "expected": "created expiration"
+        },
+        {
+          "target": "guest CartItem state after conflict",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "guest before-state map"
+        },
+        {
+          "target": "member CartItem state after conflict",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "member before-state map"
+        },
+        {
+          "target": "repository save/delete after conflict",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "0 save and 0 delete calls"
+        }
+      ]
+    },
+    {
+      "id": "OB-SUCCESS-MERGE-EXPIRATION",
+      "kind": "behavior",
+      "given": [
+        "guest Cart 생성 후 mutable clock을 1일 전진시키고 모든 merge guard를 통과시킨다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.application.service.CartService#mergeGuestCart",
+        "invocation_count": 1
+      },
+      "expected": [
+        "성공 merge는 guest expiresAt을 operationTime + 30일로 갱신한 뒤 member 저장과 guest 삭제를 수행한다."
+      ],
+      "observables": [
+        {
+          "target": "guest expiration after successful merge",
+          "source": "in-memory-state",
+          "comparison": "equals-expression",
+          "identity": [],
+          "values": [],
+          "expected": "operationTime + Cart.GUEST_LIFETIME"
+        },
+        {
+          "target": "member save calls",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "1"
+        },
+        {
+          "target": "guest delete calls",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "1"
+        }
+      ]
+    },
+    {
+      "id": "OB-EXPIRED-MERGE",
+      "kind": "preservation",
+      "given": [
+        "guest Cart expiresAt은 operation time보다 이전이고 item을 포함한다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.application.service.CartService#mergeGuestCart",
+        "invocation_count": 1
+      },
+      "expected": [
+        "expired guest는 item을 member에 병합하거나 노출하지 않고 삭제되며 member 조회, Offer 조회와 save를 수행하지 않는다."
+      ],
+      "observables": [
+        {
+          "target": "expired merge status",
+          "source": "return-value",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "MERGED"
+        },
+        {
+          "target": "expired guest original CartItem state",
+          "source": "in-memory-state",
+          "comparison": "unchanged",
+          "identity": [
+            "CartItem.id"
+          ],
+          "values": [
+            "quantity"
+          ],
+          "expected": "expired before-state map"
+        },
+        {
+          "target": "expired guest deletion",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "1"
+        },
+        {
+          "target": "member/Offer/save interactions",
+          "source": "interaction",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "0 member reads, 0 Offer reads, 0 saves"
+        }
+      ]
+    },
+    {
+      "id": "OB-PAYMENT-CLEANUP",
+      "kind": "preservation",
+      "given": [
+        "selected, retained, 이미 제거된 CartItem ID를 구분하고 동일 cleanup을 두 번 실행한다."
+      ],
+      "operation": {
+        "symbol": "io.github.metdaisy.amaazon.cart.domain.repository.CartRepository#deleteItemsByIds",
+        "invocation_count": 2
+      },
+      "expected": [
+        "첫 호출은 전달된 existing selected item만 제거하고 unrelated item을 보존하며 두 번째 호출은 0을 반환한다."
+      ],
+      "observables": [
+        {
+          "target": "first cleanup deleted count",
+          "source": "return-value",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "1"
+        },
+        {
+          "target": "second cleanup deleted count",
+          "source": "return-value",
+          "comparison": "exact",
+          "identity": [],
+          "values": [],
+          "expected": "0"
+        },
+        {
+          "target": "persisted retained item",
+          "source": "persisted-reload",
+          "comparison": "present",
+          "identity": [],
+          "values": [],
+          "expected": "retained CartItem.id remains"
+        }
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "id": "CONSTRAINT-AGGREGATE-OWNER",
+      "rule": "전체 merge candidate의 collection invariant와 mutation은 Cart aggregate가 소유한다.",
+      "source": {
+        "locator": "https://github.com/metDaisy/e-commerce-clone-coding/issues/151#Aggregate-behavior와-application-service-책임",
+        "claim": "Merge invariant와 state transition은 Cart named behavior로 수행해야 한다."
+      }
+    },
+    {
+      "id": "CONSTRAINT-LOCKED-TRANSACTION",
+      "rule": "member와 guest Cart를 쓰기 잠금으로 읽고 하나의 local transaction에서 partial state 없이 병합한다.",
+      "source": {
+        "locator": "docs/requirement/p3/p3-policy.md#불변식",
+        "claim": "Cart 변경과 게스트·회원 Cart 병합은 쓰기 잠금과 하나의 로컬 transaction 안에서 전체 결과를 검증하고 부분 결과를 남기지 않는다."
+      }
+    },
+    {
+      "id": "CONSTRAINT-LIFECYCLE-PRESERVATION",
+      "rule": "30일 guest expiration, 성공 시 guest 삭제, selected payment cleanup 멱등성과 schema 불변 시 migration 미추가를 유지한다.",
+      "source": {
+        "locator": "https://github.com/metDaisy/e-commerce-clone-coding/issues/151#Persistence와-transaction-보존",
+        "claim": "Ownership, merge atomicity, locking, limits와 cleanup idempotency를 보존하고 migration은 실제 schema 변경에만 추가한다."
+      }
+    },
+    {
+      "id": "CONSTRAINT-MODULE-PUBLIC-API",
+      "rule": "Auth와 Order는 CartMergeApi와 CartPaymentCleanupApi만 사용하고 Cart Repository 또는 Entity에 직접 의존하지 않는다.",
+      "source": {
+        "locator": "docs/architecture.md#Application-module",
+        "claim": "Cross-module callers use only the Cart public application API."
+      }
+    }
+  ],
+  "verification": [
+    {
+      "id": "VERIFY-005",
+      "covers": [
+        "OB-AGGREGATE-BATCH",
+        "CONSTRAINT-AGGREGATE-OWNER"
+      ],
+      "level": "unit",
+      "selectors": [
+        "io.github.metdaisy.amaazon.cart.domain.entity.CartTest#mergeItemsValidatesWholeBatchBeforeMutation"
+      ]
+    },
+    {
+      "id": "VERIFY-009",
+      "covers": [
+        "OB-SERVICE-COMBINED-CONFLICT",
+        "CONSTRAINT-AGGREGATE-OWNER"
+      ],
+      "level": "unit",
+      "selectors": [
+        "io.github.metdaisy.amaazon.cart.application.service.CartServiceTest#mergeReturnsExactConflictsWithoutDeletingGuestCart"
+      ]
+    },
+    {
+      "id": "VERIFY-008",
+      "covers": [
+        "OB-CONCURRENT-MERGE",
+        "CONSTRAINT-LOCKED-TRANSACTION"
+      ],
+      "level": "integration",
+      "selectors": [
+        "io.github.metdaisy.amaazon.cart.presentation.controller.CartIntegrationTest#mergeIsAtomicUnderConflict"
+      ]
+    },
+    {
+      "id": "VERIFY-007",
+      "covers": [
+        "CONSTRAINT-LOCKED-TRANSACTION"
+      ],
+      "level": "repository",
+      "selectors": [
+        "io.github.metdaisy.amaazon.cart.infra.repository.CartJpaRepositoryTest#mergeLoadsOwnersWithWriteLock"
+      ]
+    },
+    {
+      "id": "VERIFY-010",
+      "covers": [
+        "OB-FAILED-MERGE-EXPIRATION",
+        "OB-SUCCESS-MERGE-EXPIRATION",
+        "OB-EXPIRED-MERGE",
+        "CONSTRAINT-LIFECYCLE-PRESERVATION"
+      ],
+      "level": "unit",
+      "selectors": [
+        "io.github.metdaisy.amaazon.cart.application.service.CartServiceTest#guestExpirationChangesOnlyAfterSuccessfulMutation"
+      ]
+    },
+    {
+      "id": "VERIFY-012",
+      "covers": [
+        "OB-PAYMENT-CLEANUP",
+        "CONSTRAINT-LIFECYCLE-PRESERVATION"
+      ],
+      "level": "repository",
+      "selectors": [
+        "io.github.metdaisy.amaazon.cart.infra.repository.CartJpaRepositoryTest#selectedPaymentCleanupIsIdempotent"
+      ]
+    },
+    {
+      "id": "VERIFY-014",
+      "covers": [
+        "CONSTRAINT-MODULE-PUBLIC-API"
+      ],
+      "level": "modulith",
+      "selectors": [
+        "io.github.metdaisy.amaazon.ModularityTest#verifyModularStructure"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schema": "backend-implementation-card-v5",
+  "card_type": "implementation",
+  "issue": {
+    "number": 138,
+    "url": "https://github.com/example/repository/issues/138"
+  },
+  "triage_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

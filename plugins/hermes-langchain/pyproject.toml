@@ -1,0 +1,14 @@
+[project]
+name = "hermes-langchain"
+version = "0.29.0"
+description = "LangGraph orchestration adapter for Hermes workflows."
+requires-python = ">=3.10"
+dependencies = [
+  "langchain>=1.0,<2.0",
+  "langchain-core>=1.0,<2.0",
+  "langgraph>=1.0,<2.0",
+  "langsmith>=0.3.0",
+]
+
+[tool.uv]
+package = false

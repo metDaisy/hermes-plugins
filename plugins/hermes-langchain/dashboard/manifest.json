@@ -1,0 +1,8 @@
+{
+  "name": "hermes-langchain",
+  "label": "Hermes LangChain",
+  "description": "Desktop-owned KWC fresh-agent runtime, Kanban workflow status, activity, and comment API",
+  "version": "0.29.0",
+  "slots": [],
+  "api": "plugin_api.py"
+}

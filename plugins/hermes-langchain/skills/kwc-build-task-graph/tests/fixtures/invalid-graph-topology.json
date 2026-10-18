@@ -1,0 +1,280 @@
+{
+  "schema": "build-task-graph-v6",
+  "mode": "new",
+  "issue": {
+    "number": 138,
+    "url": "https://github.com/example/repository/issues/138"
+  },
+  "generation": 1,
+  "workspace": "scratch",
+  "planning_baseline_sha": "0000000000000000000000000000000000000000",
+  "triage_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "requirement_basis": {
+    "path": "docs/requirement/p2/product.md",
+    "heading": "상품 등록",
+    "revision": "1111111111111111111111111111111111111111"
+  },
+  "revised_requirement": null,
+  "lineage": null,
+  "source_review": null,
+  "change_requirements": [
+    {
+      "id": "CHANGE-PRODUCT-CREATE",
+      "outcome": "판매자는 유효한 요청으로 상품을 등록할 수 있다.",
+      "source": {
+        "locator": "https://github.com/example/repository/issues/138#상품-등록",
+        "claim": "판매자는 유효한 요청으로 상품을 등록할 수 있다."
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "id": "behavior-product-create",
+      "outcome": "인증된 판매자의 유효한 요청은 상품을 저장하고 생성 결과를 반환한다.",
+      "state": "absent",
+      "disposition": "planned",
+      "evidence": [],
+      "requirement_ids": [
+        "CHANGE-PRODUCT-CREATE"
+      ],
+      "implementation_card_key": "impl-1"
+    }
+  ],
+  "cards": [
+    {
+      "key": "triage",
+      "title": "G1-Issue138-Triage",
+      "card_type": "triage",
+      "assignee": "project-manager",
+      "skills": [],
+      "workspace": "scratch",
+      "status": "triage",
+      "priority": 0,
+      "parents": [],
+      "body": null
+    },
+    {
+      "key": "impl-1",
+      "title": "G2-Issue138-Impl1",
+      "card_type": "implementation",
+      "assignee": "coder",
+      "skills": [],
+      "workspace": "scratch",
+      "status": "ready",
+      "priority": 2,
+      "parents": [
+        "triage"
+      ],
+      "body": {
+        "schema": "backend-implementation-card-v5",
+        "card_type": "implementation",
+        "issue": {
+          "number": 138,
+          "url": "https://github.com/example/repository/issues/138"
+        },
+        "triage_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "slice": {
+          "id": "slice-product-create",
+          "title": "상품 등록 전달 경계",
+          "outcome": "인증된 판매자가 유효한 상품 정보를 등록하면 생성된 상품 응답을 받는다.",
+          "behavior_ids": [
+            "behavior-product-create"
+          ],
+          "gap_ids": [
+            "gap-product-create"
+          ],
+          "scope": [
+            "상품 등록 애플리케이션 서비스와 웹 전달 경계를 구현한다."
+          ],
+          "out_of_scope": [
+            "상품 수정과 삭제 기능은 변경하지 않는다."
+          ]
+        },
+        "implementation_contract": {
+          "actor_and_authorization": {
+            "applicability": "applicable",
+            "rules": [
+              "인증된 판매자만 상품 등록을 요청할 수 있다."
+            ]
+          },
+          "api": {
+            "applicability": "applicable",
+            "rules": [
+              "ProductController#create는 요청을 application command로 변환하고 생성 결과를 반환한다."
+            ]
+          },
+          "state_transition": {
+            "applicability": "applicable",
+            "rules": [
+              "유효한 등록 명령은 새 Product를 생성해 저장한다."
+            ]
+          },
+          "error_semantics": {
+            "applicability": "applicable",
+            "rules": [
+              "인증되지 않은 요청과 유효하지 않은 입력은 저장 전에 거부한다."
+            ]
+          },
+          "persistence_and_transaction": {
+            "applicability": "applicable",
+            "rules": [
+              "상품 생성과 저장은 하나의 transaction에서 수행한다."
+            ]
+          },
+          "events": {
+            "applicability": "not-applicable",
+            "rules": [
+              "이 slice는 event contract를 변경하지 않는다."
+            ]
+          },
+          "preserved_behaviors": [
+            "상품 수정과 삭제 기능은 변경하지 않는다."
+          ]
+        },
+        "context": {
+          "current_state": [
+            {
+              "fact": "상품 등록 서비스는 아직 생성 명령을 공개하지 않는다.",
+              "source": {
+                "kind": "repository",
+                "path": "src/main/java/example/product/ProductService.java",
+                "heading": "ProductService"
+              }
+            }
+          ],
+          "entry_points": [
+            {
+              "path": "src/main/java/example/product/ProductController.java",
+              "symbol": "ProductController#create",
+              "reason": "상품 등록 HTTP 요청을 받는 전달 경계이다."
+            }
+          ],
+          "constraints": [
+            {
+              "rule": "판매자 권한을 확인한 뒤 상품을 저장해야 한다.",
+              "source": {
+                "kind": "repository",
+                "path": "docs/requirement/p2/product.md",
+                "heading": "상품 등록"
+              }
+            }
+          ]
+        },
+        "acceptance": [
+          {
+            "id": "AC-PRODUCT-CREATE",
+            "criterion": "유효한 요청이면 생성된 상품 식별자와 함께 성공 응답을 반환한다.",
+            "requirement_ids": [
+              "CHANGE-PRODUCT-CREATE"
+            ],
+            "observable_ids": [
+              "OBS-PRODUCT-CREATE"
+            ]
+          }
+        ],
+        "verification": [
+          {
+            "id": "FV-PRODUCT-CREATE",
+            "acceptance_ids": [
+              "AC-PRODUCT-CREATE"
+            ],
+            "test_level": "slice",
+            "task": "test",
+            "tests": [
+              "example.product.ProductControllerTest#createsProduct"
+            ],
+            "scenarios": [
+              "인증된 판매자의 유효한 요청은 상품 생성 응답을 반환한다."
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "review-1",
+      "title": "G1-Issue138-Review1",
+      "card_type": "review",
+      "assignee": "reviewer",
+      "skills": [],
+      "workspace": "scratch",
+      "status": "archived",
+      "priority": 1,
+      "parents": [
+        "impl-1"
+      ],
+      "body": {
+        "schema": "aggregate-review-card-v5",
+        "triage_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "baseline_sha": "0000000000000000000000000000000000000000",
+        "behavior_ids": [
+          "behavior-product-create"
+        ],
+        "implementation_card_keys": [
+          "impl-1"
+        ],
+        "acceptance": [
+          {
+            "id": "REVIEW-AC-001",
+            "criterion": "상품 등록의 구현 계약과 관찰 가능한 동작이 모두 충족된다.",
+            "behavior_ids": ["behavior-product-create"],
+            "implementation_card_keys": ["impl-1"],
+            "source_acceptance_ids": ["AC-PRODUCT-CREATE"],
+            "verification_ids": ["FV-PRODUCT-CREATE"]
+          }
+        ],
+        "review_checks": [
+          {
+            "id": "REVIEW-CHECK-001",
+            "focus": "implementation-convention",
+            "question": "계층별 책임이 backend development guide와 일치하는가?",
+            "expected_outcome": "HTTP, use case와 invariant 책임이 올바른 계층에 남는다.",
+            "behavior_ids": ["behavior-product-create"],
+            "implementation_card_keys": ["impl-1"],
+            "acceptance_ids": ["REVIEW-AC-001"],
+            "source_acceptance_ids": ["AC-PRODUCT-CREATE"],
+            "verification_ids": ["FV-PRODUCT-CREATE"],
+            "guide_locators": ["docs/backend-development-guide.md#Module과 계층"]
+          },
+          {
+            "id": "REVIEW-CHECK-002",
+            "focus": "test-quality",
+            "question": "Test가 public contract를 적절한 level에서 검증하는가?",
+            "expected_outcome": "성공과 rejection을 관찰 가능한 assertion으로 검증한다.",
+            "behavior_ids": ["behavior-product-create"],
+            "implementation_card_keys": ["impl-1"],
+            "acceptance_ids": ["REVIEW-AC-001"],
+            "source_acceptance_ids": ["AC-PRODUCT-CREATE"],
+            "verification_ids": ["FV-PRODUCT-CREATE"],
+            "guide_locators": ["docs/backend-test-guide.md#11. Test level 선택과 검증"]
+          }
+        ],
+        "scope_exclusions": []
+      }
+    },
+    {
+      "key": "summary",
+      "title": "G1-Issue138-Summary",
+      "card_type": "summary",
+      "assignee": "project-manager",
+      "skills": [],
+      "workspace": "scratch",
+      "status": "todo",
+      "priority": 0,
+      "parents": [
+        "review-1"
+      ],
+      "body": {
+        "schema": "issue-summary-card-v2",
+        "triage_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "execution_order": [
+    "impl-1",
+    "review-1"
+  ],
+  "ready_candidate": "impl-1",
+  "archived_card_keys": [
+    "triage"
+  ]
+}

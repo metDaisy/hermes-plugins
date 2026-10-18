@@ -1,0 +1,113 @@
+{
+  "schema": "kwc-pm-responsibility-coverage-v1",
+  "behavior_owner": "kanban-workflow-controller",
+  "source_asset_map": "pm-source-asset-map.json",
+  "comparison_baseline": {
+    "profile": "project-manager",
+    "preserved": true,
+    "runtime_dependency": false
+  },
+  "fresh_agent_invariants": {
+    "ignore_rules": true,
+    "load_soul": false,
+    "load_memory": false,
+    "required_common_skill": "hermes-langchain:kwc-orchestrator-contract"
+  },
+  "responsibilities": [
+    {
+      "id": "identity-and-safety",
+      "source": ["SOUL.md", "SCRIPT-USAGE.md", "TERMINOLOGY.md", "WORKFLOW-DESIGN.md"],
+      "kwc_owner": "kwc-orchestrator-contract",
+      "situations": ["all"]
+    },
+    {
+      "id": "triage-authoring",
+      "source": ["skills/create-triage"],
+      "kwc_owner": "kwc-create-triage",
+      "situations": ["triage-authoring"]
+    },
+    {
+      "id": "task-graph-and-review-authoring",
+      "source": ["skills/build-task-graph"],
+      "kwc_owner": "kwc-build-task-graph",
+      "situations": ["impl-authoring", "review-authoring"]
+    },
+    {
+      "id": "workflow-checkpoint-and-finalization",
+      "source": ["skills/run-workflow"],
+      "kwc_owner": "kwc-run-workflow",
+      "situations": ["implementation-checkpoint", "worker-needs-input", "route-review-findings", "summary-finalization"]
+    },
+    {
+      "id": "service-planning",
+      "source": ["skills/service-planning"],
+      "kwc_owner": "kwc-service-planning",
+      "situations": ["service-planning"]
+    },
+    {
+      "id": "document-and-tracker-sync",
+      "source": ["skills/sync-docs"],
+      "kwc_owner": "kwc-sync-docs",
+      "situations": ["sync-docs"]
+    },
+    {
+      "id": "current-state-lifecycle",
+      "source": ["skills/update-current-state"],
+      "kwc_owner": "kwc-update-current-state",
+      "situations": ["update-current-state"]
+    },
+    {
+      "id": "summary-regeneration",
+      "source": ["skills/regenerate-summary"],
+      "kwc_owner": "kwc-regenerate-summary",
+      "situations": ["summary-authoring", "regenerate-summary"]
+    }
+  ],
+  "capability_migration": {
+    "repository-and-helper-io": {
+      "toolsets": ["file", "terminal", "hermes-langchain"]
+    },
+    "service-research": {
+      "situations": ["service-planning"],
+      "toolsets": ["web", "browser"]
+    },
+    "repository-discovery": {
+      "mcp_servers": ["codebase-memory-mcp", "semble-mcp"]
+    },
+    "tracker-and-release": {
+      "mcp_servers": ["github-mcp"]
+    },
+    "project-verification": {
+      "situations": ["implementation-checkpoint", "summary-finalization"],
+      "mcp_servers": ["gradle-mcp"]
+    }
+  },
+  "intentionally_excluded_profile_state": {
+    "memory": "Fresh execution receives bounded manifest context instead of Profile memory.",
+    "session_search": "KWC artifacts and canonical external read-back replace Profile session history.",
+    "auto_loaded_skills": "Only the common contract and one situation Skill are injected.",
+    "clarify": "Autonomous runs persist a durable Decision or needs-input response instead of pausing for chat input.",
+    "todo": "Durable Kanban tasks and KWC assignments own progress state."
+  },
+  "operational_assets": [
+    "kwc-create-triage/scripts/triage.py",
+    "kwc-create-triage/tests/test_triage.py",
+    "kwc-build-task-graph/scripts/build_task_graph.py",
+    "kwc-build-task-graph/scripts/contract_common.py",
+    "kwc-build-task-graph/scripts/graph_contract.py",
+    "kwc-build-task-graph/scripts/review_fast_path.py",
+    "kwc-build-task-graph/tests/native_e2e.py",
+    "kwc-build-task-graph/tests/test_build_task_graph.py",
+    "kwc-build-task-graph/tests/fixtures/invalid-graph-topology.json",
+    "kwc-build-task-graph/tests/fixtures/invalid-missing-sections.json",
+    "kwc-build-task-graph/tests/fixtures/valid-new-delivery.json",
+    "kwc-build-task-graph/tests/fixtures/valid-graph-draft.json",
+    "kwc-run-workflow/scripts/checkpoint.py",
+    "kwc-run-workflow/scripts/activate_graph.py",
+    "kwc-run-workflow/scripts/transition_triage.py",
+    "kwc-run-workflow/scripts/workflow.py",
+    "kwc-run-workflow/tests/test_activate_graph.py",
+    "kwc-update-current-state/scripts/current_state.py",
+    "kwc-update-current-state/tests/test_current_state.py"
+  ]
+}

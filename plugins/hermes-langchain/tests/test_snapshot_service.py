@@ -1,0 +1,186 @@
+"""Tests for canonical Kanban to KWC workflow snapshot normalization."""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+from tests.support import load_module
+
+SNAPSHOTS = load_module("kanban.snapshot_service")
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class SnapshotServiceTests(unittest.TestCase):
+    def test_hermes_source_root_is_bootstrapped_from_hermes_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp)
+            package_dir = source_root / "hermes_cli"
+            package_dir.mkdir()
+            (package_dir / "__init__.py").write_text("", encoding="utf-8")
+            executable = source_root / ".venv" / "Scripts" / "hermes.exe"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            original_path = list(sys.path)
+            try:
+                discovered = SNAPSHOTS._bootstrap_hermes_source_root(str(executable))
+                self.assertEqual(source_root, discovered)
+                self.assertEqual(str(source_root), sys.path[0])
+            finally:
+                sys.path[:] = original_path
+
+    def test_hermes_source_root_is_added_before_loading_canonical_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp)
+            package_dir = source_root / "hermes_cli"
+            package_dir.mkdir()
+            package_file = package_dir / "__init__.py"
+            package_file.write_text("", encoding="utf-8")
+            module = SimpleNamespace(__file__=str(package_file))
+            original_path = list(sys.path)
+            try:
+                SNAPSHOTS._ensure_hermes_source_root(module)
+                self.assertEqual(str(source_root), sys.path[0])
+            finally:
+                sys.path[:] = original_path
+
+    def test_normalizes_body_graph_run_and_claim_source_status(self) -> None:
+        task = SimpleNamespace(
+            id="t_impl",
+            body=json.dumps({"schema": "backend-implementation-card-v5"}),
+            assignee="coder",
+            status="running",
+            skills=None,
+            block_kind=None,
+            current_run_id=7,
+            workspace_path="C:/workspace/issue151",
+        )
+        run = SimpleNamespace(
+            id=7,
+            profile="coder",
+            status="running",
+            outcome=None,
+            metadata=None,
+        )
+        claimed = SimpleNamespace(
+            run_id=7,
+            kind="claimed",
+            payload={"lock": "dispatcher:1", "run_id": 7},
+        )
+
+        snapshot = SNAPSHOTS.normalize_snapshot(
+            board="issue-151",
+            tasks=[task],
+            graph_contexts={
+                "t_impl": {
+                    "parents": [{"id": "t_triage", "status": "done"}],
+                    "children": [{"id": "t_review", "status": "todo"}],
+                }
+            },
+            runs_by_task={"t_impl": [run]},
+            events_by_task={"t_impl": [claimed]},
+        )
+
+        self.assertEqual("kwc-workflow-snapshot-v1", snapshot["schema"])
+        self.assertEqual("issue-151", snapshot["board"])
+        self.assertEqual(
+            {
+                "task_id": "t_impl",
+                "workspace_path": "C:/workspace/issue151",
+                "status": "running",
+                "assignee": "coder",
+                "body_schema": "backend-implementation-card-v5",
+                "parents": ["t_triage"],
+                "children": ["t_review"],
+                "skills": [],
+                "active_run_profile": "coder",
+                "active_run_source_status": "ready",
+                "latest_run_profile": "coder",
+                "latest_run_id": 7,
+                "latest_run_status": "running",
+                "latest_run_outcome": None,
+                "latest_run_metadata_schema": None,
+                "latest_run_result": None,
+                "block_kind": None,
+            },
+            snapshot["tasks"][0],
+        )
+
+    def test_claimed_source_status_preserves_explicit_review_origin(self) -> None:
+        claimed = SimpleNamespace(
+            run_id=8,
+            kind="claimed",
+            payload={"source_status": "review"},
+        )
+
+        self.assertEqual("review", SNAPSHOTS._claimed_source_status([claimed], 8))
+
+    def test_reads_snapshot_through_canonical_kanban_functions_and_closes_connection(self) -> None:
+        task = SimpleNamespace(
+            id="t_review",
+            body=json.dumps({"schema": "aggregate-review-card-v5"}),
+            assignee="reviewer",
+            status="ready",
+            skills=["run-review"],
+            block_kind=None,
+            current_run_id=None,
+        )
+        connection = _FakeConnection()
+        calls: list[tuple[str, object]] = []
+
+        class FakeKanbanDb:
+            @staticmethod
+            def list_tasks(conn):
+                calls.append(("list_tasks", conn))
+                return [task]
+
+            @staticmethod
+            def task_graph_contexts(conn, task_ids):
+                calls.append(("task_graph_contexts", tuple(task_ids)))
+                return {"t_review": {"parents": [], "children": []}}
+
+            @staticmethod
+            def list_runs(conn, task_id):
+                calls.append(("list_runs", task_id))
+                return []
+
+            @staticmethod
+            def list_events(conn, task_id):
+                calls.append(("list_events", task_id))
+                return []
+
+        snapshot = SNAPSHOTS.read_board_snapshot(
+            "issue-151",
+            kanban_db_module=FakeKanbanDb,
+            connect_fn=lambda *, board: connection,
+        )
+
+        self.assertEqual("issue-151", snapshot["board"])
+        self.assertEqual("aggregate-review-card-v5", snapshot["tasks"][0]["body_schema"])
+        self.assertTrue(connection.closed)
+        self.assertEqual(
+            [
+                ("list_tasks", connection),
+                ("task_graph_contexts", ("t_review",)),
+                ("list_runs", "t_review"),
+                ("list_events", "t_review"),
+            ],
+            calls,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
