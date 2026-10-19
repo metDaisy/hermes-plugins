@@ -597,6 +597,9 @@ def _advance_intake(
     module = domain.build_triage_module()
     triage_identity = domain.TriageIdentity(**identity)
     intake = module.compose_intake.execute(triage_identity, payload["intake"])
+    admission = domain.current_state_admission(inspection)
+    if admission is not None:
+        intake["baseline"]["current_state"]["freshness"] = admission
     errors = module.validator.validate_repository_locators(intake, workspace)
     errors.extend(module.validator.validate_current_state_inspection(intake, inspection))
     if errors:

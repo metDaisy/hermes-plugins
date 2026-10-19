@@ -78,23 +78,44 @@ def launch_assignment(
     if not board or not isinstance(generation, int) or generation < 1:
         raise ValueError("KWC_ASSIGNMENT_IDENTITY")
     board_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", board).strip("-")
-    session_name = f"kwc-triage-{board_slug}-g{generation}"
+    phase = str(assignment.get("phase") or "").strip()
+    session_name = f"kwc-{phase}-{board_slug}-g{generation}"
+    phase_guidance = ""
+    if phase == "review":
+        phase_guidance = (
+            "Review authoring requires the installed Skill's prepare-review-fast-path before writing. "
+            "Run it from $HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/"
+            "build_task_graph.py using assignment.sources and write its body output to the exact "
+            "assignment.artifact_file. Read review_body_template and guide_locators from the prepared "
+            "bundle, preserve every immutable/template field, and populate only acceptance, review_checks, "
+            "and scope_exclusions. The only review check focus values are: "
+            "behavior | implementation-convention | cross-card-seam | test-quality | preservation. "
+            "Use exact guide_locators from the bundle plus one non-empty .hermes/docs/plan.md#... active "
+            "handoff locator. Never add issue/card_type/generation/review_card_key or any other top-level "
+            "field. Finally pass the exact assignment.artifact_file to kwc_create_review.\n\n"
+        )
     prompt = (
         "KWC fresh-agent authoring assignment follows. Treat it as the complete current-stage contract. "
         "Use normal read/search/write tools for evidence and artifact authoring, but execute the exact "
         "assignment.next_action value and use only the current assignment's allowed_tools for KWC state mutation. "
-        "After each successful KWC tool call, "
-        "read next_assignment from the result and immediately continue when its phase is triage. "
         "At intake, read the named Issue directly, then only its governing requirement locators, "
         "docs/current-state.md, and Git HEAD. Write each stage artifact directly to the assignment's artifact_file "
         "and pass that exact repo-relative value to the KWC tool; do not choose another path or use Profile cache "
         "as an intermediate. "
         "Do not scan historical boards, .temp artifacts, or .hermes design notes. In later stages, inspect only "
         "the accepted stage projection and its exact target locators before expanding a search. "
-        "Do not wait for another user message between Triage stages. When next_assignment.phase가 triage가 아니면 "
-        "the frozen Triage has been materialized: stop without authoring Impl, Review, or Summary. "
         "KWC owns board identity, validation, native mutation, exact read-back, and transition. "
-        "Do not activate or dispatch cards.\n\n"
+        "Do not activate or dispatch cards. "
+        + phase_guidance
+        + (
+            "After each successful KWC tool call, read next_assignment from the result and immediately continue "
+            "when its phase is triage. Do not wait for another user message between Triage stages. When "
+            "next_assignment.phase가 triage가 아니면 the frozen Triage has been materialized: stop without authoring "
+            "Impl, Review, or Summary.\n\n"
+            if phase == "triage"
+            else "Author exactly this one non-Triage phase with the assigned situation Skill, execute next_action "
+            "once, verify the returned next_assignment, and then stop.\n\n"
+        )
         + json.dumps(assignment, ensure_ascii=False, sort_keys=True)
     )
     situation = fresh_agent_contract.situation_for_authoring(assignment.get("phase"))

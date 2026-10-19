@@ -189,6 +189,7 @@ class TriageV7ContractTest(unittest.TestCase):
                         "verification_ids": ["VERIFY-001"],
                     }
                 ],
+                "contract_change_ids": [],
                 "depends_on": [],
             }
         ]

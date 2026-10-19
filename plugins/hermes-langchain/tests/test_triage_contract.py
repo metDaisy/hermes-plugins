@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 import json
 import math
 import tempfile
@@ -158,6 +159,32 @@ class TriageV7ContractTest(unittest.TestCase):
         ):
             compose_intake(self.body, authoring)
 
+    def test_cross_module_capability_facts_require_a_dedicated_preserved_observable(self):
+        body = self.populate_intake()
+        requirement = body["intent"]["change_requirements"][0]
+        requirement["outcome"] = (
+            "Offer capability의 판매 가능 상태, 재고, 가격과 구매 제한을 공개 snapshot으로 사용한다."
+        )
+        requirement["source"]["claim"] = (
+            "Cross-module capability가 판매 가능 상태, 재고, 가격과 구매 제한 fact를 제공해야 한다."
+        )
+        body["intent"]["preserved_observables"][0]["behavior"] = (
+            "Offer 미존재 오류의 producer ownership을 유지한다."
+        )
+
+        self.assertIn(
+            "MISSING_CROSS_MODULE_FACT_OBSERVABLE:CHANGE-001",
+            validate(body, "triage"),
+        )
+
+        body["intent"]["preserved_observables"][0]["behavior"] = (
+            "정상 조회 snapshot의 가격, 판매 가능 상태, 재고와 구매 제한 fact를 유지한다."
+        )
+        self.assertNotIn(
+            "MISSING_CROSS_MODULE_FACT_OBSERVABLE:CHANGE-001",
+            validate(body, "triage"),
+        )
+
     def populate_analysis(self):
         body = self.populate_intake()
         body["phase"] = "analysis"
@@ -167,8 +194,18 @@ class TriageV7ContractTest(unittest.TestCase):
                 "subject": "CartService aggregate 우회",
                 "current_state": "CartService가 CartItem을 직접 변경한다.",
                 "required_state": "CartService는 Cart aggregate의 이름 있는 behavior를 호출한다.",
-                "evidence": [self.evidence()],
-                "rules": [self.source("docs/backend-development-guide.md#Application-구현-규칙", "Application calls aggregate behavior.")],
+                "evidence": [
+                    self.evidence(
+                        "src/main/java/example/CartService.java#changeQuantity",
+                        "CartService가 CartItem 수량을 직접 변경한다.",
+                    )
+                ],
+                "rules": [
+                    self.source(
+                        "docs/backend-development-guide.md#Application-구현-규칙",
+                        "Application은 aggregate의 이름 있는 behavior를 호출한다.",
+                    )
+                ],
                 "requirement_ids": ["CHANGE-001"],
                 "affected_observable_ids": ["OBS-001"],
             }
@@ -309,6 +346,25 @@ class TriageV7ContractTest(unittest.TestCase):
             composed["investigation_targets"][0]["question"],
         )
 
+    def test_compose_analysis_rejects_change_requirement_outcome_replacement(self):
+        intake = self.populate_intake()
+        authoring = self.analysis_authoring()
+        authoring["intake_amendments"]["intent_entries"] = [
+            {
+                "section": "change_requirements",
+                "id": "CHANGE-001",
+                "changes": {
+                    "outcome": "Application service의 일부 입력 처리만 정리한다."
+                },
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "UNEXPECTED_ANALYSIS_INTENT_AMENDMENT:0_CHANGE:outcome",
+        ):
+            compose_analysis(intake, authoring)
+
     def test_compose_analysis_rejects_inherited_or_handoff_fields(self):
         authoring = self.analysis_authoring()
         authoring["intent"] = self.populate_intake()["intent"]
@@ -319,6 +375,42 @@ class TriageV7ContractTest(unittest.TestCase):
             "UNEXPECTED_ANALYSIS_AUTHORING_FIELD:handoff.*UNEXPECTED_ANALYSIS_AUTHORING_FIELD:intent",
         ):
             compose_analysis(self.populate_intake(), authoring)
+
+    def test_bundled_skill_validator_matches_core_schema(self):
+        frozen = freeze(self.populate_analysis())
+        script = _ROOT / "skills" / "kwc-create-triage" / "scripts" / "triage.py"
+        spec = importlib.util.spec_from_file_location("bundled_triage_validator", script)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertEqual(validate(frozen, "triage"), module.validate(frozen, "triage"))
+
+    def test_bundled_skill_validator_matches_core_committed_baseline_admission(self):
+        body = self.populate_intake()
+        inspection = {
+            "schema": "current-state-inspection-v1",
+            "freshness": "insufficient",
+            "inspection_sha": "a" * 40,
+            "snapshot_sha": "b" * 40,
+            "worktree_clean": False,
+            "snapshot_is_ancestor": True,
+            "dirty_paths": [".hermes/profiles/project-manager/SOUL.md"],
+            "covered_changed_paths": [],
+            "errors": ["WORKTREE_DIRTY"],
+        }
+        script = _ROOT / "skills" / "kwc-create-triage" / "scripts" / "triage.py"
+        spec = importlib.util.spec_from_file_location("bundled_triage_inspection", script)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertEqual(
+            validate_current_state_inspection(body, inspection),
+            module.validate_current_state_inspection(body, inspection),
+        )
 
     def inspection(self):
         return {
@@ -379,6 +471,15 @@ class TriageV7ContractTest(unittest.TestCase):
         self.assertIn("UNSLICED_CONFIRMED_GAP:GAP-001", errors)
         self.assertIn("MISSING_IMPLEMENTATION_SLICE:0_ACCEPTANCE:0_VERIFICATION_IDS", errors)
 
+    def test_slice_dependencies_are_deferred_to_task_graph(self):
+        body = self.populate_analysis()
+        body["implementation_slices"][0]["depends_on"] = ["OTHER-SLICE"]
+
+        self.assertIn(
+            "TRIAGE_DEPENDENCIES_DEFERRED_TO_GRAPH:SLICE-001",
+            validate(body, "triage"),
+        )
+
     def test_slice_rejects_descriptions_that_cannot_materialize_a_korean_impl_card(self):
         body = self.populate_analysis()
         body["implementation_slices"][0]["title"] = "Offer public error bridge"
@@ -386,6 +487,26 @@ class TriageV7ContractTest(unittest.TestCase):
         self.assertIn(
             "DESCRIPTION_NOT_KOREAN:IMPLEMENTATION_SLICE:0:title",
             validate(body, "triage"),
+        )
+
+    def test_gap_rejects_source_claims_that_cannot_materialize_a_korean_impl_context(self):
+        body = self.populate_analysis()
+        body["confirmed_gaps"][0]["evidence"][0]["claim"] = (
+            "CartService directly changes CartItem quantity."
+        )
+        body["confirmed_gaps"][0]["rules"][0]["claim"] = (
+            "Application calls aggregate behavior."
+        )
+
+        errors = validate(body, "triage")
+
+        self.assertIn(
+            "DESCRIPTION_NOT_KOREAN:CONFIRMED_GAP:0_EVIDENCE:0:claim",
+            errors,
+        )
+        self.assertIn(
+            "DESCRIPTION_NOT_KOREAN:CONFIRMED_GAP:0_RULES:0:claim",
+            errors,
         )
 
     def test_gap_requires_repository_backed_constraint_for_impl_context(self):
@@ -424,6 +545,13 @@ class TriageV7ContractTest(unittest.TestCase):
         body = self.populate_analysis()
         body["implementation_slices"][0]["outcome"] = "Cart 구조를 검토한다."
         self.assertIn("NON_OBSERVABLE_IMPLEMENTATION_SLICE_OUTCOME:SLICE-001", validate(body, "triage"))
+
+    def test_slice_accepts_substantive_outcome_ending_with_process_verb(self):
+        body = self.populate_analysis()
+        body["implementation_slices"][0]["outcome"] = (
+            "CartController가 기존 URI와 400/404 응답 의미를 보존하면서 typed binding과 DTO mapping 책임을 분리해 정리한다."
+        )
+        self.assertNotIn("NON_OBSERVABLE_IMPLEMENTATION_SLICE_OUTCOME:SLICE-001", validate(body, "triage"))
 
     def test_frozen_body_rejects_ephemeral_coordinator_scope(self):
         body = self.populate_analysis()
@@ -468,6 +596,23 @@ class TriageV7ContractTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "UNRESOLVED_IMPLEMENTATION_ALTERNATIVE"):
             freeze(body, self.inspection())
+
+    def test_intake_rejects_unresolved_implementation_alternative_early(self):
+        body = self.populate_intake()
+        body["intent"]["change_requirements"][0]["outcome"] = (
+            "producer 공개 error를 사용하거나 consumer 결과로 변환한다."
+        )
+
+        errors = validate(body, "triage")
+        self.assertIn("UNRESOLVED_IMPLEMENTATION_ALTERNATIVE", errors)
+        with self.assertRaisesRegex(ValueError, "UNRESOLVED_IMPLEMENTATION_ALTERNATIVE"):
+            compose_intake(
+                self.body,
+                {
+                    "intent": body["intent"],
+                    "investigation_targets": body["investigation_targets"],
+                },
+            )
 
     def test_analysis_allows_conjunctions_in_a_resolved_contract(self):
         body = self.populate_analysis()
@@ -516,6 +661,28 @@ class TriageV7ContractTest(unittest.TestCase):
 
         self.assertIn(
             "DUPLICATE_VERIFICATION_OBSERVABLE:OBS-001",
+            validate(body, "triage"),
+        )
+
+    def test_verification_rejects_duplicate_evidence_locator(self):
+        body = self.populate_analysis()
+        duplicate = copy.deepcopy(body["verification_matrix"][0]["evidence"][0])
+        duplicate["claim"] = "같은 locator에 다른 동작을 잘못 귀속한다."
+        body["verification_matrix"][0]["evidence"].append(duplicate)
+
+        self.assertIn(
+            "DUPLICATE_VERIFICATION_EVIDENCE_LOCATOR:VERIFY-001:src/test/java/example/CartTest.java#quantityZeroDeletes",
+            validate(body, "triage"),
+        )
+
+    def test_confirmed_gap_rejects_duplicate_evidence_locator(self):
+        body = self.populate_analysis()
+        duplicate = copy.deepcopy(body["confirmed_gaps"][0]["evidence"][0])
+        duplicate["claim"] = "같은 gap locator에 다른 동작을 잘못 귀속한다."
+        body["confirmed_gaps"][0]["evidence"].append(duplicate)
+
+        self.assertIn(
+            "DUPLICATE_CONFIRMED_GAP:0_EVIDENCE_LOCATOR:src/main/java/example/CartService.java#changeQuantity",
             validate(body, "triage"),
         )
 
@@ -642,6 +809,8 @@ class TriageV7ContractTest(unittest.TestCase):
         )
 
     def test_current_state_inspection_allows_only_hermes_dirty_paths_for_committed_baseline(self):
+        body = self.populate_analysis()
+        body["baseline"]["current_state"]["freshness"] = "committed-baseline-safe"
         inspection = self.inspection()
         inspection.update(
             {
@@ -657,6 +826,23 @@ class TriageV7ContractTest(unittest.TestCase):
         )
         self.assertEqual(
             [],
+            validate_current_state_inspection(body, inspection),
+        )
+
+    def test_current_state_inspection_rejects_false_fresh_label_for_committed_baseline(self):
+        inspection = self.inspection()
+        inspection.update(
+            {
+                "freshness": "insufficient",
+                "worktree_clean": False,
+                "dirty_paths": ["hermes/profiles/project-manager/SOUL.md"],
+                "covered_changed_paths": [],
+                "errors": ["WORKTREE_DIRTY"],
+            }
+        )
+
+        self.assertIn(
+            "CURRENT_STATE_ADMISSION_MISMATCH",
             validate_current_state_inspection(self.populate_analysis(), inspection),
         )
 

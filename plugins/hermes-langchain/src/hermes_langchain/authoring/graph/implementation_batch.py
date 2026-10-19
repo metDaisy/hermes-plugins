@@ -20,6 +20,12 @@ from .implementation_card_v5 import (
     template,
 )
 
+UNRESOLVED_ENTRY_POINT_SYMBOLS = {"", "?", "unknown", "unresolved", "todo", "tbd"}
+
+
+def _unresolved_entry_point_symbol(value: Any) -> bool:
+    return not isinstance(value, str) or value.strip().lower() in UNRESOLVED_ENTRY_POINT_SYMBOLS
+
 def _split_locator(locator: str) -> tuple[str, str]:
     path, separator, heading = locator.partition("#")
     return path, heading if separator else "unknown"
@@ -57,13 +63,7 @@ def impl_batch_template(
         for change in contract_changes
         if isinstance(change, dict) and isinstance(change.get("id"), str)
     }
-    slice_ordinal_by_id = {
-        source_slice.get("id"): ordinal
-        for ordinal, source_slice in enumerate(slices, start=1)
-        if isinstance(source_slice, dict) and isinstance(source_slice.get("id"), str)
-    }
     cards: list[dict[str, Any]] = []
-    dependency_edges: list[dict[str, int]] = []
     card_count = len(slices)
     for index, source_slice in enumerate(slices, start=1):
         if not isinstance(source_slice, dict):
@@ -181,15 +181,11 @@ def impl_batch_template(
             "title": f"G{generation}-Issue{issue.get('number')}-Impl{index}",
             "priority": card_count - index + 1,
             "body": body,
+            "required_verification_ids": verification_ids,
         }
-        depends_on_ordinals: list[int] = []
-        for dependency_id in source_slice.get("depends_on", []):
-            dependency_ordinal = slice_ordinal_by_id.get(dependency_id)
-            if not isinstance(dependency_ordinal, int) or dependency_ordinal >= index:
-                raise ValueError(f"INVALID_TRIAGE_SLICE_DEPENDENCY:{index}:{dependency_id}")
-            depends_on_ordinals.append(dependency_ordinal)
-            dependency_edges.append({"from_ordinal": dependency_ordinal, "to_ordinal": index})
-        wrapper["depends_on_ordinals"] = depends_on_ordinals
+        if source_slice.get("depends_on", []):
+            raise ValueError(f"TRIAGE_SLICE_DEPENDENCIES_NOT_DEFERRED:{index}")
+        wrapper["depends_on_ordinals"] = []
         declared_contract_change_ids = source_slice.get("contract_change_ids", [])
         if not isinstance(declared_contract_change_ids, list):
             raise ValueError(f"INVALID_TRIAGE_SLICE_CONTRACT_CHANGES:{index}")
@@ -217,7 +213,7 @@ def impl_batch_template(
         "issue": issue.get("number"),
         "generation": generation,
         "cards": cards,
-        "dependency_audit": {"edges": dependency_edges},
+        "dependency_audit": {"edges": []},
     }
 
 
@@ -300,6 +296,9 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
         raise ValueError("INVALID_IMPL_BATCH")
     if not isinstance(authored_cards, list) or len(authored_cards) != len(cards):
         raise ValueError("IMPL_COMPLETION_CARD_COUNT_MISMATCH")
+    unexpected_completion_fields = sorted(set(completions) - {"cards", "dependency_audit"})
+    if unexpected_completion_fields:
+        raise ValueError(f"UNEXPECTED_IMPL_COMPLETIONS_FIELD:{unexpected_completion_fields[0]}")
 
     merged = json.loads(json.dumps(batch, ensure_ascii=False))
     authored_by_ordinal: dict[int, dict[str, Any]] = {}
@@ -321,6 +320,7 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
             "implementation_contract",
             "entry_points",
             "verification",
+            "depends_on_ordinals",
         }
         unexpected = sorted(set(authored) - allowed_fields)
         if unexpected:
@@ -354,12 +354,21 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
             if expected_key in seen_expected:
                 continue
             seen_expected.add(expected_key)
-            matching_index = next((
-                index
-                for index, entry_point in enumerate(remaining_authored)
-                if entry_point.get("path") == expected.get("path")
-                and entry_point.get("symbol") == expected_symbol
-            ), None)
+            matching_index = next(
+                (
+                    index
+                    for index, entry_point in enumerate(remaining_authored)
+                    if entry_point.get("path") == expected.get("path")
+                    and (
+                        (
+                            _unresolved_entry_point_symbol(expected_symbol)
+                            and not _unresolved_entry_point_symbol(entry_point.get("symbol"))
+                        )
+                        or entry_point.get("symbol") == expected_symbol
+                    )
+                ),
+                None,
+            )
             if matching_index is None:
                 entry_points.append(expected)
             else:
@@ -374,6 +383,24 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
             seen_entry_points.add(entry_point_key)
             deduplicated_entry_points.append(entry_point)
         body["context"]["entry_points"] = deduplicated_entry_points
+        unresolved = next(
+            (
+                entry_point
+                for entry_point in deduplicated_entry_points
+                if _unresolved_entry_point_symbol(entry_point.get("symbol"))
+            ),
+            None,
+        )
+        if unresolved is not None:
+            raise ValueError(
+                f"UNRESOLVED_IMPL_ENTRY_POINT_SYMBOL:{ordinal}:{unresolved.get('path')}"
+            )
+        authored_dependencies = authored.get(
+            "depends_on_ordinals", card.get("depends_on_ordinals", [])
+        )
+        if not isinstance(authored_dependencies, list):
+            raise ValueError(f"INVALID_IMPL_COMPLETION_DEPENDENCIES:{ordinal}")
+        card["depends_on_ordinals"] = copy.deepcopy(authored_dependencies)
 
         authored_verification = authored.get("verification")
         expected_verification = body.get("verification")
@@ -397,6 +424,8 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
                 )
             for field in ("test_level", "tests", "scenarios"):
                 verification[field] = authored_item.get(field)
+    if "dependency_audit" in completions:
+        merged["dependency_audit"] = copy.deepcopy(completions["dependency_audit"])
     return merged
 
 
@@ -440,6 +469,7 @@ def validate_impl_batch(batch: Any) -> list[str]:
                 "body",
                 "contract_changes",
                 "required_contract_symbols",
+                "required_verification_ids",
                 "parent_ids",
                 "depends_on_ordinals",
             },
@@ -495,6 +525,40 @@ def validate_impl_batch(batch: Any) -> list[str]:
         body_schema = _implementation_schema(body)
         for error in _validate_implementation_body(body):
             errors.append(f"IMPL_BODY_INVALID:{index}:{error}")
+        required_verification_ids = wrapper.get("required_verification_ids")
+        if required_verification_ids is not None:
+            if not isinstance(required_verification_ids, list) or not all(
+                isinstance(verification_id, str) and verification_id
+                for verification_id in required_verification_ids
+            ):
+                errors.append(f"INVALID_REQUIRED_VERIFICATION_IDS:{index}")
+            else:
+                actual_verification_ids = [
+                    item.get("id")
+                    for item in (
+                        body.get("verification", []) if isinstance(body, dict) else []
+                    )
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ]
+                missing = sorted(set(required_verification_ids) - set(actual_verification_ids))
+                unexpected = sorted(set(actual_verification_ids) - set(required_verification_ids))
+                duplicates = sorted(
+                    verification_id
+                    for verification_id in set(actual_verification_ids)
+                    if actual_verification_ids.count(verification_id) > 1
+                )
+                if (
+                    missing
+                    or unexpected
+                    or duplicates
+                    or len(actual_verification_ids) != len(required_verification_ids)
+                ):
+                    errors.append(
+                        f"IMPL_REQUIRED_VERIFICATION_IDS_MISMATCH:{index}:"
+                        f"missing={','.join(missing) or '-'}:"
+                        f"unexpected={','.join(unexpected) or '-'}:"
+                        f"duplicates={','.join(duplicates) or '-'}"
+                    )
         implementation_contract = (
             body.get("implementation_contract") if isinstance(body, dict) else None
         )
@@ -523,6 +587,9 @@ def validate_impl_batch(batch: Any) -> list[str]:
             )
             if isinstance(entry, dict) and isinstance(entry.get("symbol"), str)
         ]
+        for entry_index, entry_symbol in enumerate(entry_symbols):
+            if _unresolved_entry_point_symbol(entry_symbol):
+                errors.append(f"UNRESOLVED_IMPL_ENTRY_POINT_SYMBOL:{index}:{entry_index}")
         contract_changes = wrapper.get("contract_changes")
         if not isinstance(contract_changes, list) or not all(
             isinstance(change, dict) for change in contract_changes
@@ -600,15 +667,63 @@ def validate_impl_batch(batch: Any) -> list[str]:
     if not isinstance(dependency_audit, dict):
         errors.append("MISSING_IMPL_DEPENDENCY_AUDIT")
     else:
-        expected_edges = [
-            {"from_ordinal": dependency, "to_ordinal": wrapper.get("ordinal")}
+        expected_pairs = [
+            (dependency, wrapper.get("ordinal"))
             for wrapper in cards
             if isinstance(wrapper, dict)
             for dependency in wrapper.get("depends_on_ordinals", [])
             if isinstance(dependency, int)
         ]
-        if dependency_audit.get("edges") != expected_edges:
+        audit_edges = dependency_audit.get("edges")
+        if not isinstance(audit_edges, list):
             errors.append("IMPL_DEPENDENCY_AUDIT_MISMATCH")
+        else:
+            audit_pairs: list[tuple[Any, Any]] = []
+            proof_fields = {
+                "from_ordinal",
+                "to_ordinal",
+                "required_artifact",
+                "consumer_entry_point",
+                "why_baseline_cannot_satisfy",
+            }
+            for edge in audit_edges:
+                if not isinstance(edge, dict):
+                    errors.append("IMPL_DEPENDENCY_AUDIT_EDGE_NOT_OBJECT")
+                    continue
+                pair = (edge.get("from_ordinal"), edge.get("to_ordinal"))
+                audit_pairs.append(pair)
+                if set(edge) != proof_fields or not all(
+                    isinstance(edge.get(field), str) and edge[field].strip()
+                    for field in (
+                        "required_artifact",
+                        "consumer_entry_point",
+                        "why_baseline_cannot_satisfy",
+                    )
+                ):
+                    errors.append(f"IMPL_DEPENDENCY_PROOF_INCOMPLETE:{pair[0]}:{pair[1]}")
+                    continue
+                parent_ordinal, child_ordinal = pair
+                if not (
+                    isinstance(parent_ordinal, int)
+                    and isinstance(child_ordinal, int)
+                    and 1 <= parent_ordinal < child_ordinal <= len(cards)
+                ):
+                    errors.append(f"INVALID_IMPL_DEPENDENCY_AUDIT_EDGE:{parent_ordinal}:{child_ordinal}")
+                    continue
+                parent_text = _implementation_text(cards[parent_ordinal - 1].get("body"))
+                child_text = _implementation_text(cards[child_ordinal - 1].get("body"))
+                artifact = edge["required_artifact"]
+                consumer = edge["consumer_entry_point"]
+                if artifact not in parent_text or artifact not in child_text:
+                    errors.append(
+                        f"IMPL_DEPENDENCY_ARTIFACT_UNPROVEN:{parent_ordinal}:{child_ordinal}"
+                    )
+                if consumer not in child_text:
+                    errors.append(
+                        f"IMPL_DEPENDENCY_CONSUMER_UNPROVEN:{parent_ordinal}:{child_ordinal}"
+                    )
+            if audit_pairs != expected_pairs:
+                errors.append("IMPL_DEPENDENCY_AUDIT_MISMATCH")
     return errors
 
 

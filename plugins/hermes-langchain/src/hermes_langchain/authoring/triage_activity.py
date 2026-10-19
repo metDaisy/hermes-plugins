@@ -320,6 +320,21 @@ def execute_triage_authoring(
 
     module = domain.build_triage_module()
     intake = module.compose_intake.execute(identity, intake_authoring)
+    admission_fn = getattr(
+        module,
+        "current_state_admission",
+        getattr(domain, "current_state_admission", lambda _inspection: None),
+    )
+    admission = admission_fn(inspection)
+    if admission is not None:
+        baseline = intake.get("baseline")
+        current_state = baseline.get("current_state") if isinstance(baseline, dict) else None
+        if isinstance(current_state, dict):
+            current_state["freshness"] = admission
+    errors = module.validator.validate(intake, "triage")
+    errors.extend(module.validator.validate_current_state_inspection(intake, inspection))
+    if errors:
+        raise ValueError(errors[0])
     errors = module.validator.validate_repository_locators(intake, workspace)
     if errors:
         raise ValueError(errors[0])

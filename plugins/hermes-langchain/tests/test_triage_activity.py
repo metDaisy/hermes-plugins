@@ -55,7 +55,17 @@ class FakeDomain:
         class Contract:
             def template(self, identity):
                 identity_seen.append(identity)
-                return {"phase": "intake", "issue": {"number": identity.issue_number}}
+                return {
+                    "phase": "intake",
+                    "issue": {"number": identity.issue_number},
+                    "baseline": {
+                        "planning_sha": identity.planning_sha,
+                        "current_state": {
+                            "snapshot_sha": identity.current_state_sha,
+                            "freshness": "fresh",
+                        },
+                    },
+                }
 
         class Composer:
             def __init__(self, phase):
@@ -80,6 +90,9 @@ class FakeDomain:
             def validate_current_state_inspection(self, body, inspection):
                 return []
 
+        def current_state_admission(inspection):
+            return "committed-baseline-safe" if inspection.get("freshness") == "insufficient" else "fresh"
+
         class Freezer:
             def execute(self, body, inspection):
                 return {**body, "phase": "frozen", "frozen_digest": "digest"}
@@ -90,6 +103,7 @@ class FakeDomain:
             compose_analysis=Composer("analysis"),
             validator=Validator(),
             freezer=Freezer(),
+            current_state_admission=current_state_admission,
         )
 
     class TriageIdentity:
@@ -183,7 +197,18 @@ class TriageActivityTests(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
-            inspection_file.write_text(json.dumps({"freshness": "fresh"}), encoding="utf-8")
+            inspection_file.write_text(
+                json.dumps(
+                    {
+                        "freshness": "insufficient",
+                        "worktree_clean": False,
+                        "dirty_paths": [".hermes/profile.yaml"],
+                        "covered_changed_paths": [],
+                        "errors": ["WORKTREE_DIRTY"],
+                    }
+                ),
+                encoding="utf-8",
+            )
             port = FakeKanbanPort()
 
             report = ACTIVITY.execute_triage_authoring(
@@ -209,6 +234,10 @@ class TriageActivityTests(unittest.TestCase):
             self.assertEqual("G2-Issue151-Triage", port.created[0][1]["title"])
             frozen = json.loads((workspace / report["frozen_body_file"]).read_text(encoding="utf-8"))
             self.assertEqual("frozen", frozen["phase"])
+            self.assertEqual(
+                "committed-baseline-safe",
+                frozen["baseline"]["current_state"]["freshness"],
+            )
             self.assertEqual(1, len(port.created))
             self.assertEqual(report, json.loads(output_file.read_text(encoding="utf-8")))
 

@@ -260,6 +260,111 @@ def create_impl_batch_native(
         }
         if digests != {body.get("frozen_digest")}:
             raise ValueError("SOURCE_TRIAGE_DIGEST_MISMATCH")
+        source_slice_ids = [
+            item.get("id")
+            for item in body.get("implementation_slices", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        batch_slice_ids = [
+            wrapper.get("body", {}).get("slice", {}).get("id")
+            for wrapper in batch["cards"]
+            if isinstance(wrapper.get("body"), dict)
+        ]
+        source_slice_set = set(source_slice_ids)
+        batch_slice_set = set(batch_slice_ids)
+        missing = sorted(source_slice_set - batch_slice_set)
+        unexpected = sorted(batch_slice_set - source_slice_set)
+        duplicates = sorted(
+            slice_id for slice_id in batch_slice_set if batch_slice_ids.count(slice_id) > 1
+        )
+        if (
+            missing
+            or unexpected
+            or duplicates
+            or len(batch_slice_ids) != len(source_slice_ids)
+        ):
+            raise ValueError(
+                "IMPL_SLICE_CLOSURE_MISMATCH:"
+                f"missing={','.join(missing) or '-'}:"
+                f"unexpected={','.join(unexpected) or '-'}:"
+                f"duplicates={','.join(duplicates) or '-'}"
+            )
+        source_slices = {
+            item["id"]: item
+            for item in body.get("implementation_slices", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        for wrapper in batch["cards"]:
+            impl_body = wrapper.get("body", {})
+            slice_id = impl_body.get("slice", {}).get("id")
+            source_slice = source_slices.get(slice_id, {})
+            source_acceptance = source_slice.get("acceptance", [])
+            expected_acceptance_ids = [
+                item.get("id")
+                for item in source_acceptance
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            actual_acceptance_ids = [
+                item.get("id")
+                for item in impl_body.get("acceptance", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            acceptance_missing = sorted(set(expected_acceptance_ids) - set(actual_acceptance_ids))
+            acceptance_unexpected = sorted(set(actual_acceptance_ids) - set(expected_acceptance_ids))
+            acceptance_duplicates = sorted(
+                item_id
+                for item_id in set(actual_acceptance_ids)
+                if actual_acceptance_ids.count(item_id) > 1
+            )
+            if (
+                acceptance_missing
+                or acceptance_unexpected
+                or acceptance_duplicates
+                or len(actual_acceptance_ids) != len(expected_acceptance_ids)
+            ):
+                raise ValueError(
+                    f"IMPL_ACCEPTANCE_CLOSURE_MISMATCH:{slice_id}:"
+                    f"missing={','.join(acceptance_missing) or '-'}:"
+                    f"unexpected={','.join(acceptance_unexpected) or '-'}:"
+                    f"duplicates={','.join(acceptance_duplicates) or '-'}"
+                )
+            expected_verification_ids = sorted(
+                {
+                    verification_id
+                    for acceptance in source_acceptance
+                    if isinstance(acceptance, dict)
+                    for verification_id in acceptance.get("verification_ids", [])
+                    if isinstance(verification_id, str)
+                }
+            )
+            actual_verification_ids = [
+                item.get("id")
+                for item in impl_body.get("verification", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            verification_missing = sorted(
+                set(expected_verification_ids) - set(actual_verification_ids)
+            )
+            verification_unexpected = sorted(
+                set(actual_verification_ids) - set(expected_verification_ids)
+            )
+            verification_duplicates = sorted(
+                item_id
+                for item_id in set(actual_verification_ids)
+                if actual_verification_ids.count(item_id) > 1
+            )
+            if (
+                verification_missing
+                or verification_unexpected
+                or verification_duplicates
+                or len(actual_verification_ids) != len(expected_verification_ids)
+            ):
+                raise ValueError(
+                    f"IMPL_VERIFICATION_CLOSURE_MISMATCH:{slice_id}:"
+                    f"missing={','.join(verification_missing) or '-'}:"
+                    f"unexpected={','.join(verification_unexpected) or '-'}:"
+                    f"duplicates={','.join(verification_duplicates) or '-'}"
+                )
         return task, body
 
     triage_envelope = run_json([*base, "show", triage_id, "--json"])

@@ -22,9 +22,9 @@ TARGET_DISPOSITIONS = {"gap", "preserve", "compliant", "out-of-scope"}
 DOCUMENT_DISPOSITIONS = {"update", "no-change", "not-applicable", "blocked"}
 DECISION_STATUSES = {"pending", "approved", "rejected", "deferred"}
 INTENT_AMENDMENT_FIELDS = {
-    "change_requirements": {"outcome", "source"},
-    "preserved_observables": {"behavior", "source"},
-    "quality_gates": {"outcome", "source"},
+    "change_requirements": {"source"},
+    "preserved_observables": {"source"},
+    "quality_gates": {"source"},
     "finalization_requirements": {"outcome", "source"},
 }
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -48,6 +48,14 @@ UNRESOLVED_ALTERNATIVE_MARKERS = (
     "use either",
     "choose either",
 )
+CROSS_MODULE_CAPABILITY_MARKERS = ("capability", "snapshot", "projection", " fact")
+CROSS_MODULE_FACT_GROUPS = {
+    "price": ("가격", "price"),
+    "status": ("판매 가능", "판매 상태", "availability", "available", "status"),
+    "stock": ("재고", "stock"),
+    "purchase-limit": ("구매 한도", "구매 제한", "purchase limit", "max purchase"),
+}
+ERROR_OWNERSHIP_MARKERS = ("오류 소유", "error ownership", "error origin", "오류의 producer")
 
 TOP_LEVEL_FIELDS = {
     "schema",
@@ -207,14 +215,28 @@ def _validate_source(value: Any, errors: list[str], prefix: str) -> None:
     _error(errors, _non_empty_string(value.get("claim")), f"MISSING_{prefix}_CLAIM")
 
 
-def _validate_sources(value: Any, errors: list[str], prefix: str, *, nonempty: bool = True) -> None:
+def _validate_sources(
+    value: Any,
+    errors: list[str],
+    prefix: str,
+    *,
+    nonempty: bool = True,
+    unique_locators: bool = False,
+) -> None:
     _error(errors, isinstance(value, list), f"INVALID_{prefix}")
     if not isinstance(value, list):
         return
     if nonempty:
         _error(errors, bool(value), f"MISSING_{prefix}")
+    locators: set[str] = set()
     for index, item in enumerate(value):
         _validate_source(item, errors, f"{prefix}:{index}")
+        if unique_locators and isinstance(item, dict):
+            locator = item.get("locator")
+            if _non_empty_string(locator):
+                if locator in locators:
+                    errors.append(f"DUPLICATE_{prefix}_LOCATOR:{locator}")
+                locators.add(locator)
 
 
 def _is_test_evidence(value: Any) -> bool:
@@ -242,10 +264,19 @@ def _is_process_only_outcome(value: Any) -> bool:
     if not _non_empty_string(value):
         return False
     normalized = value.strip().casefold().rstrip(".!?")
-    english_first_word = normalized.split(maxsplit=1)[0]
+    words = normalized.split()
+    english_first_word = words[0]
     if english_first_word in {"prepare", "review", "organize", "investigate", "analyze", "check"}:
         return True
-    return normalized.endswith(("준비한다", "검토한다", "정리한다", "조사한다", "분석한다", "확인한다"))
+    if not normalized.endswith(("준비한다", "검토한다", "정리한다", "조사한다", "분석한다", "확인한다")):
+        return False
+    substantive_markers = (
+        "api", "http", "dto", "response", "status", "binding", "mapping", "error", "code", "contract",
+        "invariant", "transaction", "persistence", "lock", "ownership", "cookie", "item", "quantity",
+        "offer", "module", "port", "adapter", "aggregate", "service", "uri", "예외", "오류", "응답",
+        "상태", "경계", "불변", "트랜잭션", "저장", "쿠키", "수량", "재고", "가격", "구매",
+    )
+    return len(words) <= 5 and not any(marker in normalized for marker in substantive_markers)
 
 
 def _validate_requirement_entries(
@@ -521,9 +552,50 @@ def _validate_identity(body: dict[str, Any], errors: list[str]) -> None:
     current = baseline.get("current_state")
     if _exact_fields(current, {"snapshot_sha", "freshness", "usage", "locators"}, errors, "CURRENT_STATE"):
         _error(errors, isinstance(current.get("snapshot_sha"), str) and SHA.fullmatch(current["snapshot_sha"]) is not None, "INVALID_CURRENT_STATE_SHA")
-        _error(errors, current.get("freshness") == "fresh", "CURRENT_STATE_NOT_FRESH")
+        _error(
+            errors,
+            current.get("freshness") in {"fresh", "committed-baseline-safe"},
+            "CURRENT_STATE_NOT_FRESH",
+        )
         _error(errors, current.get("usage") == "read-only", "CURRENT_STATE_NOT_READ_ONLY")
         _error(errors, _string_list(current.get("locators"), nonempty=True), "MISSING_CURRENT_STATE_LOCATORS")
+
+
+def _fact_groups(text: str) -> set[str]:
+    lowered = text.lower()
+    return {
+        group
+        for group, markers in CROSS_MODULE_FACT_GROUPS.items()
+        if any(marker in lowered for marker in markers)
+    }
+
+
+def _validate_cross_module_fact_observables(intent: dict[str, Any], errors: list[str]) -> None:
+    requirements = intent.get("change_requirements")
+    observables = intent.get("preserved_observables")
+    if not isinstance(requirements, list) or not isinstance(observables, list):
+        return
+    observable_texts = []
+    for observable in observables:
+        if not isinstance(observable, dict):
+            continue
+        source = observable.get("source") if isinstance(observable.get("source"), dict) else {}
+        text = f"{observable.get('behavior') or ''} {source.get('claim') or ''}".lower()
+        if any(marker in text for marker in ERROR_OWNERSHIP_MARKERS):
+            continue
+        observable_texts.append(text)
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        source = requirement.get("source") if isinstance(requirement.get("source"), dict) else {}
+        text = f"{requirement.get('outcome') or ''} {source.get('claim') or ''}".lower()
+        groups = _fact_groups(text)
+        if len(groups) < 2 or not any(marker in text for marker in CROSS_MODULE_CAPABILITY_MARKERS):
+            continue
+        if not any(groups <= _fact_groups(observable_text) for observable_text in observable_texts):
+            errors.append(
+                f"MISSING_CROSS_MODULE_FACT_OBSERVABLE:{requirement.get('id') or 'unknown'}"
+            )
 
 
 def _validate_intent(body: dict[str, Any], errors: list[str]) -> tuple[set[str], set[str], set[str]]:
@@ -551,6 +623,7 @@ def _validate_intent(body: dict[str, Any], errors: list[str]) -> tuple[set[str],
     _validate_requirement_entries(
         intent.get("finalization_requirements"), errors, "FINALIZATION_REQUIREMENT", "outcome", nonempty=False
     )
+    _validate_cross_module_fact_observables(intent, errors)
     _error(errors, _string_list(intent.get("out_of_scope"), nonempty=True), "MISSING_OUT_OF_SCOPE")
     return change_ids, observable_ids, quality_ids
 
@@ -601,8 +674,8 @@ def _validate_gaps(
         _unique_id(gap, known, errors, "CONFIRMED_GAP")
         for field in ("subject", "current_state", "required_state"):
             _error(errors, _non_empty_string(gap.get(field)), f"MISSING_{prefix}_{field.upper()}")
-        _validate_sources(gap.get("evidence"), errors, f"{prefix}_EVIDENCE")
-        _validate_sources(gap.get("rules"), errors, f"{prefix}_RULES")
+        _validate_sources(gap.get("evidence"), errors, f"{prefix}_EVIDENCE", unique_locators=True)
+        _validate_sources(gap.get("rules"), errors, f"{prefix}_RULES", unique_locators=True)
         ids = gap.get("requirement_ids")
         _error(errors, _string_list(ids, nonempty=True), f"MISSING_{prefix}_REQUIREMENT_IDS")
         if isinstance(ids, list):
@@ -687,6 +760,17 @@ def _validate_verification(
         _error(errors, coverage in COVERAGE, f"INVALID_{prefix}_COVERAGE")
         evidence = entry.get("evidence")
         _validate_sources(evidence, errors, f"{prefix}_EVIDENCE", nonempty=coverage in {"covered", "partial"})
+        evidence_locators: set[str] = set()
+        if isinstance(evidence, list):
+            for source in evidence:
+                locator = source.get("locator") if isinstance(source, dict) else None
+                if not _non_empty_string(locator):
+                    continue
+                if locator in evidence_locators:
+                    errors.append(
+                        f"DUPLICATE_VERIFICATION_EVIDENCE_LOCATOR:{identifier}:{locator}"
+                    )
+                evidence_locators.add(locator)
         production_seam = entry.get("production_seam")
         _validate_source(production_seam, errors, f"{prefix}_PRODUCTION_SEAM")
         if isinstance(production_seam, dict):
@@ -721,15 +805,20 @@ def _validate_slices(
     requirement_ids: set[str],
     observable_ids: set[str],
     verification_ids: set[str],
-) -> None:
+    contract_change_ids: set[str],
+) -> set[str]:
     slices = body.get("implementation_slices")
     _error(errors, isinstance(slices, list), "INVALID_IMPLEMENTATION_SLICES")
     known: set[str] = set()
     sliced_gaps: set[str] = set()
+    mapped_contract_changes: set[str] = set()
     dependencies: list[tuple[str, list[Any], str]] = []
     if not isinstance(slices, list):
-        return
-    fields = {"id", "title", "outcome", "gap_ids", "scope", "out_of_scope", "acceptance", "depends_on"}
+        return mapped_contract_changes
+    fields = {
+        "id", "title", "outcome", "gap_ids", "scope", "out_of_scope", "acceptance",
+        "contract_change_ids", "depends_on",
+    }
     for index, item in enumerate(slices):
         prefix = f"IMPLEMENTATION_SLICE:{index}"
         if not _exact_fields(item, fields, errors, prefix):
@@ -772,12 +861,26 @@ def _validate_slices(
         depends_on = item.get("depends_on")
         _error(errors, _string_list(depends_on), f"INVALID_{prefix}_DEPENDS_ON")
         if identifier is not None and isinstance(depends_on, list):
+            if depends_on:
+                errors.append(f"TRIAGE_DEPENDENCIES_DEFERRED_TO_GRAPH:{identifier}")
             dependencies.append((identifier, depends_on, prefix))
+        contract_references = item.get("contract_change_ids")
+        _error(errors, _string_list(contract_references), f"INVALID_{prefix}_CONTRACT_CHANGE_IDS")
+        if isinstance(contract_references, list):
+            for contract_id in contract_references:
+                _error(
+                    errors,
+                    contract_id in contract_change_ids,
+                    f"UNKNOWN_{prefix}_CONTRACT_CHANGE:{contract_id}",
+                )
+                if contract_id in contract_change_ids:
+                    mapped_contract_changes.add(contract_id)
     for identifier, depends_on, prefix in dependencies:
         for dependency in depends_on:
             _error(errors, dependency in known and dependency != identifier, f"UNKNOWN_{prefix}_DEPENDENCY:{dependency}")
     for gap_id in sorted(gap_ids - sliced_gaps):
         errors.append(f"UNSLICED_CONFIRMED_GAP:{gap_id}")
+    return mapped_contract_changes
 
 
 def _validate_contract_changes(body: dict[str, Any], errors: list[str], verification_ids: set[str]) -> None:
@@ -794,7 +897,7 @@ def _validate_contract_changes(body: dict[str, Any], errors: list[str], verifica
         _unique_id(entry, known, errors, "CONTRACT_CHANGE")
         for field in ("consumer", "producer", "change"):
             _error(errors, _non_empty_string(entry.get(field)), f"MISSING_{prefix}_{field.upper()}")
-        _validate_sources(entry.get("evidence"), errors, f"{prefix}_EVIDENCE")
+        _validate_sources(entry.get("evidence"), errors, f"{prefix}_EVIDENCE", unique_locators=True)
         references = entry.get("verification_ids")
         _error(errors, _string_list(references, nonempty=True), f"MISSING_{prefix}_VERIFICATION_IDS")
         if isinstance(references, list):
@@ -821,7 +924,13 @@ def _validate_document_impacts(body: dict[str, Any], errors: list[str]) -> None:
             seen.add(document)
         disposition = entry.get("disposition")
         _error(errors, disposition in DOCUMENT_DISPOSITIONS, f"INVALID_{prefix}_DISPOSITION")
-        _validate_sources(entry.get("evidence"), errors, f"{prefix}_EVIDENCE", nonempty=disposition != "not-applicable")
+        _validate_sources(
+            entry.get("evidence"),
+            errors,
+            f"{prefix}_EVIDENCE",
+            nonempty=disposition != "not-applicable",
+            unique_locators=True,
+        )
         if disposition == "update":
             _error(errors, _non_empty_string(entry.get("action")), f"MISSING_{prefix}_ACTION")
         else:
@@ -853,7 +962,8 @@ def _validate_decisions(body: dict[str, Any], errors: list[str], observable_ids:
         for field in ("question", "why_unresolved"):
             _error(errors, _non_empty_string(decision.get(field)), f"MISSING_{prefix}_{field.upper()}")
         _error(errors, decision.get("owner") == "user", f"DECISION_OWNER_MUST_BE_USER:{decision_id}")
-        _validate_sources(decision.get("evidence"), errors, f"{prefix}_EVIDENCE")
+        evidence = decision.get("evidence")
+        _validate_sources(evidence, errors, f"{prefix}_EVIDENCE", unique_locators=True)
         affected = decision.get("affected_observable_ids")
         _error(errors, _string_list(affected), f"INVALID_{prefix}_AFFECTED_OBSERVABLE_IDS")
         if isinstance(affected, list):
@@ -932,6 +1042,13 @@ def validate(body: Any, status: str | None = None) -> list[str]:
         if isinstance(handoff, dict):
             _error(errors, handoff.get("graph_allowed") is False, "INTAKE_GRAPH_ALLOWED")
             _error(errors, handoff.get("blocker") == "analysis-incomplete", "INVALID_INTAKE_BLOCKER")
+        alternative_locations = _unresolved_implementation_alternatives(body)
+        if alternative_locations:
+            errors.append("UNRESOLVED_IMPLEMENTATION_ALTERNATIVE")
+            errors.extend(
+                f"UNRESOLVED_IMPLEMENTATION_ALTERNATIVE:{location}"
+                for location in alternative_locations
+            )
         return errors
 
     gap_ids, mapped_requirements = _validate_gaps(body, errors, requirement_ids, observable_ids)
@@ -939,8 +1056,24 @@ def validate(body: Any, status: str | None = None) -> list[str]:
         errors.append(f"UNMAPPED_CHANGE_REQUIREMENT:{requirement_id}")
     _validate_target_dispositions(body, errors, target_ids, gap_ids)
     verification_ids = _validate_verification(body, errors, observable_ids)
-    _validate_slices(body, errors, gap_ids, requirement_ids, observable_ids, verification_ids)
+    raw_contract_changes = body.get("contract_changes")
+    contract_change_ids = {
+        item.get("id")
+        for item in (raw_contract_changes if isinstance(raw_contract_changes, list) else [])
+        if isinstance(item, dict) and _non_empty_string(item.get("id"))
+    }
+    mapped_contract_changes = _validate_slices(
+        body,
+        errors,
+        gap_ids,
+        requirement_ids,
+        observable_ids,
+        verification_ids,
+        contract_change_ids,
+    )
     _validate_contract_changes(body, errors, verification_ids)
+    for contract_id in sorted(contract_change_ids - mapped_contract_changes):
+        errors.append(f"UNMAPPED_CONTRACT_CHANGE:{contract_id}")
     _validate_document_impacts(body, errors)
     _validate_decisions(body, errors, observable_ids)
 
@@ -1003,6 +1136,30 @@ def validate_repository_locators(body: Any, repo: Path) -> list[str]:
     return errors
 
 
+def current_state_admission(inspection: Any) -> str | None:
+    if not isinstance(inspection, dict):
+        return None
+    dirty_paths = inspection.get("dirty_paths")
+    committed_baseline_safe = (
+        inspection.get("freshness") == "insufficient"
+        and inspection.get("worktree_clean") is False
+        and isinstance(dirty_paths, list)
+        and bool(dirty_paths)
+        and all(
+            isinstance(path, str)
+            and path.replace("\\", "/").startswith((".hermes/", "hermes/"))
+            for path in dirty_paths
+        )
+        and inspection.get("covered_changed_paths") == []
+        and inspection.get("errors") == ["WORKTREE_DIRTY"]
+    )
+    if committed_baseline_safe:
+        return "committed-baseline-safe"
+    if inspection.get("freshness") == "fresh" and inspection.get("worktree_clean") is True:
+        return "fresh"
+    return None
+
+
 def validate_current_state_inspection(body: Any, inspection: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(body, dict):
@@ -1010,12 +1167,26 @@ def validate_current_state_inspection(body: Any, inspection: Any) -> list[str]:
     if not isinstance(inspection, dict):
         return ["CURRENT_STATE_INSPECTION_NOT_OBJECT"]
     _error(errors, inspection.get("schema") == "current-state-inspection-v1", "CURRENT_STATE_INSPECTION_SCHEMA")
-    _error(errors, inspection.get("freshness") == "fresh", "CURRENT_STATE_INSPECTION_NOT_FRESH")
-    _error(errors, inspection.get("worktree_clean") is True, "CURRENT_STATE_INSPECTION_DIRTY")
+    admission = current_state_admission(inspection)
+    _error(
+        errors,
+        admission is not None,
+        "CURRENT_STATE_INSPECTION_NOT_FRESH",
+    )
+    _error(
+        errors,
+        admission is not None,
+        "CURRENT_STATE_INSPECTION_DIRTY",
+    )
     if "snapshot_is_ancestor" in inspection:
         _error(errors, inspection.get("snapshot_is_ancestor") is True, "CURRENT_STATE_SNAPSHOT_NOT_ANCESTOR")
     baseline = body.get("baseline") if isinstance(body.get("baseline"), dict) else {}
     current = baseline.get("current_state") if isinstance(baseline.get("current_state"), dict) else {}
+    _error(
+        errors,
+        admission is None or current.get("freshness") == admission,
+        "CURRENT_STATE_ADMISSION_MISMATCH",
+    )
     _error(errors, inspection.get("inspection_sha") == baseline.get("planning_sha"), "CURRENT_STATE_INSPECTION_SHA_MISMATCH")
     _error(errors, inspection.get("snapshot_sha") == current.get("snapshot_sha"), "CURRENT_STATE_SNAPSHOT_SHA_MISMATCH")
     return errors
@@ -1032,12 +1203,17 @@ def freeze(body: dict[str, Any], inspection: Any | None = None) -> dict[str, Any
         for item in body.get("open_decisions", [])
     ):
         raise ValueError("OPEN_DECISIONS_PREVENT_FREEZE")
-    errors = validate(body, "triage")
+    candidate = copy.deepcopy(body)
     if inspection is not None:
-        errors.extend(validate_current_state_inspection(body, inspection))
+        admission = current_state_admission(inspection)
+        if admission is not None:
+            candidate["baseline"]["current_state"]["freshness"] = admission
+    errors = validate(candidate, "triage")
+    if inspection is not None:
+        errors.extend(validate_current_state_inspection(candidate, inspection))
     if errors:
         raise ValueError(errors[0])
-    frozen = copy.deepcopy(body)
+    frozen = candidate
     frozen["phase"] = "frozen"
     frozen["handoff"] = {"graph_allowed": True, "blocker": None}
     frozen["frozen_digest"] = _body_digest(frozen)

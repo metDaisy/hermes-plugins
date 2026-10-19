@@ -41,6 +41,7 @@ CONTRACT_DIMENSIONS = {
     "events",
 }
 APPLICABILITY = {"applicable", "not-applicable"}
+UNRESOLVED_ENTRY_POINT_SYMBOLS = {"", "?", "unknown", "unresolved", "todo", "tbd"}
 GENERIC_CONTEXT_TEXT = "저장소 규칙: 적용 계층과 책임 경계를 유지하고 해당 공개 계약을 임의로 넓히지 않는다."
 GENERIC_ENTRY_POINT_REASON = "이 조사 시작점에서 해당 책임 경계와 현재 호출 관계를 확인한다."
 GENERIC_VERIFICATION_SCENARIO = "성공·실패·경계 조건이 해당 observable의 요구된 동작과 일치하는지 확인한다."
@@ -117,6 +118,12 @@ def _validate_korean_strings(value: Any, errors: list[str], field: str) -> None:
             _validate_korean(item, errors, f"{field}:{index}")
 
 
+def _contract_change_marker(value: Any) -> bool:
+    return isinstance(value, str) and re.match(
+        r"^(?:[A-Z][A-Z0-9-]+|cc-[a-z0-9-]+):\s+\S", value
+    ) is not None
+
+
 def _append_forbidden_fields(value: Any, errors: list[str]) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -161,6 +168,10 @@ def template(issue: int, issue_url: str) -> dict[str, Any]:
     }
 
 
+def _unresolved_entry_point_symbol(value: Any) -> bool:
+    return not isinstance(value, str) or value.strip().lower() in UNRESOLVED_ENTRY_POINT_SYMBOLS
+
+
 def _split_locator(locator: str) -> tuple[str, str]:
     path, separator, heading = locator.partition("#")
     return path, heading if separator else "unknown"
@@ -193,6 +204,11 @@ def impl_batch_template(
 
     gap_by_id = {gap.get("id"): gap for gap in gaps if isinstance(gap, dict)}
     verification_by_id = {row.get("id"): row for row in matrix if isinstance(row, dict)}
+    contract_change_by_id = {
+        change.get("id"): change
+        for change in contract_changes
+        if isinstance(change, dict) and isinstance(change.get("id"), str)
+    }
     cards: list[dict[str, Any]] = []
     card_count = len(slices)
     for index, source_slice in enumerate(slices, start=1):
@@ -311,13 +327,21 @@ def impl_batch_template(
             "title": f"G{generation}-Issue{issue.get('number')}-Impl{index}",
             "priority": card_count - index + 1,
             "body": body,
+            "required_verification_ids": verification_ids,
         }
+        if source_slice.get("depends_on", []):
+            raise ValueError(f"TRIAGE_SLICE_DEPENDENCIES_NOT_DEFERRED:{index}")
+        wrapper["depends_on_ordinals"] = []
+        declared_contract_change_ids = source_slice.get("contract_change_ids", [])
+        if not isinstance(declared_contract_change_ids, list):
+            raise ValueError(f"INVALID_TRIAGE_SLICE_CONTRACT_CHANGES:{index}")
         relevant_contract_changes = [
-            change
-            for change in contract_changes
-            if isinstance(change, dict)
-            and set(change.get("verification_ids", [])) & set(verification_ids)
+            contract_change_by_id[contract_id]
+            for contract_id in declared_contract_change_ids
+            if contract_id in contract_change_by_id
         ]
+        if len(relevant_contract_changes) != len(declared_contract_change_ids):
+            raise ValueError(f"UNKNOWN_TRIAGE_SLICE_CONTRACT_CHANGE:{index}")
         wrapper["contract_changes"] = copy.deepcopy(relevant_contract_changes)
         wrapper["required_contract_symbols"] = list(
             dict.fromkeys(
@@ -418,6 +442,9 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
         raise ValueError("INVALID_IMPL_BATCH")
     if not isinstance(authored_cards, list) or len(authored_cards) != len(cards):
         raise ValueError("IMPL_COMPLETION_CARD_COUNT_MISMATCH")
+    unexpected_completion_fields = sorted(set(completions) - {"cards", "dependency_audit"})
+    if unexpected_completion_fields:
+        raise ValueError(f"UNEXPECTED_IMPL_COMPLETIONS_FIELD:{unexpected_completion_fields[0]}")
 
     merged = json.loads(json.dumps(batch, ensure_ascii=False))
     authored_by_ordinal: dict[int, dict[str, Any]] = {}
@@ -439,6 +466,7 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
             "implementation_contract",
             "entry_points",
             "verification",
+            "depends_on_ordinals",
         }
         unexpected = sorted(set(authored) - allowed_fields)
         if unexpected:
@@ -472,12 +500,21 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
             if expected_key in seen_expected:
                 continue
             seen_expected.add(expected_key)
-            matching_index = next((
-                index
-                for index, entry_point in enumerate(remaining_authored)
-                if entry_point.get("path") == expected.get("path")
-                and entry_point.get("symbol") == expected_symbol
-            ), None)
+            matching_index = next(
+                (
+                    index
+                    for index, entry_point in enumerate(remaining_authored)
+                    if entry_point.get("path") == expected.get("path")
+                    and (
+                        (
+                            _unresolved_entry_point_symbol(expected_symbol)
+                            and not _unresolved_entry_point_symbol(entry_point.get("symbol"))
+                        )
+                        or entry_point.get("symbol") == expected_symbol
+                    )
+                ),
+                None,
+            )
             if matching_index is None:
                 entry_points.append(expected)
             else:
@@ -492,6 +529,24 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
             seen_entry_points.add(entry_point_key)
             deduplicated_entry_points.append(entry_point)
         body["context"]["entry_points"] = deduplicated_entry_points
+        unresolved = next(
+            (
+                entry_point
+                for entry_point in deduplicated_entry_points
+                if _unresolved_entry_point_symbol(entry_point.get("symbol"))
+            ),
+            None,
+        )
+        if unresolved is not None:
+            raise ValueError(
+                f"UNRESOLVED_IMPL_ENTRY_POINT_SYMBOL:{ordinal}:{unresolved.get('path')}"
+            )
+        authored_dependencies = authored.get(
+            "depends_on_ordinals", card.get("depends_on_ordinals", [])
+        )
+        if not isinstance(authored_dependencies, list):
+            raise ValueError(f"INVALID_IMPL_COMPLETION_DEPENDENCIES:{ordinal}")
+        card["depends_on_ordinals"] = copy.deepcopy(authored_dependencies)
 
         authored_verification = authored.get("verification")
         expected_verification = body.get("verification")
@@ -515,6 +570,8 @@ def apply_impl_completions(batch: dict[str, Any], completions: dict[str, Any]) -
                 )
             for field in ("test_level", "tests", "scenarios"):
                 verification[field] = authored_item.get(field)
+    if "dependency_audit" in completions:
+        merged["dependency_audit"] = copy.deepcopy(completions["dependency_audit"])
     return merged
 
 
@@ -585,7 +642,14 @@ def _validate_implementation_contract(value: Any, errors: list[str]) -> None:
         _validate_korean_strings(rules, errors, f"implementation_contract:{dimension}")
     preserved = value.get("preserved_behaviors")
     _error(errors, _strings(preserved), "MISSING_PRESERVED_BEHAVIORS")
-    _validate_korean_strings(preserved, errors, "implementation_contract:preserved_behaviors")
+    if isinstance(preserved, list):
+        for index, behavior in enumerate(preserved):
+            if not _contract_change_marker(behavior):
+                _validate_korean(
+                    behavior,
+                    errors,
+                    f"implementation_contract:preserved_behaviors:{index}",
+                )
 
 
 def _validate_context(value: Any, errors: list[str]) -> None:
@@ -654,6 +718,65 @@ def _validate_acceptance(value: Any, errors: list[str]) -> set[str]:
         for field in ("requirement_ids", "observable_ids"):
             _error(errors, _strings(entry.get(field)), f"MISSING_ACCEPTANCE_{field.upper()}:{label}")
     return identifiers
+
+
+def _validate_artifact_closure(card: dict[str, Any], errors: list[str]) -> None:
+    acceptance = card.get("acceptance")
+    context = card.get("context")
+    if not isinstance(acceptance, list) or not isinstance(context, dict):
+        return
+    entry_points = context.get("entry_points")
+    if not isinstance(entry_points, list):
+        return
+
+    artifacts: list[tuple[str, str]] = []
+    for entry in entry_points:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        symbol = entry.get("symbol")
+        if isinstance(path, str) and isinstance(symbol, str):
+            artifacts.append((path.replace("\\", "/").lower(), symbol.lower()))
+
+    for entry in acceptance:
+        if not isinstance(entry, dict):
+            continue
+        identifier = entry.get("id")
+        criterion = entry.get("criterion")
+        if not isinstance(identifier, str) or not isinstance(criterion, str):
+            continue
+        normalized = criterion.lower()
+        if not (
+            "presentation dto" in normalized
+            and "application command/result" in normalized
+            and "분리" in normalized
+        ):
+            continue
+        required = {
+            "application-request": lambda path, symbol: "/application/dto/" in path
+            and ("request" in path or "request" in symbol),
+            "presentation-request": lambda path, symbol: "/presentation/dto/" in path
+            and ("request" in path or "request" in symbol),
+            "application-command": lambda path, symbol: "/application/command/" in path
+            and ("command" in path or "command" in symbol),
+            "application-response": lambda path, symbol: "/application/dto/" in path
+            and ("response" in path or "response" in symbol),
+            "presentation-response": lambda path, symbol: "/presentation/dto/" in path
+            and ("response" in path or "response" in symbol),
+            "application-result": lambda path, symbol: "/application/result/" in path
+            and ("result" in path or "result" in symbol),
+        }
+        missing = [
+            label
+            for label, predicate in required.items()
+            if not any(predicate(path, symbol) for path, symbol in artifacts)
+        ]
+        if missing:
+            errors.append(
+                f"INCOMPLETE_HTTP_DTO_RESULT_BOUNDARY:{identifier}:{','.join(missing)}"
+            )
+        if any("/application/response/" in path for path, _symbol in artifacts):
+            errors.append(f"AMBIGUOUS_APPLICATION_OUTPUT_BOUNDARY:{identifier}")
 
 
 def _validate_verification(value: Any, acceptance_ids: set[str], errors: list[str]) -> None:
@@ -750,6 +873,7 @@ def validate(card: Any) -> list[str]:
     _validate_implementation_contract(card.get("implementation_contract"), errors)
     _validate_context(card.get("context"), errors)
     acceptance_ids = _validate_acceptance(card.get("acceptance"), errors)
+    _validate_artifact_closure(card, errors)
     _validate_verification(card.get("verification"), acceptance_ids, errors)
     return errors
 
@@ -794,7 +918,9 @@ def validate_impl_batch(batch: Any) -> list[str]:
                 "body",
                 "contract_changes",
                 "required_contract_symbols",
+                "required_verification_ids",
                 "parent_ids",
+                "depends_on_ordinals",
             },
             errors,
             f"UNEXPECTED_IMPL_BATCH_CARD_FIELD:{index}",
@@ -847,6 +973,40 @@ def validate_impl_batch(batch: Any) -> list[str]:
         body = wrapper.get("body")
         for error in validate(body):
             errors.append(f"IMPL_BODY_INVALID:{index}:{error}")
+        required_verification_ids = wrapper.get("required_verification_ids")
+        if required_verification_ids is not None:
+            if not isinstance(required_verification_ids, list) or not all(
+                isinstance(verification_id, str) and verification_id
+                for verification_id in required_verification_ids
+            ):
+                errors.append(f"INVALID_REQUIRED_VERIFICATION_IDS:{index}")
+            else:
+                actual_verification_ids = [
+                    item.get("id")
+                    for item in (
+                        body.get("verification", []) if isinstance(body, dict) else []
+                    )
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ]
+                missing = sorted(set(required_verification_ids) - set(actual_verification_ids))
+                unexpected = sorted(set(actual_verification_ids) - set(required_verification_ids))
+                duplicates = sorted(
+                    verification_id
+                    for verification_id in set(actual_verification_ids)
+                    if actual_verification_ids.count(verification_id) > 1
+                )
+                if (
+                    missing
+                    or unexpected
+                    or duplicates
+                    or len(actual_verification_ids) != len(required_verification_ids)
+                ):
+                    errors.append(
+                        f"IMPL_REQUIRED_VERIFICATION_IDS_MISMATCH:{index}:"
+                        f"missing={','.join(missing) or '-'}:"
+                        f"unexpected={','.join(unexpected) or '-'}:"
+                        f"duplicates={','.join(duplicates) or '-'}"
+                    )
         implementation_contract = (
             body.get("implementation_contract") if isinstance(body, dict) else None
         )
@@ -875,6 +1035,9 @@ def validate_impl_batch(batch: Any) -> list[str]:
             )
             if isinstance(entry, dict) and isinstance(entry.get("symbol"), str)
         ]
+        for entry_index, entry_symbol in enumerate(entry_symbols):
+            if _unresolved_entry_point_symbol(entry_symbol):
+                errors.append(f"UNRESOLVED_IMPL_ENTRY_POINT_SYMBOL:{index}:{entry_index}")
         contract_changes = wrapper.get("contract_changes")
         if not isinstance(contract_changes, list) or not all(
             isinstance(change, dict) for change in contract_changes
@@ -899,6 +1062,25 @@ def validate_impl_batch(batch: Any) -> list[str]:
                 )
                 if not in_contract and not in_entry_point:
                     errors.append(f"REQUIRED_CONTRACT_SYMBOL_MISSING:{index}:{symbol}")
+        depends_on_ordinals = wrapper.get("depends_on_ordinals", [])
+        invalid_dependency = None
+        if not isinstance(depends_on_ordinals, list):
+            invalid_dependency = "shape"
+        elif len(depends_on_ordinals) != len(set(depends_on_ordinals)):
+            invalid_dependency = "duplicate"
+        else:
+            invalid_dependency = next(
+                (
+                    dependency
+                    for dependency in depends_on_ordinals
+                    if not isinstance(dependency, int)
+                    or dependency < 1
+                    or dependency >= expected_ordinal
+                ),
+                None,
+            )
+        if invalid_dependency is not None:
+            errors.append(f"INVALID_IMPL_DEPENDENCY:{index}:{invalid_dependency}")
         if match is not None and isinstance(body, dict):
             body_issue = body.get("issue")
             body_issue_number = body_issue.get("number") if isinstance(body_issue, dict) else None
@@ -911,8 +1093,67 @@ def validate_impl_batch(batch: Any) -> list[str]:
         errors.append("IMPL_TITLE_ISSUE_SET_MISMATCH")
     if len(parent_sets) > 1:
         errors.append("IMPL_PARENT_SET_MISMATCH")
-    if not isinstance(batch.get("dependency_audit"), dict):
+    dependency_audit = batch.get("dependency_audit")
+    if not isinstance(dependency_audit, dict):
         errors.append("MISSING_IMPL_DEPENDENCY_AUDIT")
+    else:
+        expected_pairs = [
+            (dependency, wrapper.get("ordinal"))
+            for wrapper in cards
+            if isinstance(wrapper, dict)
+            for dependency in wrapper.get("depends_on_ordinals", [])
+            if isinstance(dependency, int)
+        ]
+        audit_edges = dependency_audit.get("edges")
+        if not isinstance(audit_edges, list):
+            errors.append("IMPL_DEPENDENCY_AUDIT_MISMATCH")
+        else:
+            audit_pairs: list[tuple[Any, Any]] = []
+            proof_fields = {
+                "from_ordinal",
+                "to_ordinal",
+                "required_artifact",
+                "consumer_entry_point",
+                "why_baseline_cannot_satisfy",
+            }
+            for edge in audit_edges:
+                if not isinstance(edge, dict):
+                    errors.append("IMPL_DEPENDENCY_AUDIT_EDGE_NOT_OBJECT")
+                    continue
+                pair = (edge.get("from_ordinal"), edge.get("to_ordinal"))
+                audit_pairs.append(pair)
+                if set(edge) != proof_fields or not all(
+                    isinstance(edge.get(field), str) and edge[field].strip()
+                    for field in (
+                        "required_artifact",
+                        "consumer_entry_point",
+                        "why_baseline_cannot_satisfy",
+                    )
+                ):
+                    errors.append(f"IMPL_DEPENDENCY_PROOF_INCOMPLETE:{pair[0]}:{pair[1]}")
+                    continue
+                parent_ordinal, child_ordinal = pair
+                if not (
+                    isinstance(parent_ordinal, int)
+                    and isinstance(child_ordinal, int)
+                    and 1 <= parent_ordinal < child_ordinal <= len(cards)
+                ):
+                    errors.append(f"INVALID_IMPL_DEPENDENCY_AUDIT_EDGE:{parent_ordinal}:{child_ordinal}")
+                    continue
+                parent_text = json.dumps(cards[parent_ordinal - 1].get("body"), ensure_ascii=False)
+                child_text = json.dumps(cards[child_ordinal - 1].get("body"), ensure_ascii=False)
+                artifact = edge["required_artifact"]
+                consumer = edge["consumer_entry_point"]
+                if artifact not in parent_text or artifact not in child_text:
+                    errors.append(
+                        f"IMPL_DEPENDENCY_ARTIFACT_UNPROVEN:{parent_ordinal}:{child_ordinal}"
+                    )
+                if consumer not in child_text:
+                    errors.append(
+                        f"IMPL_DEPENDENCY_CONSUMER_UNPROVEN:{parent_ordinal}:{child_ordinal}"
+                    )
+            if audit_pairs != expected_pairs:
+                errors.append("IMPL_DEPENDENCY_AUDIT_MISMATCH")
     return errors
 
 
@@ -1161,6 +1402,111 @@ def create_impl_batch_native(
         }
         if digests != {body.get("frozen_digest")}:
             raise ValueError("SOURCE_TRIAGE_DIGEST_MISMATCH")
+        source_slice_ids = [
+            item.get("id")
+            for item in body.get("implementation_slices", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        batch_slice_ids = [
+            wrapper.get("body", {}).get("slice", {}).get("id")
+            for wrapper in batch["cards"]
+            if isinstance(wrapper.get("body"), dict)
+        ]
+        source_slice_set = set(source_slice_ids)
+        batch_slice_set = set(batch_slice_ids)
+        missing = sorted(source_slice_set - batch_slice_set)
+        unexpected = sorted(batch_slice_set - source_slice_set)
+        duplicates = sorted(
+            slice_id for slice_id in batch_slice_set if batch_slice_ids.count(slice_id) > 1
+        )
+        if (
+            missing
+            or unexpected
+            or duplicates
+            or len(batch_slice_ids) != len(source_slice_ids)
+        ):
+            raise ValueError(
+                "IMPL_SLICE_CLOSURE_MISMATCH:"
+                f"missing={','.join(missing) or '-'}:"
+                f"unexpected={','.join(unexpected) or '-'}:"
+                f"duplicates={','.join(duplicates) or '-'}"
+            )
+        source_slices = {
+            item["id"]: item
+            for item in body.get("implementation_slices", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        for wrapper in batch["cards"]:
+            impl_body = wrapper.get("body", {})
+            slice_id = impl_body.get("slice", {}).get("id")
+            source_slice = source_slices.get(slice_id, {})
+            source_acceptance = source_slice.get("acceptance", [])
+            expected_acceptance_ids = [
+                item.get("id")
+                for item in source_acceptance
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            actual_acceptance_ids = [
+                item.get("id")
+                for item in impl_body.get("acceptance", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            acceptance_missing = sorted(set(expected_acceptance_ids) - set(actual_acceptance_ids))
+            acceptance_unexpected = sorted(set(actual_acceptance_ids) - set(expected_acceptance_ids))
+            acceptance_duplicates = sorted(
+                item_id
+                for item_id in set(actual_acceptance_ids)
+                if actual_acceptance_ids.count(item_id) > 1
+            )
+            if (
+                acceptance_missing
+                or acceptance_unexpected
+                or acceptance_duplicates
+                or len(actual_acceptance_ids) != len(expected_acceptance_ids)
+            ):
+                raise ValueError(
+                    f"IMPL_ACCEPTANCE_CLOSURE_MISMATCH:{slice_id}:"
+                    f"missing={','.join(acceptance_missing) or '-'}:"
+                    f"unexpected={','.join(acceptance_unexpected) or '-'}:"
+                    f"duplicates={','.join(acceptance_duplicates) or '-'}"
+                )
+            expected_verification_ids = sorted(
+                {
+                    verification_id
+                    for acceptance in source_acceptance
+                    if isinstance(acceptance, dict)
+                    for verification_id in acceptance.get("verification_ids", [])
+                    if isinstance(verification_id, str)
+                }
+            )
+            actual_verification_ids = [
+                item.get("id")
+                for item in impl_body.get("verification", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            verification_missing = sorted(
+                set(expected_verification_ids) - set(actual_verification_ids)
+            )
+            verification_unexpected = sorted(
+                set(actual_verification_ids) - set(expected_verification_ids)
+            )
+            verification_duplicates = sorted(
+                item_id
+                for item_id in set(actual_verification_ids)
+                if actual_verification_ids.count(item_id) > 1
+            )
+            if (
+                verification_missing
+                or verification_unexpected
+                or verification_duplicates
+                or len(actual_verification_ids) != len(expected_verification_ids)
+            ):
+                raise ValueError(
+                    f"IMPL_VERIFICATION_CLOSURE_MISMATCH:{slice_id}:"
+                    f"missing={','.join(verification_missing) or '-'}:"
+                    f"unexpected={','.join(verification_unexpected) or '-'}:"
+                    f"duplicates={','.join(verification_duplicates) or '-'}"
+                )
         return task, body
 
     triage_envelope = run_json([*base, "show", triage_id, "--json"])

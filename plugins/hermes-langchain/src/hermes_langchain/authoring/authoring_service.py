@@ -134,7 +134,17 @@ def _sources(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _artifact_file(row: sqlite3.Row, triage_stage: str | None) -> str | None:
+def _artifact_file(
+    row: sqlite3.Row,
+    phase: str,
+    triage_stage: str | None,
+) -> str | None:
+    if phase == "impl":
+        return f".temp/task-graphs/{int(row['issue_number'])}/impl-card-batch.json"
+    if phase == "review":
+        return f".temp/task-graphs/{int(row['issue_number'])}/review-body.json"
+    if phase == "summary":
+        return f".temp/task-graphs/{int(row['issue_number'])}/summary-body.json"
     if not triage_stage or triage_stage == "materialize":
         return None
     stage = triage_stage.replace("_", "-")
@@ -181,7 +191,7 @@ def _public(row: sqlite3.Row) -> dict[str, Any]:
         "allowed_tools": [tool] if tool else [],
         "next_action": next_action,
         "artifact_schema": _TRIAGE_ARTIFACT_SCHEMAS.get(triage_stage) if triage_stage else None,
-        "artifact_file": _artifact_file(row, triage_stage),
+        "artifact_file": _artifact_file(row, phase, triage_stage),
         "instruction": _triage_instruction(triage_stage) if triage_stage else None,
         "stage_artifacts": (
             json.loads(str(row["triage_artifacts_json"])) if phase == "triage" else {}

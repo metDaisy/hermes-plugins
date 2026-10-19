@@ -34,23 +34,23 @@ _ORCHESTRATOR_SKILL = "hermes-langchain:kwc-orchestrator-contract"
 # SOUL, project rules, auto-loaded skills, and memory from becoming behavior inputs.
 _SITUATIONS: dict[str, dict[str, Any]] = {
     "triage-authoring": {
-        "skill": "hermes-langchain:kwc-create-triage",
+        "skill": "hermes-langchain:kwc-triage-authoring-runtime",
         "toolsets": _AUTHORING_TOOLSETS,
         "mcp_servers": ("codebase-memory-mcp", "github-mcp", "semble-mcp"),
         "allowed_tools": ("kwc_advance_triage", "kwc_create_triage"),
         "output_schema": "kwc-assignment-v1",
     },
     "impl-authoring": {
-        "skill": "hermes-langchain:kwc-build-task-graph",
+        "skill": "hermes-langchain:kwc-impl-authoring-runtime",
         "toolsets": _AUTHORING_TOOLSETS,
-        "mcp_servers": ("codebase-memory-mcp", "github-mcp", "semble-mcp"),
+        "mcp_servers": ("codebase-memory-mcp", "semble-mcp"),
         "allowed_tools": ("kwc_create_impl_graph", "kwc_recover_frozen_triage"),
         "output_schema": "kwc-assignment-v1",
     },
     "review-authoring": {
-        "skill": "hermes-langchain:kwc-build-task-graph",
+        "skill": "hermes-langchain:kwc-review-authoring-runtime",
         "toolsets": _AUTHORING_TOOLSETS,
-        "mcp_servers": ("codebase-memory-mcp", "github-mcp", "semble-mcp"),
+        "mcp_servers": (),
         "allowed_tools": ("kwc_create_review",),
         "output_schema": "kwc-assignment-v1",
     },
@@ -331,6 +331,7 @@ def plugin_skill_paths() -> dict[str, Path]:
         for name in (
             "kwc-orchestrator-contract",
             "kwc-create-triage",
+            "kwc-review-authoring-runtime",
             "kwc-build-task-graph",
             "kwc-run-workflow",
             "kwc-service-planning",

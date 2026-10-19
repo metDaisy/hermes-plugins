@@ -88,6 +88,38 @@ class TriageWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(self.inspection, json.loads(inspection_path.read_text(encoding="utf-8")))
 
+    def test_intake_records_committed_baseline_safe_instead_of_false_freshness(self) -> None:
+        artifact = self._write(
+            "intake-committed-baseline.json",
+            {
+                "schema": "kwc-triage-intake-authoring-v1",
+                "identity": self.authoring["identity"],
+                "intake": self.authoring["intake"],
+            },
+        )
+        inspection = dict(self.inspection)
+        inspection.update(
+            {
+                "freshness": "insufficient",
+                "worktree_clean": False,
+                "dirty_paths": ["hermes/profiles/project-manager/SOUL.md"],
+                "covered_changed_paths": [],
+                "errors": ["WORKTREE_DIRTY"],
+            }
+        )
+
+        result = WORKFLOW.advance_stage(
+            assignment=self.assignment,
+            artifact_file=artifact,
+            inspection_fn=lambda *_args: inspection,
+        )
+
+        intake = json.loads((self.workspace / result["artifact"]["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(
+            "committed-baseline-safe",
+            intake["baseline"]["current_state"]["freshness"],
+        )
+
     def test_assignment_artifact_file_is_the_only_accepted_stage_input(self) -> None:
         artifact = self._write(
             "intake.json",
@@ -593,7 +625,7 @@ class TriageWorkflowTests(unittest.TestCase):
         payload["intake_amendments"]["intent_entries"] = [{
             "section": "intent.change_requirements",
             "id": requirement["id"],
-            "changes": requirement["outcome"],
+            "changes": {"source": requirement["source"]},
         }]
         duplicate = json.loads(json.dumps(payload["verification_matrix"][0]))
         duplicate["id"] = "VERIFY-DUPLICATE"
@@ -619,7 +651,7 @@ class TriageWorkflowTests(unittest.TestCase):
             canonical["intake_amendments"]["intent_entries"][0]["section"],
         )
         self.assertEqual(
-            {"outcome": requirement["outcome"]},
+            {"source": requirement["source"]},
             canonical["intake_amendments"]["intent_entries"][0]["changes"],
         )
         self.assertEqual(1, len(canonical["verification_matrix"]))

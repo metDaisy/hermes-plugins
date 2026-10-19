@@ -168,6 +168,17 @@ class AuthoringToolTests(unittest.TestCase):
         self.assertEqual("discovery", result["next_assignment"]["triage_stage"])
         self.assertEqual("canonical-intake.json", result["next_assignment"]["completed_artifact"]["path"])
 
+    def test_advance_triage_wrapper_accepts_host_task_id(self) -> None:
+        with patch.object(PLUGIN, "_tool_handlers") as handlers:
+            handlers._kwc_advance_triage_tool.return_value = "{}"
+            result = PLUGIN._kwc_advance_triage_tool(
+                {"assignment_id": "kwa_intake", "artifact_file": ".temp/intake.json"},
+                task_id="t_native",
+            )
+
+        self.assertEqual("{}", result)
+        handlers._kwc_advance_triage_tool.assert_called_once()
+
     def test_phase_tool_executes_then_advances_the_fenced_assignment(self) -> None:
         assignment = {
             "schema": "kwc-assignment-v1",

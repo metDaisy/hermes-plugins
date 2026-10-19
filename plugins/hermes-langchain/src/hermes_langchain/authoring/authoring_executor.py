@@ -39,6 +39,19 @@ def _workspace_file(workspace: Path, value: Any, field: str) -> Path:
     return candidate
 
 
+def _canonicalize_json_file(path: Path, field: str) -> None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{field} must contain valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must contain a JSON object")
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _run(command: list[str], *, cwd: Path, run_fn: Callable[..., Any]) -> None:
     run_fn(
         command,
@@ -167,6 +180,7 @@ def execute_authoring_phase(
             raise ValueError("review assignment has no Impl sources")
         impl_ids = [_task_id(value, "impl_id") for value in impl_ids]
         body = _workspace_file(workspace, arguments.get("body_file"), "body_file")
+        _canonicalize_json_file(body, "body_file")
         bundle = run_dir / "review-source.json"
         prefill = run_dir / "review-prefill.json"
         bundle_arg = bundle.relative_to(workspace).as_posix()

@@ -31,6 +31,11 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("서로 독립적으로 구현·acceptance·verification", prompt)
         self.assertIn("owner나 verification seam이 다른 결과", prompt)
         self.assertIn("실패 원인과 회귀 검증이 다른 사용자 관찰 동작", prompt)
+        self.assertIn("HTTP binding과 DTO boundary", prompt)
+        self.assertIn("서로 다른 change requirement", prompt)
+        self.assertIn("정상 조회 fact/projection과 error ownership", prompt)
+        self.assertIn("서로 다른 preserved observable", prompt)
+        self.assertIn("같은 fact들을 모두 명시하는 전용 정상 조회 preserved observable", prompt)
 
     def test_source_confirmation_requires_producer_implementation_evidence(self):
         prompt = (ROOT / "prompts" / "triage-source-confirmation.md").read_text(encoding="utf-8")
@@ -52,9 +57,10 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("최대 5개", prompt)
         self.assertIn("같은 target에 검색과 trace를 연속 실행", prompt)
         self.assertIn("nested breakdown이 아니라", prompt)
-        self.assertIn('"tool_usage": {"codebase_memory": 11, "semble": 1}', prompt)
+        self.assertIn("한 번의 batched `search_graph`", prompt)
+        self.assertIn("`name_pattern` 정규식", prompt)
+        self.assertIn('"tool_usage": {"codebase_memory": 3, "semble": 1}', prompt)
         self.assertIn("없으면 `null`", prompt)
-        self.assertIn("호출 **하나만**", prompt)
         self.assertIn("Semble fallback", prompt)
         self.assertIn("`include_connected=true`", prompt)
         self.assertIn("Codebase Memory 보완 호출을 최대 한 번", prompt)
@@ -71,6 +77,8 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("`docs/domain-glossary.md`가 mandatory", prompt)
         self.assertIn("`fallbacks`는 실제 사용한 fallback마다", prompt)
         self.assertIn("raw tool 응답을 복사하지 않고 정확히", prompt)
+        self.assertIn("identity.current_state_sha", prompt)
+        self.assertIn("실제 `git rev-parse HEAD`", prompt)
 
     def test_analysis_distinguishes_approved_bridge_from_undecided_seam(self):
         prompt = (ROOT / "prompts" / "triage-analysis.md").read_text(encoding="utf-8")
@@ -131,8 +139,15 @@ class PromptContractTest(unittest.TestCase):
         self.assertIn("같은 document의 locator", prompt)
         self.assertIn("`intent.` prefix를 붙이지 않는다", prompt)
         self.assertIn("`changes`는 string이나 배열이 아니라", prompt)
+        self.assertIn("`changes`에는 `source`만 허용", prompt)
+        self.assertIn("outcome·behavior·quality gate 의미를 수정하지 않는다", prompt)
         self.assertIn("모든 source object에서 `kind`를 제거", prompt)
         self.assertIn("구조 검증은 별도 중복 row가 아니라", prompt)
+        self.assertIn("`depends_on`은 항상 빈 배열", prompt)
+        self.assertIn("같은 verification row에서 같은 evidence locator를 두 번 사용하지 않는다", prompt)
+        self.assertIn("같은 규칙은 confirmed gap·contract change", prompt)
+        self.assertIn("다른 confirmed locator의 claim을 옮겨 적지 않는다", prompt)
+        self.assertIn("downstream Impl context로 복제되는 모든 claim", prompt)
 
     def test_source_confirmation_classifies_public_contract_state(self):
         prompt = (ROOT / "prompts" / "triage-source-confirmation.md").read_text(encoding="utf-8")

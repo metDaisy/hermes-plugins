@@ -107,6 +107,12 @@ def _validate_korean_strings(value: Any, errors: list[str], field: str) -> None:
             _validate_korean(item, errors, f"{field}:{index}")
 
 
+def _contract_change_marker(value: Any) -> bool:
+    return isinstance(value, str) and re.match(
+        r"^(?:[A-Z][A-Z0-9 -]+|cc-[a-z0-9-]+):\s+\S", value
+    ) is not None
+
+
 def _append_forbidden_fields(value: Any, errors: list[str]) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -218,7 +224,14 @@ def _validate_implementation_contract(value: Any, errors: list[str]) -> None:
         _validate_korean_strings(rules, errors, f"implementation_contract:{dimension}")
     preserved = value.get("preserved_behaviors")
     _error(errors, _strings(preserved), "MISSING_PRESERVED_BEHAVIORS")
-    _validate_korean_strings(preserved, errors, "implementation_contract:preserved_behaviors")
+    if isinstance(preserved, list):
+        for index, behavior in enumerate(preserved):
+            if not _contract_change_marker(behavior):
+                _validate_korean(
+                    behavior,
+                    errors,
+                    f"implementation_contract:preserved_behaviors:{index}",
+                )
 
 
 def _validate_context(value: Any, errors: list[str]) -> None:
@@ -287,6 +300,65 @@ def _validate_acceptance(value: Any, errors: list[str]) -> set[str]:
         for field in ("requirement_ids", "observable_ids"):
             _error(errors, _strings(entry.get(field)), f"MISSING_ACCEPTANCE_{field.upper()}:{label}")
     return identifiers
+
+
+def _validate_artifact_closure(card: dict[str, Any], errors: list[str]) -> None:
+    acceptance = card.get("acceptance")
+    context = card.get("context")
+    if not isinstance(acceptance, list) or not isinstance(context, dict):
+        return
+    entry_points = context.get("entry_points")
+    if not isinstance(entry_points, list):
+        return
+
+    artifacts: list[tuple[str, str]] = []
+    for entry in entry_points:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        symbol = entry.get("symbol")
+        if isinstance(path, str) and isinstance(symbol, str):
+            artifacts.append((path.replace("\\", "/").lower(), symbol.lower()))
+
+    for entry in acceptance:
+        if not isinstance(entry, dict):
+            continue
+        identifier = entry.get("id")
+        criterion = entry.get("criterion")
+        if not isinstance(identifier, str) or not isinstance(criterion, str):
+            continue
+        normalized = criterion.lower()
+        if not (
+            "presentation dto" in normalized
+            and "application command/result" in normalized
+            and "분리" in normalized
+        ):
+            continue
+        required = {
+            "application-request": lambda path, symbol: "/application/dto/" in path
+            and ("request" in path or "request" in symbol),
+            "presentation-request": lambda path, symbol: "/presentation/dto/" in path
+            and ("request" in path or "request" in symbol),
+            "application-command": lambda path, symbol: "/application/command/" in path
+            and ("command" in path or "command" in symbol),
+            "application-response": lambda path, symbol: "/application/dto/" in path
+            and ("response" in path or "response" in symbol),
+            "presentation-response": lambda path, symbol: "/presentation/dto/" in path
+            and ("response" in path or "response" in symbol),
+            "application-result": lambda path, symbol: "/application/result/" in path
+            and ("result" in path or "result" in symbol),
+        }
+        missing = [
+            label
+            for label, predicate in required.items()
+            if not any(predicate(path, symbol) for path, symbol in artifacts)
+        ]
+        if missing:
+            errors.append(
+                f"INCOMPLETE_HTTP_DTO_RESULT_BOUNDARY:{identifier}:{','.join(missing)}"
+            )
+        if any("/application/response/" in path for path, _symbol in artifacts):
+            errors.append(f"AMBIGUOUS_APPLICATION_OUTPUT_BOUNDARY:{identifier}")
 
 
 def _validate_verification(value: Any, acceptance_ids: set[str], errors: list[str]) -> None:
@@ -383,6 +455,7 @@ def validate(card: Any) -> list[str]:
     _validate_implementation_contract(card.get("implementation_contract"), errors)
     _validate_context(card.get("context"), errors)
     acceptance_ids = _validate_acceptance(card.get("acceptance"), errors)
+    _validate_artifact_closure(card, errors)
     _validate_verification(card.get("verification"), acceptance_ids, errors)
     return errors
 

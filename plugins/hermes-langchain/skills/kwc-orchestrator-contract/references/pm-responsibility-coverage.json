@@ -27,10 +27,16 @@
       "situations": ["triage-authoring"]
     },
     {
-      "id": "task-graph-and-review-authoring",
+      "id": "task-graph-authoring",
       "source": ["skills/build-task-graph"],
       "kwc_owner": "kwc-build-task-graph",
-      "situations": ["impl-authoring", "review-authoring"]
+      "situations": ["impl-authoring"]
+    },
+    {
+      "id": "review-authoring-runtime",
+      "source": ["skills/build-task-graph", "skills/kwc-review-authoring-runtime"],
+      "kwc_owner": "kwc-review-authoring-runtime",
+      "situations": ["review-authoring"]
     },
     {
       "id": "workflow-checkpoint-and-finalization",
@@ -91,6 +97,7 @@
   },
   "operational_assets": [
     "kwc-create-triage/scripts/triage.py",
+    "kwc-review-authoring-runtime/SKILL.md",
     "kwc-create-triage/tests/test_triage.py",
     "kwc-build-task-graph/scripts/build_task_graph.py",
     "kwc-build-task-graph/scripts/contract_common.py",

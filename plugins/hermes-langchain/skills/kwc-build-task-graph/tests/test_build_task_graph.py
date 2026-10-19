@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = SKILL_DIR.parents[1]
 CREATE_TRIAGE_DIR = SKILL_DIR.parents[0] / "kwc-create-triage"
 CREATE_TRIAGE_SCRIPTS = CREATE_TRIAGE_DIR / "scripts"
 CREATE_TRIAGE_TESTS = CREATE_TRIAGE_DIR / "tests"
@@ -18,6 +19,7 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 sys.path.insert(0, str(SKILL_DIR / "tests"))
 sys.path.insert(0, str(CREATE_TRIAGE_SCRIPTS))
 sys.path.insert(0, str(CREATE_TRIAGE_TESTS))
+sys.path.insert(0, str(PLUGIN_ROOT / "src"))
 import build_task_graph as task_graph  # noqa: E402
 import review_fast_path as review_fast  # noqa: E402
 import triage as triage_contract  # noqa: E402
@@ -44,6 +46,13 @@ from graph_contract import (  # noqa: E402
     validate_review_graph,
 )
 from native_e2e import bind_frozen_triage_digest  # noqa: E402
+from hermes_langchain.authoring.graph.implementation_batch import (  # noqa: E402
+    apply_impl_completions as core_apply_impl_completions,
+    validate_impl_batch as core_validate_impl_batch,
+)
+from hermes_langchain.authoring.graph.implementation_card_v5 import (  # noqa: E402
+    validate as core_validate_card,
+)
 
 
 class BackendImplementationCardContractTest(unittest.TestCase):
@@ -70,6 +79,17 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         self.assertIn("dependency-audit.json", contract)
         self.assertIn("parent가 만드는 exact artifact", contract)
         self.assertIn('`source.kind`는 정확히 `repository`', contract)
+
+    def test_skill_requires_exact_artifact_closure_for_each_impl_acceptance(self):
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        contract = (SKILL_DIR / "references" / "implementation-card-contract.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("acceptance별 exact artifact closure", skill)
+        self.assertIn("planned target path와 symbol", skill)
+        self.assertIn("generic `command/result`", skill)
+        self.assertIn("생성·이동·삭제할 exact path와 symbol", contract)
 
     def test_skill_has_bounded_impl_body_only_fast_path(self):
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -212,6 +232,11 @@ class BackendImplementationCardContractTest(unittest.TestCase):
     def test_create_impl_batch_native_uses_bounded_calls_and_rolls_back_failure(self):
         source_triage = self.valid_frozen_triage()
         body = self.valid_card()
+        body["slice"]["id"] = source_triage["implementation_slices"][0]["id"]
+        source_acceptance = source_triage["implementation_slices"][0]["acceptance"][0]
+        body["acceptance"][0]["id"] = source_acceptance["id"]
+        body["verification"][0]["id"] = source_acceptance["verification_ids"][0]
+        body["verification"][0]["acceptance_ids"] = [source_acceptance["id"]]
         body["issue"] = {
             "number": 151,
             "url": source_triage["issue"]["url"],
@@ -381,6 +406,146 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                     )
             run.assert_not_called()
 
+    def test_create_impl_batch_native_rejects_incomplete_triage_slice_closure(self):
+        source_triage = self.valid_frozen_triage()
+        source_slice_id = source_triage["implementation_slices"][0]["id"]
+        body = self.valid_card()
+        body["issue"] = {
+            "number": 151,
+            "url": source_triage["issue"]["url"],
+        }
+        body["triage_digest"] = source_triage["frozen_digest"]
+        body["slice"]["id"] = "SLICE-NOT-FROM-TRIAGE"
+        batch = {
+            "issue": 151,
+            "generation": 1,
+            "cards": [
+                {
+                    "ordinal": 1,
+                    "title": "G1-Issue151-Impl1",
+                    "priority": 1,
+                    "body": body,
+                    "contract_changes": [],
+                    "required_contract_symbols": [],
+                    "parent_ids": ["t_triage"],
+                }
+            ],
+            "dependency_audit": {"edges": []},
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve()
+            body_dir = workspace / ".temp/task-graphs/151/bodies"
+            body_dir.mkdir(parents=True)
+            (body_dir / "impl-1.json").write_text(
+                json.dumps(body, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            triage_envelope = {
+                "task": {
+                    "id": "t_triage",
+                    "status": "triage",
+                    "workspace_kind": "dir",
+                    "workspace_path": workspace.as_posix(),
+                    "body": json.dumps(source_triage, ensure_ascii=False),
+                }
+            }
+            triage = subprocess.CompletedProcess(
+                [], 0, stdout=json.dumps(triage_envelope), stderr=""
+            )
+
+            with patch.object(task_graph.Path, "cwd", return_value=workspace), patch.object(
+                task_graph.subprocess,
+                "run",
+                side_effect=[triage],
+            ) as run:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"IMPL_SLICE_CLOSURE_MISMATCH:missing={source_slice_id}:"
+                    "unexpected=SLICE-NOT-FROM-TRIAGE",
+                ):
+                    create_impl_batch_native(
+                        batch,
+                        profile="project-manager",
+                        board="board",
+                        triage_id="t_triage",
+                        body_dir=body_dir,
+                        workspace_path=workspace,
+                    )
+            self.assertEqual(1, run.call_count)
+
+    def test_create_impl_batch_native_rejects_incomplete_triage_verification_closure(self):
+        source_triage = self.valid_frozen_triage()
+        source_slice = source_triage["implementation_slices"][0]
+        source_acceptance = source_slice["acceptance"][0]
+        body = self.valid_card()
+        body["slice"]["id"] = source_slice["id"]
+        body["acceptance"][0]["id"] = source_acceptance["id"]
+        body["verification"][0]["id"] = "VERIFY-NOT-FROM-TRIAGE"
+        body["verification"][0]["acceptance_ids"] = [source_acceptance["id"]]
+        body["issue"] = {
+            "number": 151,
+            "url": source_triage["issue"]["url"],
+        }
+        body["triage_digest"] = source_triage["frozen_digest"]
+        batch = {
+            "issue": 151,
+            "generation": 1,
+            "cards": [
+                {
+                    "ordinal": 1,
+                    "title": "G1-Issue151-Impl1",
+                    "priority": 1,
+                    "body": body,
+                    "contract_changes": [],
+                    "required_contract_symbols": [],
+                    "parent_ids": ["t_triage"],
+                }
+            ],
+            "dependency_audit": {"edges": []},
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve()
+            body_dir = workspace / ".temp/task-graphs/151/bodies"
+            body_dir.mkdir(parents=True)
+            (body_dir / "impl-1.json").write_text(
+                json.dumps(body, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            triage_envelope = {
+                "task": {
+                    "id": "t_triage",
+                    "status": "triage",
+                    "workspace_kind": "dir",
+                    "workspace_path": workspace.as_posix(),
+                    "body": json.dumps(source_triage, ensure_ascii=False),
+                }
+            }
+            triage = subprocess.CompletedProcess(
+                [], 0, stdout=json.dumps(triage_envelope), stderr=""
+            )
+
+            with patch.object(task_graph.Path, "cwd", return_value=workspace), patch.object(
+                task_graph.subprocess,
+                "run",
+                side_effect=[triage],
+            ) as run:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "IMPL_VERIFICATION_CLOSURE_MISMATCH:SLICE-001:"
+                    "missing=VERIFY-001:unexpected=VERIFY-NOT-FROM-TRIAGE",
+                ):
+                    create_impl_batch_native(
+                        batch,
+                        profile="project-manager",
+                        board="board",
+                        triage_id="t_triage",
+                        body_dir=body_dir,
+                        workspace_path=workspace,
+                    )
+            self.assertEqual(1, run.call_count)
+
     def test_impl_batch_template_prefills_frozen_triage_facts_and_wrapper(self):
         triage = {
             "schema": "triage-v7",
@@ -422,6 +587,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                             "verification_ids": ["VERIFY-001"],
                         }
                     ],
+                    "contract_change_ids": ["CONTRACT-001"],
                     "depends_on": [],
                 }
             ],
@@ -464,6 +630,14 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         )
         self.assertEqual("", batch["cards"][0]["body"]["verification"][0]["test_level"])
         self.assertEqual([], batch["cards"][0]["body"]["verification"][0]["tests"])
+        self.assertEqual(["VERIFY-001"], batch["cards"][0]["required_verification_ids"])
+        incomplete_verification = copy.deepcopy(batch)
+        incomplete_verification["cards"][0]["body"]["verification"] = []
+        self.assertIn(
+            "IMPL_REQUIRED_VERIFICATION_IDS_MISMATCH:0:missing=VERIFY-001:"
+            "unexpected=-:duplicates=-",
+            validate_impl_batch(incomplete_verification),
+        )
         self.assertEqual(
             ["requireCurrentOffer(UUID)"], batch["cards"][0]["required_contract_symbols"]
         )
@@ -629,6 +803,194 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         )
 
         self.assertEqual(1, len(merged["cards"][0]["body"]["context"]["entry_points"]))
+
+    def test_apply_impl_completions_resolves_unknown_entry_point_by_path(self):
+        body = self.valid_card()
+        batch = {
+            "issue": 138,
+            "generation": 1,
+            "cards": [{
+                "ordinal": 1,
+                "title": "G1-Issue138-Impl1",
+                "priority": 1,
+                "body": body,
+                "contract_changes": [],
+                "required_contract_symbols": [],
+                "parent_ids": ["t_triage"],
+                "depends_on_ordinals": [],
+            }],
+            "dependency_audit": {"edges": []},
+        }
+        expected = batch["cards"][0]["body"]["context"]["entry_points"][0]
+        expected["symbol"] = "unknown"
+        authored_symbol = "Cart#changeQuantity"
+        verification = [
+            {
+                "id": item["id"],
+                "test_level": "unit",
+                "tests": ["example.CartTest#changeQuantity"],
+                "scenarios": list(item["scenarios"]),
+            }
+            for item in batch["cards"][0]["body"]["verification"]
+        ]
+        completions = {
+            "cards": [
+                {
+                    "ordinal": 1,
+                    "implementation_contract": self.valid_card()["implementation_contract"],
+                    "entry_points": [
+                        {
+                            "path": expected["path"],
+                            "symbol": authored_symbol,
+                            "reason": "확인된 구현 진입점",
+                        }
+                    ],
+                    "verification": verification,
+                }
+            ]
+        }
+
+        for merge in (apply_impl_completions, core_apply_impl_completions):
+            with self.subTest(merge=merge.__module__):
+                merged = merge(batch, completions)
+                symbols = [
+                    item["symbol"]
+                    for item in merged["cards"][0]["body"]["context"]["entry_points"]
+                ]
+                self.assertEqual([authored_symbol], symbols)
+
+    def test_apply_impl_completions_rejects_unresolved_unknown_entry_point(self):
+        body = self.valid_card()
+        batch = {
+            "issue": 138,
+            "generation": 1,
+            "cards": [{
+                "ordinal": 1,
+                "title": "G1-Issue138-Impl1",
+                "priority": 1,
+                "body": body,
+                "contract_changes": [],
+                "required_contract_symbols": [],
+                "parent_ids": ["t_triage"],
+                "depends_on_ordinals": [],
+            }],
+            "dependency_audit": {"edges": []},
+        }
+        batch["cards"][0]["body"]["context"]["entry_points"][0]["symbol"] = "unknown"
+        verification = [
+            {
+                "id": item["id"],
+                "test_level": "unit",
+                "tests": ["example.CartTest#changeQuantity"],
+                "scenarios": list(item["scenarios"]),
+            }
+            for item in batch["cards"][0]["body"]["verification"]
+        ]
+        completions = {
+            "cards": [
+                {
+                    "ordinal": 1,
+                    "implementation_contract": self.valid_card()["implementation_contract"],
+                    "entry_points": [],
+                    "verification": verification,
+                }
+            ]
+        }
+
+        for merge in (apply_impl_completions, core_apply_impl_completions):
+            with self.subTest(merge=merge.__module__):
+                with self.assertRaisesRegex(
+                    ValueError, "UNRESOLVED_IMPL_ENTRY_POINT_SYMBOL:1"
+                ):
+                    merge(batch, completions)
+
+    def test_impl_dependency_requires_semantic_proof_in_core_and_bundled_validator(self):
+        first = self.valid_card()
+        second = copy.deepcopy(first)
+        second["slice"]["id"] = "slice-product-create-consumer"
+        batch = {
+            "issue": 138,
+            "generation": 1,
+            "cards": [
+                {
+                    "ordinal": 1,
+                    "title": "G1-Issue138-Impl1",
+                    "priority": 2,
+                    "body": first,
+                    "contract_changes": [],
+                    "required_contract_symbols": [],
+                    "parent_ids": ["t_triage"],
+                    "depends_on_ordinals": [],
+                },
+                {
+                    "ordinal": 2,
+                    "title": "G1-Issue138-Impl2",
+                    "priority": 1,
+                    "body": second,
+                    "contract_changes": [],
+                    "required_contract_symbols": [],
+                    "parent_ids": ["t_triage"],
+                    "depends_on_ordinals": [1],
+                },
+            ],
+            "dependency_audit": {
+                "edges": [{"from_ordinal": 1, "to_ordinal": 2}]
+            },
+        }
+
+        for validator in (validate_impl_batch, core_validate_impl_batch):
+            with self.subTest(validator=validator.__module__):
+                self.assertIn(
+                    "IMPL_DEPENDENCY_PROOF_INCOMPLETE:1:2",
+                    validator(batch),
+                )
+
+    def test_impl_dependency_accepts_complete_proof_in_core_and_bundled_validator(self):
+        first = self.valid_card()
+        second = copy.deepcopy(first)
+        second["slice"]["id"] = "slice-product-create-consumer"
+        batch = {
+            "issue": 138,
+            "generation": 1,
+            "cards": [
+                {
+                    "ordinal": ordinal,
+                    "title": f"G1-Issue138-Impl{ordinal}",
+                    "priority": 3 - ordinal,
+                    "body": body,
+                    "contract_changes": [],
+                    "required_contract_symbols": [],
+                    "parent_ids": ["t_triage"],
+                    "depends_on_ordinals": [] if ordinal == 1 else [1],
+                }
+                for ordinal, body in ((1, first), (2, second))
+            ],
+            "dependency_audit": {
+                "edges": [
+                    {
+                        "from_ordinal": 1,
+                        "to_ordinal": 2,
+                        "required_artifact": "ProductController#create",
+                        "consumer_entry_point": "ProductController#create",
+                        "why_baseline_cannot_satisfy": (
+                            "두 번째 slice는 첫 번째 slice가 생성하는 공개 경계를 직접 소비한다."
+                        ),
+                    }
+                ]
+            },
+        }
+
+        dependency_error_prefixes = (
+            "IMPL_DEPENDENCY_",
+            "INVALID_IMPL_DEPENDENCY",
+        )
+        for validator in (validate_impl_batch, core_validate_impl_batch):
+            with self.subTest(validator=validator.__module__):
+                errors = validator(batch)
+                self.assertFalse(
+                    [error for error in errors if error.startswith(dependency_error_prefixes)],
+                    errors,
+                )
 
     def test_prepare_impl_fast_path_validates_and_materializes_once(self):
         triage = self.valid_frozen_triage()
@@ -815,6 +1177,115 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_valid_backend_implementation_card_passes(self):
         self.assertEqual([], validate(self.valid_card()))
+
+    def test_contract_change_marker_may_preserve_source_language(self):
+        card = self.valid_card()
+        card["implementation_contract"]["preserved_behaviors"].append(
+            "CC-151-OFFER-QUERY-SEAM: Move the Cart Offer capability contract to the policy-owning inner layer."
+        )
+
+        for validator in (validate, core_validate_card):
+            with self.subTest(validator=validator.__module__):
+                self.assertNotIn(
+                    "DESCRIPTION_NOT_KOREAN:implementation_contract:preserved_behaviors:1",
+                    validator(card),
+                )
+
+    def test_lowercase_contract_change_marker_may_preserve_source_language(self):
+        card = self.valid_card()
+        card["implementation_contract"]["preserved_behaviors"].append(
+            "cc-151-offer-error: The producer-owned OFFER-001 error remains the single public contract."
+        )
+
+        for validator in (validate, core_validate_card):
+            with self.subTest(validator=validator.__module__):
+                self.assertNotIn(
+                    "DESCRIPTION_NOT_KOREAN:implementation_contract:preserved_behaviors:1",
+                    validator(card),
+                )
+
+    def test_http_dto_boundary_requires_request_and_response_artifact_closure(self):
+        card = self.valid_card()
+        card["acceptance"] = [
+            {
+                "id": "ACC-HTTP-DTO",
+                "criterion": (
+                    "Cart presentation DTO와 transport-neutral application command/result가 "
+                    "분리된다."
+                ),
+                "requirement_ids": ["CR-HTTP-DTO"],
+                "observable_ids": ["OBS-HTTP"],
+            }
+        ]
+        card["verification"][0]["acceptance_ids"] = ["ACC-HTTP-DTO"]
+        card["context"]["entry_points"] = [
+            {
+                "path": "src/main/java/example/application/dto/AddItemRequest.java",
+                "symbol": "AddItemRequest",
+                "reason": "ACC-HTTP-DTO의 현재 HTTP request DTO다.",
+            },
+            {
+                "path": "src/main/java/example/presentation/dto/AddItemRequest.java",
+                "symbol": "AddItemRequest",
+                "reason": "ACC-HTTP-DTO의 planned presentation request DTO다.",
+            },
+            {
+                "path": "src/main/java/example/application/command/AddItemCommand.java",
+                "symbol": "AddItemCommand",
+                "reason": "ACC-HTTP-DTO의 planned application command다.",
+            },
+            {
+                "path": "src/main/java/example/application/result/CartResult.java",
+                "symbol": "CartResult",
+                "reason": "ACC-HTTP-DTO의 planned application result다.",
+            },
+        ]
+
+        for validator in (validate, core_validate_card):
+            with self.subTest(validator=validator.__module__):
+                self.assertIn(
+                    "INCOMPLETE_HTTP_DTO_RESULT_BOUNDARY:ACC-HTTP-DTO:"
+                    "application-response,presentation-response",
+                    validator(card),
+                )
+
+        card["context"]["entry_points"].extend(
+            [
+                {
+                    "path": "src/main/java/example/application/dto/CartResponse.java",
+                    "symbol": "CartResponse",
+                    "reason": "ACC-HTTP-DTO의 현재 HTTP response DTO다.",
+                },
+                {
+                    "path": "src/main/java/example/presentation/dto/CartResponse.java",
+                    "symbol": "CartResponse",
+                    "reason": "ACC-HTTP-DTO의 planned presentation response DTO다.",
+                },
+            ]
+        )
+
+        for validator in (validate, core_validate_card):
+            with self.subTest(validator=validator.__module__):
+                self.assertFalse(
+                    any(
+                        error.startswith("INCOMPLETE_HTTP_DTO_RESULT_BOUNDARY:")
+                        for error in validator(card)
+                    )
+                )
+
+        card["context"]["entry_points"].append(
+            {
+                "path": "src/main/java/example/application/response/CartResponse.java",
+                "symbol": "CartResponse",
+                "reason": "ACC-HTTP-DTO의 result와 중복되는 planned application response다.",
+            }
+        )
+        for validator in (validate, core_validate_card):
+            with self.subTest(validator=validator.__module__):
+                self.assertIn(
+                    "AMBIGUOUS_APPLICATION_OUTPUT_BOUNDARY:ACC-HTTP-DTO",
+                    validator(card),
+                )
 
     def test_missing_required_sections_fail(self):
         errors = validate(self.invalid_card())

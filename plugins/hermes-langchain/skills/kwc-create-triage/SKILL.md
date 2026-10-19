@@ -281,6 +281,10 @@ out-of-scope 중 하나로 닫혀야 한다. 특히 하나의 scope가 HTTP bind
   query absence와 module-boundary 의미를 row 수를 줄이기 위해 하나로 묶지 않는다. 서로 다른 test family가
   필요하거나 독립적으로 깨질 수 있으면 별도 observable로 유지한다. Trigger 또는 module owner가 다르면
   같은 lifecycle 문장에 있더라도 별도 observable로 나눈다.
+  Cross-module capability가 정상 조회 fact/projection과 error ownership을 함께 제공하면 별도 observable로
+  나눈다. Change requirement 또는 source claim이 가격·판매 상태·재고·구매 제한 중 둘 이상을 이름 붙이면
+  같은 fact들을 모두 명시하는 전용 정상 조회 observable을 만들고 Cart invariant나 error code 보존에
+  흡수하지 않는다.
 - `verification_matrix`: preserved observable마다 **정확히 한 row**로 기존 coverage와 남은 검증을 분리한다.
   하나의 observable에 현재 test와 새 contract/structure 검증처럼 여러 확인 축이 있어도 row를 나누지 말고,
   같은 row의 `evidence`와 `required_verification`에 합친다. 동일 `observable_id`를 가진 두 번째
@@ -300,12 +304,15 @@ Authoring 파일에는 intake에서 이미 확정한 identity, baseline, `intent
 `frozen_digest`, `handoff` 전체를 반복하지 않는다. top-level key는 `intake_amendments`, `confirmed_gaps`, `target_dispositions`,
 `implementation_slices`, `verification_matrix`, `contract_changes`, `document_impacts`, `open_decisions` 정확히
 여덟 개다. `intake_amendments`는 `requirement_locators`, `current_state_locators`, `intent_entries`,
-`investigation_targets` 정확히 네 field를 가지며, 변경이 없으면 각 값을 빈 list로 둔다. Source 확인 뒤 intake
-문구를 정밀화해야 하면 locator list는 최종 전체 list로 교체하고, `intent_entries`는
-`section + id + changes`, `investigation_targets`는 `id + changes`로 해당 stable ID만 수정한다. 전체 `intent`나
-target list를 다시 쓰지 않는다. `compose-analysis`가 검증된 `intake.json`을 재사용하고 amendment를 적용한 뒤
-phase·handoff를 결정론적으로 설정해 canonical `analysis.json`을 만든다. 따라서 본문 내용은 줄이지 않으면서
-중복 authoring output만 제거한다.
+`investigation_targets` 정확히 네 field를 가지며, 변경이 없으면 각 값을 빈 list로 둔다. Source 확인 뒤 locator
+list는 최종 전체 list로 교체할 수 있고, `intent_entries`는 `section + id + changes`로 해당 stable ID의
+`source`만 정정한다. Analysis에서는 change requirement outcome, preserved observable behavior와 quality gate
+의미를 수정하지 않는다. Intake가 독립 책임을 합쳤거나 요구사항을 빠뜨렸다면 짧은 amendment로 덮어쓰지 않고
+현재 attempt를 block하여 새 intake에서 원자적으로 다시 작성한다. `investigation_targets`는 `id + changes`로
+해당 stable ID만 수정하며 전체 `intent`나
+target list를 다시 쓰지 않는다. `compose-analysis`가 검증된
+`intake.json`을 재사용하고 amendment를 적용한 뒤 phase·handoff를 결정론적으로 설정해
+canonical `analysis.json`을 만든다. 따라서 본문 내용을 줄이지 않으면서 중복 authoring output만 제거한다.
 
 필드나 collection을 하나씩 추가하는 incremental patch를 금지한다. 첫 `compose-analysis` 결과와 아래 semantic
 audit 결과를 같은 correction batch로 수집한다. 둘 중 하나라도 실패하면
@@ -337,7 +344,8 @@ CLI 인자 길이의 제약을 받지 않는다. 카드가 커서 mutation이 �
 - scope와 explicit out-of-scope
 - requirement와 preserved observable을 연결한 acceptance
 - acceptance마다 verification ID
-- 실제 slice ID만 사용하는 dependency
+- `depends_on`은 항상 빈 배열. Triage는 독립 outcome만 고정하고 semantic dependency와 실행 topology는
+  `build-task-graph`의 dependency audit가 소유한다.
 
 서로 다른 책임을 하나의 slice에 섞지 않는다. 예외 class 제거와 cross-domain port 재설계처럼 검증
 범위가 다르면 분리한다.
@@ -402,7 +410,11 @@ Semantic audit은 required/preserved contract가 본문에 **명시적으로 존
   닫혔는가? 넓은 requirement 문구만 있고 하위 책임 하나가 사라지지 않았는가?
 - preserved observable의 현재 동작을 일반 계층 규칙만으로 제거 대상 gap으로 뒤집지 않았는가?
 - preserved observable을 Decision option이 다시 열지 않는가?
-- evidence locator가 claim을 직접 지지하는가?
+Evidence locator가 claim을 직접 지지하는가?
+같은 verification row에서 같은 evidence locator를 두 번 사용하거나 같은 path#symbol·path#test-class를
+서로 다른 claim으로 반복하지 않았는가? 같은 규칙을 confirmed gap·contract change·document impact·Decision의
+evidence/rules 목록에도 적용했는가? 한 locator가 여러 사실을 지지하면 claim 하나로 합쳤는가?
+다른 confirmed locator의 claim을 옮겨 적지 않았는가?
 - 모든 verification row의 `production_seam`이 observable을 실제 실행하는 caller/owner인가? Provider·DTO·test만
   존재하거나 다른 module 소유 behavior를 local test-only slice로 바꾸지 않았는가?
 - `covered`가 실제 assertion 범위를 과장하지 않는가?

@@ -280,49 +280,56 @@ def _schedule_comment_delivery(*args: Any, **kwargs: Any) -> Any:
     return _tool_handlers._schedule_comment_delivery(_host(), *args, **kwargs)
 
 
-def _kwc_comment_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_comment_tool(_host(), *args, **kwargs)
+def _kwc_comment_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._kwc_comment_tool(_host(), arguments)
 
 
-def _kwc_reply_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_reply_tool(_host(), *args, **kwargs)
+def _kwc_reply_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._kwc_reply_tool(_host(), arguments)
 
 
-def _kwc_pm_response_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_pm_response_tool(_host(), *args, **kwargs)
+def _kwc_pm_response_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._kwc_pm_response_tool(_host(), arguments)
 
 
-def _kwc_profile_response_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_profile_response_tool(_host(), *args, **kwargs)
+def _kwc_profile_response_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._kwc_profile_response_tool(_host(), arguments)
 
 
-def _kwc_authoring_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_authoring_tool(_host(), *args, **kwargs)
+def _kwc_authoring_tool(phase: str, arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._kwc_authoring_tool(_host(), phase, arguments)
 
 
-def _kwc_advance_triage_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_advance_triage_tool(_host(), *args, **kwargs)
+def _kwc_advance_triage_tool(
+    arguments: dict[str, Any],
+    task_id: str | None = None,
+) -> Any:
+    del task_id
+    return _tool_handlers._kwc_advance_triage_tool(_host(), arguments)
 
 
-def _kwc_recover_frozen_triage_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._kwc_recover_frozen_triage_tool(_host(), *args, **kwargs)
+def _kwc_recover_frozen_triage_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._kwc_recover_frozen_triage_tool(_host(), arguments)
 
 
-def _authoring_handler(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._authoring_handler(_host(), *args, **kwargs)
+def _authoring_handler(phase: str) -> Any:
+    return _tool_handlers._authoring_handler(_host(), phase)
 
 
 def _event_hint_callback(*args: Any, **kwargs: Any) -> Any:
     return _tool_handlers._event_hint_callback(_host(), *args, **kwargs)
 
 
-def _hermes_langchain_route_tool(*args: Any, **kwargs: Any) -> Any:
-    return _tool_handlers._hermes_langchain_route_tool(_host(), *args, **kwargs)
+def _hermes_langchain_route_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_route_tool(_host(), arguments)
 
 
 _KWC_SKILL_NAMES = (
     "kwc-orchestrator-contract",
     "kwc-create-triage",
+    "kwc-triage-authoring-runtime",
+    "kwc-impl-authoring-runtime",
+    "kwc-review-authoring-runtime",
     "kwc-build-task-graph",
     "kwc-run-workflow",
     "kwc-service-planning",

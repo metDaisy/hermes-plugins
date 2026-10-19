@@ -82,13 +82,13 @@
         "evidence": [
           {
             "locator": "src/main/java/io/github/metdaisy/amaazon/cart/application/service/CartService.java#changeQuantity",
-            "claim": "Service mutates an item directly."
+            "claim": "CartService가 CartItem 상태를 직접 변경한다."
           }
         ],
         "rules": [
           {
             "locator": "docs/backend-development-guide.md#Application-구현-규칙",
-            "claim": "Application calls aggregate behavior."
+            "claim": "Application은 aggregate의 이름 있는 behavior를 호출한다."
           }
         ],
         "requirement_ids": [

@@ -21,6 +21,47 @@ class _Process:
 
 
 class AuthoringLauncherTests(unittest.TestCase):
+    def test_review_prompt_requires_prefill_contract_and_exact_enums(self) -> None:
+        captured = {}
+
+        def popen(command, **kwargs):
+            captured["command"] = command
+            return _Process()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            LAUNCHER.launch_assignment(
+                assignment={
+                    "schema": "kwc-assignment-v1",
+                    "assignment_id": "kwa_review",
+                    "board": "issue-151",
+                    "issue_number": 151,
+                    "generation": 8,
+                    "phase": "review",
+                    "allowed_tools": ["kwc_create_review"],
+                    "next_action": "kwc_create_review",
+                    "artifact_file": ".temp/task-graphs/151/review-body.json",
+                    "sources": {
+                        "triage_id": "t_triage",
+                        "impl_ids": ["t_impl"],
+                        "review_id": None,
+                        "summary_id": None,
+                    },
+                },
+                workspace=workspace,
+                state_path=workspace / "state.db",
+                profile="project-manager",
+                host_profile="main",
+                hermes_executable="C:/Hermes/hermes.exe",
+                popen_fn=popen,
+            )
+
+        prompt = captured["command"][captured["command"].index("-q") + 1]
+        self.assertIn("prepare-review-fast-path", prompt)
+        self.assertIn("review_body_template", prompt)
+        self.assertIn("behavior | implementation-convention | cross-card-seam | test-quality | preservation", prompt)
+        self.assertIn("issue/card_type/generation/review_card_key", prompt)
+
     def test_rejects_assignment_when_langgraph_route_is_not_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -95,7 +136,7 @@ class AuthoringLauncherTests(unittest.TestCase):
         self.assertIn("--toolsets", command)
         self.assertIn("--skills", command)
         self.assertEqual(
-            "hermes-langchain:kwc-orchestrator-contract,hermes-langchain:kwc-create-triage",
+            "hermes-langchain:kwc-orchestrator-contract,hermes-langchain:kwc-triage-authoring-runtime",
             command[command.index("--skills") + 1],
         )
         toolsets = command[command.index("--toolsets") + 1].split(",")

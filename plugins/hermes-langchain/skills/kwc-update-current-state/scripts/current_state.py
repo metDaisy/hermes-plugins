@@ -49,6 +49,21 @@ def lines(value: str) -> list[str]:
     return [line.strip() for line in value.splitlines() if line.strip()]
 
 
+def parse_dirty_paths(status_output: str) -> list[str]:
+    """Parse porcelain paths without stripping the status prefix first."""
+    paths: list[str] = []
+    for raw_line in status_output.splitlines():
+        if not raw_line.strip():
+            continue
+        path = raw_line[3:] if len(raw_line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
 def parse_document(document: Path) -> tuple[str | None, list[str], dict[str, str]]:
     text = document.read_text(encoding="utf-8")
     match = SNAPSHOT_PATTERN.search(text)
@@ -150,12 +165,7 @@ def inspect(repo: Path, document: Path) -> dict[str, object]:
     if status.returncode != 0:
         errors.append("WORKTREE_STATUS_UNAVAILABLE")
         return result
-    dirty_paths = []
-    for line in lines(status.stdout):
-        path = line[3:] if len(line) > 3 else line
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        dirty_paths.append(path)
+    dirty_paths = parse_dirty_paths(status.stdout)
     result["dirty_paths"] = dirty_paths
     result["worktree_clean"] = not dirty_paths
 

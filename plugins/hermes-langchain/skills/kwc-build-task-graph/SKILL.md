@@ -91,6 +91,18 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    이미 Triage가 고정한 제품 의미를 다시 검증하려고 production source를 읽거나, 같은 의미를 다른 검색어로
    반복하거나, module file listing으로 되돌아가지 않는다. Verification마다 required behavior를 판정하는
    최소 1~3개의 decisive selector와 1~3개의 scenario만 남기며 발견한 test를 전부 나열하지 않는다.
+   Completion을 쓰기 전에 acceptance별 exact artifact closure를 만든다. 각 acceptance가 수정하는 현재 seam뿐
+   아니라 생성·이동·이름 변경·삭제할 type/method/DTO/exception의 exact current 또는 planned target path와 symbol을
+   `entry_points`에 포함한다. `reason`은 해당 artifact가 어느 acceptance를 어떻게 충족하는지 밝힌다. 특히
+   generic `command/result`, `named behavior`, `inner layer로 이동`, `duplicate 제거` 문구만 남기지 않는다.
+   새 application DTO는 planned target path와 symbol, aggregate 위임은 새 named behavior symbol, port 이동은
+   source와 target path, duplicate 제거는 삭제할 consumer type과 사용할 producer type을 모두 적는다. Exact
+   HTTP DTO boundary는 request와 response를 독립적으로 닫는다. 기존 application request/response DTO,
+   planned presentation request/response DTO, planned application command/result를 모두 exact path와 symbol로
+   적고 한쪽 방향만 작성한 completion은 제출하지 않는다. Planned application output은
+   `application/result` 하나로 고정하고 별도 planned `application/response` DTO를 병행하지 않는다. 기존
+   application response DTO는 이동·제거 source이고 planned application result가 transport-neutral output
+   target이다. artifact를 확정할 수 없으면 vague card를 materialize하지 않고 `MCP_LOOKUP_REQUIRED`로 되돌린다.
 4. `prepare-impl-fast-path`가 Frozen Triage의 issue/digest, slice, acceptance, gap evidence, constraint,
    production seam, verification ID와 canonical wrapper를 이미
    `.temp/task-graphs/<issue>/impl-card-batch.json`에 채웠으므로 `impl-batch-template`을 별도로 실행하지 않는다.
@@ -105,20 +117,26 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    비어 있는 `implementation_contract`, prefilled seam 중 reason을 더 구체화할 항목과 새 symbol만 담은 `entry_points`, `test_level`, actual/new FQCN selector와 구체
    scenario만 ordinal별 `.temp/task-graphs/<issue>/impl-card-completions.json`에 한 번의 batched write로 작성한다.
    Compact completion의 closed shape는
-   `{"cards":[{"ordinal":<int>,"implementation_contract":<7-dimension object>,"entry_points":[{"path":<path>,"symbol":<symbol>,"reason":<reason>}],"verification":[{"id":<prefilled VERIFY id>,"test_level":<level>,"tests":[<FQCN#method>],"scenarios":[<scenario>]}]}]}`다.
+   `{"cards":[{"ordinal":<int>,"implementation_contract":<7-dimension object>,"entry_points":[{"path":<path>,"symbol":<symbol>,"reason":<reason>}],"verification":[{"id":<prefilled VERIFY id>,"test_level":<level>,"tests":[<FQCN#method>],"scenarios":[<scenario>]}],"depends_on_ordinals":[<semantic parent ordinal>]}],"dependency_audit":{"edges":[<semantic proof>]}}`다.
    이 shape의 예시나 template을 찾으려고 installed Skill directory, references, tests 또는 stale artifact를
    `search_files`·`read_file`로 다시 조사하지 않는다.
    전체 batch를 다시 직렬화하는 custom Python fill script를 만들지 않는다. `apply-impl-completions`로 compact
    completions를 prefilled batch에 merge한 뒤 같은 `impl-card-batch.json`에 원자적으로 덮어쓴다. Helper는
    completions에서 생략한 prefilled entry point를 자동 보존하고 exact matching path/symbol만 authored reason으로
-   교체하며 여러 verification row가 같은 path/symbol을 가리키면 entry point를 하나로 deduplicate한다.
+   교체하며 여러 verification row가 같은 path/symbol을 가리키면 entry point를 하나로 deduplicate한다. Prefill
+   symbol이 `unknown`이면 같은 path의 확인된 concrete symbol로 반드시 대체하며, merge 뒤 `unknown`·`unresolved`·
+   `todo`·`tbd` placeholder가 하나라도 남으면 native mutation 전에 실패한다.
    또한 ordinal·verification ID cardinality와 authored field allowlist를 검사해 immutable Triage
    fact의 재작성을 차단한다. Body-only graph에는 별도 behavior wrapper가 없으므로 각 slice acceptance의
    ordered `observable_ids`를 `behavior_ids`로 사용한다.
    `--output`은 helper가 허용하는 repo-relative `.temp/` path를
    사용하며 absolute path 실패를 먼저 시도하지 않는다. 새 attempt 시작 시 stale batch는 helper 실행 전에
    generated artifact로 제거하고 입력으로 읽거나 검색하지 않는다.
-   Batch에는 처음부터 object shape의 `dependency_audit: {"edges": []}`가 있으며, 각 body는 독립적으로
+   Batch에는 처음부터 object shape의 `dependency_audit: {"edges": []}`가 있다. Triage slice의 `depends_on`을
+   Impl dependency로 복사하지 않는다. 실제 semantic prerequisite가 확인된 경우에만 completion의
+   `depends_on_ordinals`와 `dependency_audit.edges[]`를 함께 작성하며 각 edge는 `from_ordinal`, `to_ordinal`,
+   `required_artifact`, `consumer_entry_point`, `why_baseline_cannot_satisfy`를 모두 가진다. Proof가 없으면
+   dependency를 만들지 않는다. 각 body는 독립적으로
    `backend-implementation-card-v5` validator를 통과해야 한다. 정확한 batch 검증 명령은
    `validate-impl-batch .temp/task-graphs/<issue>/impl-card-batch.json`이며 존재하지 않는 `--batch` option을
    시도하지 않는다. Wrapper title은 canonical graph naming을
@@ -134,6 +152,10 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    sequence로 수행하고 중간 실패 시 이번 호출에서 생성한 card를 archive한 뒤 active board read-back으로
    cleanup을 검증한다. Native create 출력이 malformed/ambiguous해도 baseline 이후 생긴 canonical Impl ID를
    회수해 rollback한다. Native create에는 `--workspace dir:<canonical-path>`를 사용하고
+   source Triage의 모든 `implementation_slices[].id`가 batch body에 정확히 한 번씩 존재하는지도 mutation 전에
+   검사한다. 각 slice의 acceptance ID와 그 acceptance가 요구하는 verification ID 합집합도 matching Impl
+   body에 정확히 보존해야 한다. 일부 slice만 담은 single-card/subset batch, 중복 slice batch, acceptance나
+   verification row를 생략한 batch는 phase 완료로 인정하지 않는다.
    지원하지 않는 `--status`를 전달하지 않는다. 각 create는 source Triage를 실제 parent로 포함하고 native
    default `todo`, `coder`, `workspace_kind=dir`, canonical `workspace_path`, priority와 `skills=[]`를
    read-back하며 결과를 `.temp/task-graphs/<issue>/native-readback.json`에 쓴다. `show --json` envelope에서는 card field를 top-level `task`에서, parent ID를
@@ -164,6 +186,13 @@ source row를 기계적으로 한 줄씩 복제하지 않는다. Validator는 co
 설명 밀도, 중복되지 않은 criterion/question/outcome, question 형식, guide exact heading, cross-card seam,
 test-quality, implementation-convention, inherited behavior preservation을 fail-closed로 검사한다. Review 전체의
 `guide_locators`에는 backend development guide, backend test guide, active plan locator가 각각 하나 이상 있어야 한다.
+`review-body.json`은 helper가 만든 `review_body_template`를 직접 수정하며 top-level에는 `schema`,
+`triage_digest`, `baseline_sha`, `behavior_ids`, `implementation_card_keys`, `acceptance`, `review_checks`,
+`scope_exclusions`만 둔다. `issue`, `card_type`, `generation`, `review_card_key`를 추가하지 않는다. Review check
+`focus`는 `behavior | implementation-convention | cross-card-seam | test-quality | preservation` 중 하나만 사용하고,
+guide heading은 prepared bundle의 exact `guide_locators` 값만 복사한다. 여기에 non-empty
+`.hermes/docs/plan.md#<active handoff>` locator를 최소 하나 포함한다. JSON 파일은 native helper가 canonical
+serialization으로 정규화하므로 의미 필드와 closure 작성에만 집중한다.
 
 작성 후 한 command가 current source fingerprint를 재검증하고, semantic validator를 통과한 exact body만 native
 create하며, 생성 card와 모든 source 불변성을 즉시 read-back한다.

@@ -14,6 +14,99 @@ CONTRACTS = load_module("runtime.fresh_agent_contract")
 
 
 class FreshAgentContractTests(unittest.TestCase):
+    def test_triage_authoring_uses_compact_stage_runtime_skill(self) -> None:
+        contract = CONTRACTS.build_contract(
+            situation="triage-authoring",
+            host_profile="main",
+            kanban_profile="project-manager",
+        )
+
+        self.assertEqual(
+            [
+                "hermes-langchain:kwc-orchestrator-contract",
+                "hermes-langchain:kwc-triage-authoring-runtime",
+            ],
+            contract["skills"],
+        )
+        runtime_skill = (
+            CONTRACTS.PLUGIN_ROOT
+            / "skills"
+            / "kwc-triage-authoring-runtime"
+            / "SKILL.md"
+        )
+        self.assertTrue(runtime_skill.is_file())
+        content = runtime_skill.read_text(encoding="utf-8")
+        self.assertLess(len(content), 6_000)
+        self.assertIn("scope-to-requirement coverage checklist", content)
+        self.assertIn("HTTP binding/input-format", content)
+        self.assertIn("application command/result boundary", content)
+        self.assertIn("producer exception 선언과 public visibility", content)
+
+    def test_impl_authoring_uses_compact_stage_runtime_skill(self) -> None:
+        contract = CONTRACTS.build_contract(
+            situation="impl-authoring",
+            host_profile="main",
+            kanban_profile="project-manager",
+        )
+
+        self.assertEqual(
+            [
+                "hermes-langchain:kwc-orchestrator-contract",
+                "hermes-langchain:kwc-impl-authoring-runtime",
+            ],
+            contract["skills"],
+        )
+        runtime_skill = (
+            CONTRACTS.PLUGIN_ROOT
+            / "skills"
+            / "kwc-impl-authoring-runtime"
+            / "SKILL.md"
+        )
+        self.assertTrue(runtime_skill.is_file())
+        content = runtime_skill.read_text(encoding="utf-8")
+        self.assertLess(len(content), 7_000)
+        self.assertIn("prepare-impl-fast-path", content)
+        self.assertIn("exact artifact closure", content)
+        self.assertIn("required_verification_ids", content)
+        self.assertIn("MCP_LOOKUP_REQUIRED", content)
+        self.assertIn("why_baseline_cannot_satisfy", content)
+        self.assertIn("한국어 설명", content)
+        self.assertIn("같은 path", content)
+        self.assertIn("`applicability`는 반드시 `applicable` 또는 `not-applicable` enum", content)
+        self.assertIn("`unit`, `slice`, `repository`, `integration`,", content)
+
+    def test_review_authoring_uses_compact_stage_runtime_skill(self) -> None:
+        contract = CONTRACTS.build_contract(
+            situation="review-authoring",
+            host_profile="main",
+            kanban_profile="project-manager",
+        )
+
+        self.assertEqual(
+            [
+                "hermes-langchain:kwc-orchestrator-contract",
+                "hermes-langchain:kwc-review-authoring-runtime",
+            ],
+            contract["skills"],
+        )
+        self.assertEqual([], contract["mcp_servers"])
+        runtime_skill = (
+            CONTRACTS.PLUGIN_ROOT
+            / "skills"
+            / "kwc-review-authoring-runtime"
+            / "SKILL.md"
+        )
+        self.assertTrue(runtime_skill.is_file())
+        content = runtime_skill.read_text(encoding="utf-8")
+        self.assertLess(len(content), 6_000)
+        self.assertIn("prepare-review-fast-path", content)
+        self.assertIn("review-body.json", content)
+        self.assertIn("exact guide_locators", content)
+        self.assertIn("cross-card-seam", content)
+        self.assertIn("kwc_create_review", content)
+        self.assertIn("check fields are id, focus, question, expected_outcome", content)
+        self.assertIn("copy source acceptance IDs and verification IDs exactly", content)
+
     def test_authoring_contract_has_no_behavior_dependency_on_named_profile(self) -> None:
         contract = CONTRACTS.build_contract(
             situation="impl-authoring", host_profile="main", kanban_profile="main"
@@ -28,7 +121,7 @@ class FreshAgentContractTests(unittest.TestCase):
         self.assertEqual(
             [
                 "hermes-langchain:kwc-orchestrator-contract",
-                "hermes-langchain:kwc-build-task-graph",
+                "hermes-langchain:kwc-impl-authoring-runtime",
             ],
             contract["skills"],
         )
@@ -44,6 +137,7 @@ class FreshAgentContractTests(unittest.TestCase):
             "kwc-orchestrator-contract",
             "kwc-create-triage",
             "kwc-build-task-graph",
+            "kwc-review-authoring-runtime",
             "kwc-run-workflow",
             "kwc-service-planning",
             "kwc-sync-docs",

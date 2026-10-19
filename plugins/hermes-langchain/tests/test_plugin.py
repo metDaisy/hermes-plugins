@@ -73,6 +73,9 @@ class PluginTests(unittest.TestCase):
             {
                 "kwc-orchestrator-contract",
                 "kwc-create-triage",
+                "kwc-triage-authoring-runtime",
+                "kwc-impl-authoring-runtime",
+                "kwc-review-authoring-runtime",
                 "kwc-build-task-graph",
                 "kwc-run-workflow",
                 "kwc-service-planning",

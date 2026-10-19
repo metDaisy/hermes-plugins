@@ -373,6 +373,10 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertEqual("t_123abc", impl["sources"]["triage_id"])
             self.assertIsNone(impl["skill"])
             self.assertEqual(["kwc_create_impl_graph"], impl["allowed_tools"])
+            self.assertEqual(
+                ".temp/task-graphs/151/impl-card-batch.json",
+                impl["artifact_file"],
+            )
 
             review = SERVICE.complete_phase(
                 state_path=state,
@@ -385,6 +389,10 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertEqual("review", review["phase"])
             self.assertIsNone(review["skill"])
             self.assertEqual(["t_111aaa", "t_222bbb"], review["sources"]["impl_ids"])
+            self.assertEqual(
+                ".temp/task-graphs/151/review-body.json",
+                review["artifact_file"],
+            )
 
             summary = SERVICE.complete_phase(
                 state_path=state,
@@ -397,6 +405,10 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertEqual("summary", summary["phase"])
             self.assertIsNone(summary["skill"])
             self.assertEqual("t_333ccc", summary["sources"]["review_id"])
+            self.assertEqual(
+                ".temp/task-graphs/151/summary-body.json",
+                summary["artifact_file"],
+            )
 
             complete = SERVICE.complete_phase(
                 state_path=state,

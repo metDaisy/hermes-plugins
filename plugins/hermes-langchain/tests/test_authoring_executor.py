@@ -82,6 +82,7 @@ class AuthoringExecutorTests(unittest.TestCase):
             for path in (authoring, inspection, batch, review_body):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("{}\n", encoding="utf-8")
+            review_body.write_text('{"rows":[1,2]}\n', encoding="utf-8")
             commands = []
 
             def run(command, **_kwargs):
@@ -154,6 +155,10 @@ class AuthoringExecutorTests(unittest.TestCase):
             self.assertEqual(["t_111aaa", "t_222bbb"], impl["created_task_ids"])
             self.assertEqual(["t_333ccc"], review["created_task_ids"])
             self.assertEqual(["t_444ddd"], summary["created_task_ids"])
+            self.assertEqual(
+                '{\n  "rows": [\n    1,\n    2\n  ]\n}\n',
+                review_body.read_text(encoding="utf-8"),
+            )
             self.assertTrue(any("render-impl-batch" in command for command in commands))
             self.assertTrue(any("prepare-review-fast-path" in command for command in commands))
             render = next(command for command in commands if "render-impl-batch" in command)

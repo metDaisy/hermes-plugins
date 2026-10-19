@@ -41,8 +41,9 @@ Closed field: `id`, `title`, `outcome`, `behavior_ids`, `gap_ids`, `scope`, `out
 - 다른 planned Impl이 만들 production symbol, public seam 또는 새 test selector가 있어야 실행 가능한 card는
   독립 card가 아니다. 두 slice를 합치거나 실제 semantic parent를 둔다. `execution_order`와 priority는
   dependency를 대신하지 않는다.
-- Impl→Impl parent edge를 두려면 `.temp/task-graphs/<issue>/dependency-audit.json`에 parent가 만드는 exact artifact,
-  child의 consumer entry point와 `why_baseline_cannot_satisfy`를 기록한다. 공유 파일·충돌 회피·선호 실행 순서,
+- Impl→Impl parent edge를 두려면 batch의 `dependency_audit.edges[]`에 `from_ordinal`, `to_ordinal`, parent가
+  만드는 exact `required_artifact`, child의 `consumer_entry_point`, `why_baseline_cannot_satisfy`를 기록한다.
+  공유 파일·충돌 회피·선호 실행 순서,
   import/package 이동 순서 또는 Triage의 기존 `depends_on` 자체는 proof가 아니다. Child가 baseline source만으로
   구현·검증 가능하면 parent edge를 제거하고 Triage sibling으로 둔다.
 - 다른 Impl의 acceptance를 나중에 모아서 검증하는 test-only Impl을 만들지 않는다. Test-only Impl은 planning
@@ -72,6 +73,18 @@ Closed field는 `actor_and_authorization`, `api`, `state_transition`, `error_sem
 - `constraints[]`: `rule`과 repository `source {kind, path, heading}`.
 - `current_state[]`와 `constraints[]`의 `source.kind`는 정확히 `repository`다. Source가 production code,
   test, requirement 또는 guide인지에 따라 다른 kind를 추측하거나 validator 후보를 반복 탐색하지 않는다.
+
+`entry_points[].symbol`의 `unknown`, `unresolved`, `todo`, `tbd` placeholder는 허용하지 않는다. Triage seam이
+path만 확인해 `unknown`으로 prefill되면 같은 path의 실제 repository symbol을 확인해 completion에서 대체한다.
+각 acceptance가 실행 중 수정·생성·이동·삭제할 exact artifact closure도 `entry_points`에 남긴다. 현재 seam만
+나열하지 말고 생성·이동·삭제할 exact path와 symbol을 함께 적는다. 새 DTO/command/result, 새 aggregate behavior,
+port의 planned target, 제거할 duplicate type과 대체 producer type을 일반적인 책임 문장으로 대신하지 않는다.
+`reason`은 artifact가 충족하는 acceptance ID와 create/move/remove/modify 역할을 명시한다.
+HTTP DTO 분리는 request와 response를 별개로 검증한다. 기존 application request/response DTO와 planned
+presentation request/response DTO, planned application command/result가 모두 closure에 있어야 한다.
+Planned application output은 `application/result` 하나로 고정하며 같은 acceptance에 별도
+`application/response` target을 병행하지 않는다. 기존 application response DTO는 move/remove source이고
+planned application result가 transport-neutral output target이다.
 
 현재 사실이나 제약에 source가 없으면 추측해서 채우지 않고 Triage/decision으로 되돌린다. `constraints`는
 repository 구조 근거를 소유하고, `implementation_contract`는 frozen Triage에서 materialize한 제품 의미를
