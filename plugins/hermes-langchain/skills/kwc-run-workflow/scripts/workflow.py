@@ -16,6 +16,10 @@ URL = re.compile(r"^https://[^/]+/.+")
 STATUSES = {"triage", "todo", "ready", "running", "review", "blocked", "done", "archived"}
 BLOCKING_VERDICTS = {"correction-required", "context-required", "decision-required"}
 FINDING_VERDICTS = BLOCKING_VERDICTS | {"resolved"}
+IMPLEMENTATION_CARD_SCHEMAS = {
+    "backend-implementation-card-v5",
+    "backend-implementation-card-v6",
+}
 
 
 def _non_empty(value: Any) -> bool:
@@ -622,7 +626,11 @@ def validate_restart(value: Any) -> list[str]:
     active = value.get("active_recovery_task_ids")
     _require(active == [value.get("recovery_task_id")], errors, "RESTART_TASK_CARDINALITY")
     _require(_strings(value.get("allowed_scope")), errors, "MISSING_RESTART_SCOPE")
-    _require(value.get("implementation_card_schema") == "backend-implementation-card-v5", errors, "INVALID_RESTART_IMPLEMENTATION_CARD")
+    _require(
+        value.get("implementation_card_schema") in IMPLEMENTATION_CARD_SCHEMAS,
+        errors,
+        "INVALID_RESTART_IMPLEMENTATION_CARD",
+    )
     _require(value.get("required_checkpoint_schema") == "backend-implementation-checkpoint-v1", errors, "INVALID_RESTART_CHECKPOINT")
     return errors
 
@@ -631,9 +639,9 @@ def validate_implementation_admission(value: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(value, dict):
         return ["IMPLEMENTATION_ADMISSION_NOT_OBJECT"]
-    allowed = {"schema", "task_id", "issue", "workspace", "card_schema", "restart"}
+    allowed = {"schema", "task_id", "issue", "workspace", "card_schema", "baseline", "restart"}
     _exact(value, allowed, errors, "UNEXPECTED_IMPLEMENTATION_ADMISSION_FIELD")
-    _require(value.get("schema") == "backend-implementation-admission-v1", errors, "IMPLEMENTATION_ADMISSION_SCHEMA")
+    _require(value.get("schema") == "backend-implementation-admission-v2", errors, "IMPLEMENTATION_ADMISSION_SCHEMA")
     _require(_task_id(value.get("task_id")), errors, "INVALID_IMPLEMENTATION_ADMISSION_TASK")
     issue = value.get("issue")
     _require(
@@ -643,10 +651,32 @@ def validate_implementation_admission(value: Any) -> list[str]:
     )
     _require(_non_empty(value.get("workspace")), errors, "MISSING_IMPLEMENTATION_ADMISSION_WORKSPACE")
     _require(
-        value.get("card_schema") == "backend-implementation-card-v5",
+        value.get("card_schema") in IMPLEMENTATION_CARD_SCHEMAS,
         errors,
         "INVALID_IMPLEMENTATION_ADMISSION_CARD_SCHEMA",
     )
+    baseline = value.get("baseline")
+    baseline_head = None
+    baseline_paths = None
+    if not isinstance(baseline, dict):
+        errors.append("INVALID_IMPLEMENTATION_ADMISSION_BASELINE")
+    else:
+        _exact(
+            baseline,
+            {"head_sha", "dirty_paths"},
+            errors,
+            "UNEXPECTED_IMPLEMENTATION_ADMISSION_BASELINE_FIELD",
+        )
+        baseline_head = baseline.get("head_sha")
+        baseline_paths = baseline.get("dirty_paths")
+        _require(_sha(baseline_head), errors, "INVALID_IMPLEMENTATION_ADMISSION_BASELINE_HEAD")
+        _require(
+            isinstance(baseline_paths, list)
+            and len(baseline_paths) == len(set(baseline_paths))
+            and all(_literal_repository_path(path) for path in baseline_paths),
+            errors,
+            "INVALID_IMPLEMENTATION_ADMISSION_DIRTY_PATHS",
+        )
     restart = value.get("restart")
     if restart is not None:
         errors.extend(f"INVALID_RESTART:{error}" for error in validate_restart(restart))
@@ -658,6 +688,18 @@ def validate_implementation_admission(value: Any) -> list[str]:
                 errors,
                 "RESTART_ADMISSION_WORKSPACE_MISMATCH",
             )
+            _require(
+                baseline_head == restart.get("current_head_sha"),
+                errors,
+                "RESTART_ADMISSION_HEAD_MISMATCH",
+            )
+            _require(
+                baseline_paths == restart.get("dirty_paths"),
+                errors,
+                "RESTART_ADMISSION_DIRTY_PATHS_MISMATCH",
+            )
+    else:
+        _require(baseline_paths == [], errors, "INITIAL_ADMISSION_REQUIRES_CLEAN_BASELINE")
     return errors
 
 

@@ -51,6 +51,12 @@ def _load_authoring_service() -> Any:
     )
 
 
+def _load_authoring_launcher() -> Any:
+    return _load_sibling_module(
+        "_hermes_langchain_authoring_launcher", "authoring_launcher.py"
+    )
+
+
 def _load_authoring_executor() -> Any:
     return _load_sibling_module(
         "_hermes_langchain_authoring_executor", "authoring_executor.py"
@@ -80,15 +86,18 @@ def _state_path() -> Path:
         if not path.is_absolute():
             raise RuntimeError("HERMES_LANGCHAIN_STATE_PATH must be absolute")
         return path
-    from hermes_constants import get_default_hermes_root
+    from plugins.plugin_storage import plugin_data_dir
 
-    return get_default_hermes_root() / "plugin-data" / "hermes-langchain" / "state.db"
+    return plugin_data_dir("hermes-langchain") / "state.db"
 
 
 def _profile_home() -> Path:
     try:
         from hermes_constants import get_hermes_home
     except ImportError:
+        override = str(os.getenv("HERMES_HOME") or "").strip()
+        if override:
+            return Path(override).resolve()
         return PLUGIN_ROOT
 
     return Path(get_hermes_home()).resolve()
@@ -102,7 +111,10 @@ _WAKE_SCHEMA = "kanban-workflow-wakeup-v1"
 _COMMENT_WAKE_SCHEMA = "kanban-comment-wakeup-v1"
 _PROFILE_WAKE_SCHEMA = "kwc-profile-wakeup-v1"
 _DECISION_SCHEMA = "policy-decision-card-v1"
-_IMPLEMENTATION_SCHEMAS = {"backend-implementation-card-v5"}
+_IMPLEMENTATION_SCHEMAS = {
+    "backend-implementation-card-v5",
+    "backend-implementation-card-v6",
+}
 _REVIEW_SCHEMA = "aggregate-review-card-v5"
 _IMPLEMENTATION_PROFILE = "coder"
 _REVIEW_PROFILE = "reviewer"
@@ -312,6 +324,10 @@ def _kwc_recover_frozen_triage_tool(arguments: dict[str, Any]) -> Any:
     return _tool_handlers._kwc_recover_frozen_triage_tool(_host(), arguments)
 
 
+def _hermes_langchain_begin_authoring_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_begin_authoring_tool(_host(), arguments)
+
+
 def _authoring_handler(phase: str) -> Any:
     return _tool_handlers._authoring_handler(_host(), phase)
 
@@ -324,12 +340,51 @@ def _hermes_langchain_route_tool(arguments: dict[str, Any]) -> Any:
     return _tool_handlers._hermes_langchain_route_tool(_host(), arguments)
 
 
+def _hermes_langchain_probe_guard_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_probe_guard_tool(_host(), arguments)
+
+
+def _hermes_langchain_controller_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_controller_tool(_host(), arguments)
+
+
+def _hermes_langchain_materialize_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_materialize_tool(_host(), arguments)
+
+
+def _hermes_langchain_activate_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_activate_tool(_host(), arguments)
+
+
+def _hermes_langchain_project_graph_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_project_graph_tool(_host(), arguments)
+
+
+def _hermes_langchain_materialize_graph_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_materialize_graph_tool(_host(), arguments)
+
+
+def _hermes_langchain_dispatch_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_dispatch_tool(_host(), arguments)
+
+
+def _hermes_langchain_invoke_agent_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_invoke_agent_tool(_host(), arguments)
+
+
+def _hermes_langchain_complete_tool(arguments: dict[str, Any]) -> Any:
+    return _tool_handlers._hermes_langchain_complete_tool(_host(), arguments)
+
+
 _KWC_SKILL_NAMES = (
     "kwc-orchestrator-contract",
     "kwc-create-triage",
     "kwc-triage-authoring-runtime",
     "kwc-impl-authoring-runtime",
     "kwc-review-authoring-runtime",
+    "kwc-implementation-delivery-runtime",
+    "kwc-review-delivery-runtime",
+    "kwc-summary-delivery-runtime",
     "kwc-build-task-graph",
     "kwc-run-workflow",
     "kwc-service-planning",
@@ -352,6 +407,7 @@ def _plugin_hooks() -> dict[str, Any]:
 
 def _plugin_handlers() -> dict[str, Any]:
     return {
+        "hermes_langchain_begin_authoring": _hermes_langchain_begin_authoring_tool,
         "kwc_advance_triage": _kwc_advance_triage_tool,
         "kwc_recover_frozen_triage": _kwc_recover_frozen_triage_tool,
         "kwc_create_triage": _authoring_handler("triage"),
@@ -363,6 +419,15 @@ def _plugin_handlers() -> dict[str, Any]:
         "kwc_pm_response": _kwc_pm_response_tool,
         "kwc_profile_response": _kwc_profile_response_tool,
         "hermes_langchain_route": _hermes_langchain_route_tool,
+        "hermes_langchain_probe_guard": _hermes_langchain_probe_guard_tool,
+        "hermes_langchain_controller": _hermes_langchain_controller_tool,
+        "hermes_langchain_materialize": _hermes_langchain_materialize_tool,
+        "hermes_langchain_activate": _hermes_langchain_activate_tool,
+        "hermes_langchain_project_graph": _hermes_langchain_project_graph_tool,
+        "hermes_langchain_materialize_graph": _hermes_langchain_materialize_graph_tool,
+        "hermes_langchain_dispatch": _hermes_langchain_dispatch_tool,
+        "hermes_langchain_invoke_agent": _hermes_langchain_invoke_agent_tool,
+        "hermes_langchain_complete": _hermes_langchain_complete_tool,
     }
 
 

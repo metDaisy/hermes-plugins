@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..paths import PLUGIN_ROOT
-from . import langgraph_router
+from . import artifact_paths, langgraph_router
 
 
 _ASSIGNMENT_SCHEMA = "kwc-assignment-v1"
@@ -139,19 +139,34 @@ def _artifact_file(
     phase: str,
     triage_stage: str | None,
 ) -> str | None:
+    workspace = Path(str(row["workspace_path"])).resolve()
+    common = {
+        "board": row["board"],
+        "issue_number": int(row["issue_number"]),
+        "generation": int(row["generation"]),
+    }
     if phase == "impl":
-        return f".temp/task-graphs/{int(row['issue_number'])}/impl-card-batch.json"
+        return (
+            artifact_paths.task_graph_output_dir(workspace, **common)
+            / "impl-card-batch.json"
+        ).relative_to(workspace).as_posix()
     if phase == "review":
-        return f".temp/task-graphs/{int(row['issue_number'])}/review-body.json"
+        return (
+            artifact_paths.task_graph_output_dir(workspace, **common)
+            / "review-body.json"
+        ).relative_to(workspace).as_posix()
     if phase == "summary":
-        return f".temp/task-graphs/{int(row['issue_number'])}/summary-body.json"
+        return (
+            artifact_paths.task_graph_output_dir(workspace, **common)
+            / "summary-body.json"
+        ).relative_to(workspace).as_posix()
     if not triage_stage or triage_stage == "materialize":
         return None
     stage = triage_stage.replace("_", "-")
     return (
-        f".temp/kwc-authoring/{int(row['issue_number'])}/"
-        f"generation-{int(row['generation'])}/{stage}-authoring.json"
-    )
+        artifact_paths.triage_output_dir(workspace, **common)
+        / f"{stage}-authoring.json"
+    ).relative_to(workspace).as_posix()
 
 
 def _route_authoring(phase: str, triage_stage: str | None) -> str:

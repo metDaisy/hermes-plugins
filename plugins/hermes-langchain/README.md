@@ -1,6 +1,16 @@
 # Hermes LangChain
 
-`hermes-langchain`은 기존 KWC의 Hermes Kanban 실행·영속화 기능을 이관하고, Authoring 단계 선택을 LangGraph `StateGraph`로 표현하는 통합 Plugin입니다. Native Hermes Kanban board가 canonical state이며 LangGraph는 Kanban을 대체하지 않습니다.
+`hermes-langchain`은 workflow controller의 **유일한 canonical 구현 대상**입니다. 새 controller 기능은 이
+Plugin에만 추가하며, `kanban-workflow-controller`와 `context-workflow-harness`는 deprecated source
+reference로만 취급합니다.
+
+내부 workflow definition, Step/attempt, transition과 interrupt/resume cursor는 LangGraph durable
+checkpoint가 소유하고, accepted semantic output은 독립 immutable Artifact Store가 소유하는 방향으로
+전환합니다. Hermes native Kanban은 공개 task/run/comment/event와 역할 handoff의 정본이며, 외부 mutation
+뒤 exact read-back이 있어야만 controller transition을 허용합니다.
+
+아래 KWC-compatible runtime 설명은 아직 남아 있는 migration baseline과 compatibility surface를 문서화합니다.
+새 architecture의 상태 소유권은 controller module과 immutable artifact contract가 정의합니다.
 
 ## Profile-independent fresh agents
 
@@ -12,9 +22,9 @@ KWC의 PM 역할 실행은 특정 Profile의 SOUL, memory, 또는 설치 Skill�
 
 ## LangGraph integration
 
-- `src/hermes_langchain/authoring/route_graph.py`는 `triage → impl → review → summary → complete` 상태를 side-effect-free하게 routing합니다.
-- Kanban snapshot, durable action outbox, invocation/wake queue, lease, comment delivery와 native mutation은 기존의 fenced SQLite/Kanban adapter가 담당합니다.
-- LangGraph checkpointer는 아직 사용하지 않으며 기존 Plugin DB가 영속화의 단일 권위입니다.
+- 기존 `src/hermes_langchain/authoring/route_graph.py`와 KWC-compatible runtime은 migration baseline입니다.
+- canonical controller 경로는 `src/hermes_langchain/controller/`의 `StateGraph`, SQLite checkpointer와 public Hermes fresh-Agent adapter입니다.
+- 새 기능은 canonical controller 경로에만 추가하며, legacy authoring/runtime과 KWC에는 복제하지 않습니다.
 
 ## Kanban board 사용 여부
 
@@ -29,6 +39,12 @@ Native Kanban board (canonical state)
   → exact Kanban read-back
 ```
 
+새 workflow는 일반 host session에서 `hermes_langchain_begin_authoring`을 호출해 시작합니다. 입력은 exact
+board slug, Issue 번호, fresh generation과 absolute workspace path입니다. 이 Tool은 Plugin이 설치된 host
+Profile을 infrastructure로 유지한 채 `project-manager` execution role과 assignment-bound fresh session을
+생성합니다. `hermes_langchain_route`는 진단용 next-action resolver일 뿐 workflow start/claim 권한을 만들지
+않으며, 사용자는 과거 `.temp` artifact나 assignment id를 검색해 직접 재개하지 않습니다.
+
 ## KWC migration and cutover
 
 - `plugins/hermes-langchain`은 KWC production modules, dashboard/Desktop assets, prompts, fixtures, and compatibility tests를 독립적으로 보존합니다.
@@ -37,12 +53,19 @@ Native Kanban board (canonical state)
 - 새 Plugin은 `$HERMES_ROOT/plugin-data/hermes-langchain/state.db`를 사용합니다. 기존 KWC SQLite runtime/outbox state는 자동 복사하지 않으며 native Kanban board 자체는 계속 canonical state로 사용합니다.
 - cutover 시에는 진행 중인 worker/action이 없는지 확인하고 기존 KWC를 disable한 뒤 `hermes-langchain`을 enable합니다. rollback은 역순으로 수행합니다.
 
+`0.30.0`은 첫 canonical activation primitive를 추가합니다. `hermes_langchain_activate`는
+`controller-task-activation-v1` accepted Artifact Store record와 exact native snapshot에 결속된 기존
+`todo`/`blocked` task 하나만 `ready`로 promote합니다. Controller-owned port가 mutation 직전 snapshot을
+다시 확인하고 task identity, body digest, assignee, workspace, skills와 idempotency key를 exact read-back합니다.
+이미 progress 상태인 동일 task의 retry는 두 번째 mutation 없이 같은 receipt를 반환합니다. 이 increment는
+아직 graph card 생성, worker claim/dispatch, Impl/Review/Summary lifecycle completion을 수행하지 않습니다.
+
 
 Hermes LangChain routes native Kanban lifecycle events to the Project Manager and adds a KWC-owned comment conversation path between Profiles. It keeps native Kanban as the source of truth: every KWC comment is persisted by `kanban_db.add_comment()` and therefore appears in the ordinary task-card thread and `commented` event history.
 
 ## Versioning
 
-`plugin.yaml` is the canonical version source. The migration starts at `0.27.0`; `0.28.0` moves PM execution behavior into profile-independent KWC fresh-agent contracts, and `0.29.0` closes PM responsibility/capability/test coverage while preserving the PM Profile as a comparison baseline. It does not restore the retired `kanban-control` `/kcp` command contract.
+`plugin.yaml` is the canonical version source. The migration starts at `0.27.0`; `0.28.0` moves PM execution behavior into profile-independent KWC fresh-agent contracts, `0.29.0` closes PM responsibility/capability/test coverage while preserving the PM Profile as a comparison baseline, `0.30.0` adds the first controller-owned accepted-task activation primitive, and `0.32.0` adds the canonical host-session authoring entry point. It does not restore the retired `kanban-control` `/kcp` command contract.
 
 - patch: compatible bug fixes and routing corrections;
 - minor: backward-compatible event, tool, endpoint, or session-routing capabilities;

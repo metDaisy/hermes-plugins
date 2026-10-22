@@ -49,9 +49,8 @@ def _validate_parent_existence(records: dict[str, dict[str, Any]], errors: list[
     _append_dependency_cycle_errors(records, errors)
 
 def _expected_priority(records: dict[str, dict[str, Any]], execution_order: list[Any], index: int, key: Any) -> int:
-    if records[key].get("card_type") != "implementation":
-        return 0
-    return sum(records[candidate].get("card_type") == "implementation" for candidate in execution_order[index:])
+    del records, key
+    return len(execution_order) - index
 
 def _validate_execution_order(graph: dict[str, Any], records: dict[str, dict[str, Any]], errors: list[str]) -> None:
     executable = [key for key, card in records.items() if card.get("card_type") in {"implementation", "review"} and card.get("status") not in {"done", "archived"}]

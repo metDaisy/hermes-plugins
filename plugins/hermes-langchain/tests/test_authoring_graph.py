@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PLUGIN_ROOT / "src"
@@ -58,6 +59,31 @@ class AuthoringGraphTests(unittest.TestCase):
 
                 self.assertIsNone(result["next_action"])
                 self.assertEqual(result["errors"], ["INVALID_AUTHORING_STATE"])
+
+
+class AuthoringRouterFallbackTests(unittest.TestCase):
+    def test_routes_without_langgraph_in_the_host_runtime(self) -> None:
+        from hermes_langchain.authoring import langgraph_router
+
+        missing = ModuleNotFoundError("No module named 'langgraph'", name="langgraph")
+        with mock.patch.object(langgraph_router, "_graph", side_effect=missing):
+            result = langgraph_router.route_authoring(
+                phase="triage",
+                triage_stage="analysis",
+            )
+
+        self.assertEqual(result["next_action"], "kwc_advance_triage")
+        self.assertEqual(result["errors"], [])
+
+    def test_fallback_fails_closed_for_invalid_state(self) -> None:
+        from hermes_langchain.authoring import langgraph_router
+
+        missing = ModuleNotFoundError("No module named 'langgraph'", name="langgraph")
+        with mock.patch.object(langgraph_router, "_graph", side_effect=missing):
+            result = langgraph_router.route_authoring(phase="unknown")
+
+        self.assertIsNone(result["next_action"])
+        self.assertEqual(result["errors"], ["INVALID_AUTHORING_STATE"])
 
 
 if __name__ == "__main__":

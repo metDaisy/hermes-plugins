@@ -15,6 +15,7 @@ Handler = Callable[[dict[str, Any]], str]
 Callback = Callable[..., Any]
 
 _TOOLSET = "hermes-langchain"
+_PROBE_TOOLSET = "hermes-langchain-controller-probe"
 
 
 def _schema(
@@ -48,11 +49,12 @@ def _register_tool(
     description: str,
     emoji: str,
     check_fn: Callback | None = None,
+    toolset: str = _TOOLSET,
 ) -> None:
     metadata: dict[str, Any] = {"description": description, "emoji": emoji}
     if check_fn is not None:
         metadata["check_fn"] = check_fn
-    ctx.register_tool(name, _TOOLSET, schema, handler, **metadata)
+    ctx.register_tool(name, toolset, schema, handler, **metadata)
 
 
 def register_plugin(
@@ -66,6 +68,36 @@ def register_plugin(
 
     for name, callback in hooks.items():
         ctx.register_hook(name, callback)
+
+    _register_tool(
+        ctx,
+        name="hermes_langchain_begin_authoring",
+        schema=_schema(
+            "hermes_langchain_begin_authoring",
+            "Start one canonical fresh-agent authoring workflow from the host session.",
+            {
+                "board": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                },
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
+                },
+                "replace_incomplete": {"type": "boolean"},
+            },
+            ["board", "issue_number", "generation", "workspace_path"],
+        ),
+        handler=handlers["hermes_langchain_begin_authoring"],
+        description="Create and launch one controller-owned fresh authoring assignment.",
+        emoji="🚦",
+    )
 
     _register_tool(
         ctx,
@@ -268,4 +300,457 @@ def register_plugin(
         handler=handlers["hermes_langchain_route"],
         description="Resolve one deterministic LangGraph authoring route.",
         emoji="🕸️",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_probe_guard",
+        schema=_schema(
+            "hermes_langchain_probe_guard",
+            "A side-effect-free inert tool reserved for the controller probe children.",
+            {},
+            [],
+        ),
+        handler=handlers["hermes_langchain_probe_guard"],
+        description="Return a fixed inert receipt without reading or changing state.",
+        emoji="🛡️",
+        toolset=_PROBE_TOOLSET,
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_controller",
+        schema=_schema(
+            "hermes_langchain_controller",
+            "Run or inspect one plugin-owned deterministic controller workflow.",
+            {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "resume", "status"],
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["controller-probe-v1"],
+                },
+                "run_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "input": {
+                    "type": "object",
+                    "properties": {
+                        "request": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 8000,
+                        },
+                    },
+                    "required": ["request"],
+                    "additionalProperties": False,
+                },
+            },
+            ["action", "workflow_id", "run_id"],
+        ),
+        handler=handlers["hermes_langchain_controller"],
+        description="Execute a fixed LangGraph workflow through Hermes fresh agents.",
+        emoji="🕸️",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_materialize",
+        schema=_schema(
+            "hermes_langchain_materialize",
+            "Materialize one accepted Triage artifact on native Kanban.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["triage-parity-v1"],
+                },
+                "artifact_id": {"type": "string", "minLength": 1},
+                "artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "board": {"type": "string", "minLength": 1},
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {"type": "string", "minLength": 1},
+                "expected_snapshot_fingerprint": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "artifact_sha256",
+                "board",
+                "issue_number",
+                "generation",
+                "workspace_path",
+                "expected_snapshot_fingerprint",
+            ],
+        ),
+        handler=handlers["hermes_langchain_materialize"],
+        description="Fence, create, read back, and verify one accepted Triage milestone.",
+        emoji="📌",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_activate",
+        schema=_schema(
+            "hermes_langchain_activate",
+            "Promote one accepted artifact-bound task on native Kanban.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["canonical-task-activation-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "board": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                },
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
+                },
+                "task_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "expected_snapshot_fingerprint": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "artifact_sha256",
+                "board",
+                "issue_number",
+                "generation",
+                "workspace_path",
+                "task_id",
+                "expected_snapshot_fingerprint",
+            ],
+        ),
+        handler=handlers["hermes_langchain_activate"],
+        description="Fence, promote, read back, and verify one accepted task.",
+        emoji="▶️",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_project_graph",
+        schema=_schema(
+            "hermes_langchain_project_graph",
+            "Validate and persist one accepted-Triage-bound task graph.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["canonical-task-graph-projection-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "authoring_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "run_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "accepted_triage_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "accepted_triage_artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "source_task_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "board": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                },
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {"type": "string", "minLength": 1},
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "authoring_artifact_id",
+                "run_id",
+                "accepted_triage_artifact_id",
+                "accepted_triage_artifact_sha256",
+                "source_task_id",
+                "board",
+                "issue_number",
+                "generation",
+                "workspace_path",
+            ],
+        ),
+        handler=handlers["hermes_langchain_project_graph"],
+        description="Validate accepted Triage provenance and persist one task graph.",
+        emoji="📐",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_materialize_graph",
+        schema=_schema(
+            "hermes_langchain_materialize_graph",
+            "Materialize one accepted Impl/Review/Summary task graph on native Kanban.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["canonical-task-graph-materialization-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "board": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                },
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
+                },
+                "expected_snapshot_fingerprint": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "artifact_sha256",
+                "board",
+                "issue_number",
+                "generation",
+                "workspace_path",
+                "expected_snapshot_fingerprint",
+            ],
+        ),
+        handler=handlers["hermes_langchain_materialize_graph"],
+        description="Fence, create, read back, and verify an accepted task graph.",
+        emoji="🧩",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_dispatch",
+        schema=_schema(
+            "hermes_langchain_dispatch",
+            "Claim one accepted activated task through the canonical controller.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["canonical-task-dispatch-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "graph_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "graph_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "activation_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "activation_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "activation_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "board": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                },
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
+                },
+                "task_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "expected_snapshot_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "graph_artifact_id",
+                "graph_artifact_sha256",
+                "activation_artifact_id",
+                "activation_artifact_sha256",
+                "activation_key",
+                "board",
+                "issue_number",
+                "generation",
+                "workspace_path",
+                "task_id",
+                "expected_snapshot_fingerprint",
+            ],
+        ),
+        handler=handlers["hermes_langchain_dispatch"],
+        description="Fence and atomically claim one accepted activated task.",
+        emoji="🚚",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_invoke_agent",
+        schema=_schema(
+            "hermes_langchain_invoke_agent",
+            "Invoke one graph-bound fresh Agent and persist typed delivery provenance.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["canonical-task-agent-delivery-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "dispatch_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "dispatch_artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "dispatch_artifact_id",
+                "dispatch_artifact_sha256",
+            ],
+        ),
+        handler=handlers["hermes_langchain_invoke_agent"],
+        description="Run the controller-selected Agent contract and bind its typed result.",
+        emoji="🤖",
+    )
+    _register_tool(
+        ctx,
+        name="hermes_langchain_complete",
+        schema=_schema(
+            "hermes_langchain_complete",
+            "Complete the exact claimed native run from one accepted typed delivery.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["canonical-task-completion-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "dispatch_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "dispatch_artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "delivery_artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "delivery_artifact_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "expected_snapshot_fingerprint": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "dispatch_artifact_id",
+                "dispatch_artifact_sha256",
+                "delivery_artifact_id",
+                "delivery_artifact_sha256",
+                "expected_snapshot_fingerprint",
+            ],
+        ),
+        handler=handlers["hermes_langchain_complete"],
+        description="Fence, complete, and exactly read back one claimed native run.",
+        emoji="✅",
     )

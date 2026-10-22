@@ -2,6 +2,40 @@
 
 All notable Hermes LangChain changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.32.0] - 2026-10-22
+
+### Added
+
+- Added `hermes_langchain_begin_authoring` as the closed host-session entry point for one fresh, controller-owned Triage assignment and dedicated Project Manager execution role.
+
+### Fixed
+
+- Prevented manual role-switched sessions from starting authoring and documented that `hermes_langchain_route`, historical `.temp` artifacts, and stale assignment ids are not workflow entry or authorization mechanisms.
+
+## [0.31.0] - 2026-10-21
+
+### Added
+
+- Added accepted-Triage-bound deterministic graph projection through `hermes_langchain_project_graph` and immutable `controller-task-graph-v1` artifacts.
+- Added canonical native Impl/Review/Summary graph materialization through `hermes_langchain_materialize_graph`, including bounded topology validation, source provenance, snapshot fencing, artifact-bound audit events and exact replay.
+- Added disposable native-board coverage for graph creation, exact task/link/event read-back, replay and hard-delete rollback.
+
+### Fixed
+
+- Made post-commit and malformed-receipt failures rollback-aware, rejected duplicate or archived native identities, verified every incident link and audit event, and bounded card/link/skill/body cardinality before mutation.
+
+## [0.30.0] - 2026-10-21
+
+### Added
+
+- Added the canonical `hermes_langchain_activate` tool and `controller-task-activation-v1` artifact contract for one already-existing native task.
+- Added controller-owned snapshot fencing, artifact/producer/issue/generation/workspace/task binding, exact native read-back, stable public errors and exact replay without a second promotion.
+- Added disposable native-board activation coverage through the real Hermes Kanban database adapter.
+
+### Changed
+
+- Registered `canonical-task-activation-v1` as a profile-local controller Artifact Store namespace without importing the deprecated KWC mutation service.
+
 ## [0.29.0] - 2026-10-19
 
 ### Added
@@ -18,6 +52,7 @@ All notable Hermes LangChain changes are recorded here. Versions follow Semantic
 ### Fixed
 
 - Added bounded Windows board-cleanup retry and current-schema Triage/Review fixtures to the migrated native E2E.
+- Fresh-agent Triage and task-graph artifacts now use a deterministic board namespace beneath each generation, preventing boards with the same Issue number from reading or overwriting one another's stage drafts, bodies, source bundles, or native read-back reports.
 
 ## [0.28.0] - 2026-10-18
 

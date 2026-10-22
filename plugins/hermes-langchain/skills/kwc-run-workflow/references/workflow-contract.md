@@ -99,9 +99,12 @@ default branch, head는 delivery branch, PR head SHA는 docs commit SHA다. Requ
 ### `restart-task-v1`
 
 Marker Issue/branch/workspace와 baseline/snapshot SHA, current HEAD, dirty path, path별 Issue
-attribution/evidence, 단일 recovery task/assignee, allowed scope, current `backend-implementation-card-v5` body와
+attribution/evidence, 단일 recovery task/assignee, allowed scope, current `backend-implementation-card-v6` body 또는
+historical read-back v5와
 required checkpoint schema를 가진다. `restart-task-v1`은 recovery task의 PM-owned
-`backend-implementation-admission-v1` comment에 저장되며 Impl body를 대체하지 않는다. 모든 dirty
+`backend-implementation-admission-v2` comment에 저장되며 Impl body를 대체하지 않는다. Admission은 actual
+task/Issue/workspace/card schema와 `baseline {head_sha, dirty_paths}`를 고정한다. Initial run은 clean baseline만,
+restart는 `current_head_sha`와 exact dirty path가 baseline과 일치해야 한다. 모든 dirty
 path가 현재 Issue에 정확히 귀속되고 active recovery task가 하나일
 때만 통과한다.
 

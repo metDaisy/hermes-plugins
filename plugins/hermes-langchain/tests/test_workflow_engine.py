@@ -57,6 +57,17 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertEqual([], decision["errors"])
 
+    def test_ready_v6_implementation_dispatches_the_coder_contract(self) -> None:
+        decision = ENGINE.decide(
+            self.snapshot(
+                self.task(body_schema="backend-implementation-card-v6")
+            )
+        )
+
+        self.assertTrue(decision["valid"])
+        self.assertEqual("coder", decision["action"]["profile"])
+        self.assertEqual("run-impl-card", decision["action"]["skill"])
+
     def test_ready_task_rejects_a_forced_skill_outside_its_profile_contract(self) -> None:
         implementation = self.task(skills=["run-review"])
 

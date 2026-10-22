@@ -34,16 +34,20 @@ single-target promotion을 fail-closed로 수행한다. 설치된 Skill 경로�
 
 ## 시작과 재개
 
-1. Native Kanban tool schema를 확인하고 exact board의 active·archived task를 모두 read-back한다. Native
+1. 새 authoring workflow는 host session에서 `hermes_langchain_begin_authoring`을 정확히 한 번 호출해
+   시작한다. `hermes_langchain_route`를 시작·권한 부여 도구로 사용하지 않고, 과거 `.temp` artifact나
+   assignment id를 검색해 수동 재사용하지 않는다. 이 도구가 반환한 assignment와 dedicated fresh-agent
+   session만 staged Triage/Impl/Review/Summary authoring을 소유한다.
+2. Native Kanban tool schema를 확인하고 exact board의 active·archived task를 모두 read-back한다. Native
    tool이 없는 일반 PM session은 공식 `hermes kanban` CLI의 현재 `--help`를 읽은 뒤 사용한다.
-2. Branch, `HEAD`, 전체 Git status, `current-state.md` freshness와 active marker를 읽는다.
-3. Marker가 없고 repository가 clean이면 새 leaf Issue의 canonical delivery branch를 선택하고
+3. Branch, `HEAD`, 전체 Git status, `current-state.md` freshness와 active marker를 읽는다.
+4. Marker가 없고 repository가 clean이면 새 leaf Issue의 canonical delivery branch를 선택하고
    `create-triage`부터 시작한다. Planning Decision이 있으면 사용자 comment/running과 PM reply loop를
    완료한 뒤 frozen Triage를 `build-task-graph`로 materialize한다.
-4. Marker가 있으면 Issue·branch·committed checkpoint·Kanban history를 비교해 정상 재개, `restart-task`,
+5. Marker가 있으면 Issue·branch·committed checkpoint·Kanban history를 비교해 정상 재개, `restart-task`,
    base-sync 또는 사용자 결정을 선택한다. Dirty 상태를 새 planning 입력으로 사용하지 않는다. Native
    card create 자체가 dirty tree에서 성공하더라도 normal workflow admission으로 인정하지 않는다.
-5. `build-task-graph-v6` wrapper와 정규화한 native read-back,
+6. `build-task-graph-v6` wrapper와 정규화한 native read-back,
    Git read-back을 각각 JSON으로 저장하고
    다음을 실행한다.
 
@@ -86,6 +90,15 @@ title/body/assignee 불변성을 read-back하여 `ready`인지 확인한 후 nat
 payload/Triage alignment를 다시 검증한 뒤 재사용하며 다시 complete하지 않는다.
 
 ## Kanban 실행 반복
+
+Impl을 promotion/claim하기 직전에 PM은 Git `HEAD`와 전체 dirty path를 다시 읽고 다음 exact field의
+`backend-implementation-admission-v2`를 만든다: `schema`, `task_id`, `issue`, `workspace`, `card_schema`,
+`baseline {head_sha, dirty_paths}`, `restart`. Initial run은 `baseline.dirty_paths=[]`, `restart=null`이어야 한다.
+Restart recovery는 `baseline.head_sha/current_head_sha`와 `baseline.dirty_paths/restart.dirty_paths`가 각각 exact
+match해야 한다. 다음 validator가 통과한 payload를 PM-owned comment로 남기고 exact read-back한 뒤에만 worker를
+시작한다.
+
+`python scripts/workflow.py validate-implementation-admission <implementation-admission.json>`
 
 1. `allowed_transition`이 `promote`이면 계산된 task 하나만 promotion하고 task ID, assignee, parents,
    status와 ready count를 다시 읽는다. `claim`이면 해당 assignee의 worker만 claim한다.
@@ -239,10 +252,11 @@ head의 reviewed code range를 바꾸면 이전 Review·CI 결론을 재사용�
 
 Marker는 현재 Issue/branch를 가리키고 모든 dirty path가 그 Issue에만 evidence로 귀속되지만 Kanban 기록이
 유실된 경우에만 하나의 Coder recovery card를 만든다. Body는 현재 승인 requirement와 확인된 dirty
-delta를 self-contained하게 materialize한 정상 `backend-implementation-card-v5`이다. PM은
+delta를 self-contained하게 materialize한 정상 `backend-implementation-card-v6` 또는 historical read-back
+v5이다. PM은
 task/workspace/exact dirty path를 결합한 `restart-task-v1`을
 `python scripts/workflow.py validate-restart <restart.json>`으로 검증한 뒤, 해당 recovery task의 새
-`backend-implementation-admission-v1` comment의 `restart` 필드에 저장한다. `kanban_show`로 comment를
+`backend-implementation-admission-v2` comment의 `baseline`과 `restart` 필드에 저장한다. `kanban_show`로 comment를
 read-back하고 body도 Impl validator로 검증한 뒤 Coder에게 넘긴다. 아직 존재하지 않는 미래 Coder run
 metadata에는 admission payload를 저장하지 않는다. Mixed·unknown path, marker mismatch, 복수 recovery
 card는 사용자 결정으로 block한다.

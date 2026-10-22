@@ -49,6 +49,7 @@ class AuthoringToolTests(unittest.TestCase):
         ctx = FakeContext()
         PLUGIN.register(ctx)
         expected = {
+            "hermes_langchain_begin_authoring",
             "kwc_advance_triage",
             "kwc_recover_frozen_triage",
             "kwc_create_triage",
@@ -59,14 +60,108 @@ class AuthoringToolTests(unittest.TestCase):
         self.assertTrue(expected.issubset(ctx.tools))
         self.assertNotIn("kwc_create_card", ctx.tools)
 
+    def test_begin_authoring_tool_exposes_closed_canonical_start_contract(self) -> None:
+        ctx = FakeContext()
+        PLUGIN.register(ctx)
+
+        parameters = ctx.schemas["hermes_langchain_begin_authoring"]["parameters"]
+
+        self.assertEqual(
+            ["board", "issue_number", "generation", "workspace_path"],
+            parameters["required"],
+        )
+        self.assertFalse(parameters["additionalProperties"])
+        self.assertEqual(
+            "^[a-z0-9][a-z0-9_-]{0,63}$",
+            parameters["properties"]["board"]["pattern"],
+        )
+
+    def test_begin_authoring_tool_launches_main_host_with_project_manager_role(self) -> None:
+        assignment = {
+            "schema": "kwc-assignment-v1",
+            "assignment_id": "kwa_intake",
+            "board": "issue-151-langchain-7",
+            "issue_number": 151,
+            "generation": 7,
+            "workspace_path": "C:/repo",
+            "phase": "triage",
+            "triage_stage": "intake",
+            "allowed_tools": ["kwc_advance_triage"],
+            "next_action": "kwc_advance_triage",
+        }
+        service = SimpleNamespace(begin_authoring=lambda **_kwargs: assignment)
+        captured = {}
+
+        def launch_assignment(**kwargs):
+            captured.update(kwargs)
+            return {
+                "ok": True,
+                "pid": 4321,
+                "profile": "main",
+                "execution_role": "project-manager",
+            }
+
+        launcher = SimpleNamespace(launch_assignment=launch_assignment)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            PLUGIN, "_load_authoring_service", return_value=service
+        ), patch.object(
+            PLUGIN, "_load_authoring_launcher", return_value=launcher
+        ), patch.object(
+            PLUGIN, "_state_path", return_value=Path(tmp) / "state.db"
+        ), patch.object(
+            PLUGIN, "_current_session_profile", return_value="main"
+        ), patch.object(
+            PLUGIN, "_current_execution_profile", return_value="main"
+        ), patch.object(
+            PLUGIN._tool_handlers.shutil, "which", return_value="C:/Hermes/hermes.exe"
+        ):
+            result = json.loads(
+                PLUGIN._hermes_langchain_begin_authoring_tool(
+                    {
+                        "board": "issue-151-langchain-7",
+                        "issue_number": 151,
+                        "generation": 7,
+                        "workspace_path": "C:/repo",
+                    }
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("kwa_intake", result["assignment_id"])
+        self.assertEqual("project-manager", captured["profile"])
+        self.assertEqual("main", captured["host_profile"])
+        self.assertEqual("C:/Hermes/hermes.exe", captured["hermes_executable"])
+
+    def test_begin_authoring_tool_rejects_role_switched_child_session(self) -> None:
+        with patch.object(
+            PLUGIN, "_current_session_profile", return_value="main"
+        ), patch.object(
+            PLUGIN, "_current_execution_profile", return_value="project-manager"
+        ):
+            result = json.loads(
+                PLUGIN._hermes_langchain_begin_authoring_tool(
+                    {
+                        "board": "issue-151-langchain-7",
+                        "issue_number": 151,
+                        "generation": 7,
+                        "workspace_path": "C:/repo",
+                    }
+                )
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("AUTHORING_START_REJECTED", result["reason_code"])
+
     def test_recovery_tool_replaces_impl_source_after_verified_native_recovery(self) -> None:
         assignment = {
             "schema": "kwc-assignment-v1",
             "assignment_id": "kwa_impl",
             "phase": "impl",
             "profile": "project-manager",
+            "board": "issue-151-authoring",
             "workspace_path": "C:/repo",
             "issue_number": 151,
+            "generation": 1,
             "sources": {"triage_id": "t_oldtriage", "impl_ids": []},
         }
         service = SimpleNamespace(

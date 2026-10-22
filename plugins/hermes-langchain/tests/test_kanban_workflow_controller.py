@@ -799,6 +799,7 @@ print(json.dumps({{
         self.assertEqual(
             set(ctx.tools),
             {
+                "hermes_langchain_begin_authoring",
                 "kwc_advance_triage",
                 "kwc_recover_frozen_triage",
                 "kwc_create_triage",
@@ -810,6 +811,15 @@ print(json.dumps({{
                 "kwc_pm_response",
                 "kwc_profile_response",
                 "hermes_langchain_route",
+                "hermes_langchain_probe_guard",
+                "hermes_langchain_controller",
+                "hermes_langchain_materialize",
+                "hermes_langchain_activate",
+                "hermes_langchain_project_graph",
+                "hermes_langchain_materialize_graph",
+                "hermes_langchain_dispatch",
+                "hermes_langchain_invoke_agent",
+                "hermes_langchain_complete",
             },
         )
 

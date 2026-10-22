@@ -16,6 +16,27 @@ EXECUTOR = load_module("authoring.authoring_executor")
 
 
 class AuthoringExecutorTests(unittest.TestCase):
+    def test_helper_failure_surfaces_structured_errors(self) -> None:
+        command = ["python", "helper.py"]
+
+        def fail(_command, **_kwargs):
+            raise subprocess.CalledProcessError(
+                2,
+                command,
+                output=json.dumps(
+                    {
+                        "valid": False,
+                        "errors": ["IMPL_SLICE_CLOSURE_MISMATCH:missing=S-1"],
+                    }
+                ),
+                stderr="ignored private stderr",
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "IMPL_SLICE_CLOSURE_MISMATCH:missing=S-1"
+        ):
+            EXECUTOR._run(command, cwd=_ROOT, run_fn=fail)
+
     def test_kwc_owned_graph_helper_is_self_contained(self) -> None:
         graph_script = _ROOT / "src" / "hermes_langchain" / "authoring" / "graph" / "build_task_graph.py"
 
@@ -163,8 +184,14 @@ class AuthoringExecutorTests(unittest.TestCase):
             self.assertTrue(any("prepare-review-fast-path" in command for command in commands))
             render = next(command for command in commands if "render-impl-batch" in command)
             create = next(command for command in commands if "create-impl-batch-native" in command)
-            self.assertEqual(".temp/kwc-authoring/151/impl-bodies", render[render.index("--output-dir") + 1])
-            self.assertEqual(".temp/kwc-authoring/151/impl-bodies", create[create.index("--body-dir") + 1])
+            render_dir = render[render.index("--output-dir") + 1]
+            self.assertTrue(
+                render_dir.startswith(
+                    ".temp/task-graphs/151/generation-1/issue-151-authoring-"
+                )
+            )
+            self.assertTrue(render_dir.endswith("/impl-bodies"))
+            self.assertEqual(render_dir, create[create.index("--body-dir") + 1])
             graph_commands = [command for command in commands if str(graph_script) in command]
             self.assertTrue(graph_commands)
             for command in graph_commands:
@@ -200,6 +227,47 @@ class AuthoringExecutorTests(unittest.TestCase):
             self.assertEqual(["t_123abc"], result["created_task_ids"])
             self.assertEqual(authoring, calls[0]["authoring_file"])
             self.assertEqual(inspection, calls[0]["current_state_inspection_file"])
+
+    def test_impl_execution_on_different_boards_uses_distinct_run_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            batch = workspace / ".temp/batch.json"
+            batch.parent.mkdir(parents=True)
+            batch.write_text("{}\n", encoding="utf-8")
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append(command)
+                if "--output" in command:
+                    output = Path(command[command.index("--output") + 1])
+                    if not output.is_absolute():
+                        output = Path(kwargs["cwd"]) / output
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_text(
+                        json.dumps({"created": [{"id": "t_111aaa"}]}),
+                        encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+            for board in ("issue-151-board-a", "issue-151-board-b"):
+                assignment = self.assignment(workspace, "impl")
+                assignment["assignment_id"] = f"kwa_{board}"
+                assignment["board"] = board
+                EXECUTOR.execute_authoring_phase(
+                    assignment=assignment,
+                    arguments={"batch_file": ".temp/batch.json"},
+                    profile_home=workspace / "pm-home",
+                    run_fn=run,
+                )
+
+            render_commands = [
+                command for command in commands if "render-impl-batch" in command
+            ]
+            output_dirs = {
+                command[command.index("--output-dir") + 1] for command in render_commands
+            }
+            self.assertEqual(2, len(output_dirs))
+            self.assertTrue(all(path.endswith("/impl-bodies") for path in output_dirs))
 
     def test_rejects_artifact_outside_assignment_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

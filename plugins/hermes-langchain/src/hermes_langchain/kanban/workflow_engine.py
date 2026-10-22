@@ -8,7 +8,10 @@ from typing import Any
 
 _SNAPSHOT_SCHEMA = "kwc-workflow-snapshot-v1"
 _DECISION_SCHEMA = "kwc-workflow-decision-v1"
-_IMPLEMENTATION_SCHEMAS = {"backend-implementation-card-v5"}
+_IMPLEMENTATION_SCHEMAS = {
+    "backend-implementation-card-v5",
+    "backend-implementation-card-v6",
+}
 _FINDING_ROUTE_SCHEMAS = _IMPLEMENTATION_SCHEMAS | {"policy-decision-card-v1"}
 _READY_CONTRACTS = {
     **{

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from . import triage_activity
+from . import artifact_paths, triage_activity
 
 
 _PHASES = {"triage", "impl", "review", "summary"}
@@ -53,14 +53,34 @@ def _canonicalize_json_file(path: Path, field: str) -> None:
 
 
 def _run(command: list[str], *, cwd: Path, run_fn: Callable[..., Any]) -> None:
-    run_fn(
-        command,
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    try:
+        run_fn(
+            command,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except subprocess.CalledProcessError as exc:
+        structured_errors: list[str] = []
+        for line in str(exc.stdout or "").splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or not isinstance(payload.get("errors"), list):
+                continue
+            structured_errors.extend(
+                str(error)
+                for error in payload["errors"]
+                if isinstance(error, str) and error
+            )
+        if structured_errors:
+            raise ValueError(
+                "PM_HELPER_FAILED:" + "|".join(structured_errors[:8])
+            ) from exc
+        raise ValueError(f"PM_HELPER_EXIT_{exc.returncode}") from exc
 
 
 def _read_report(path: Path) -> dict[str, Any]:
@@ -109,7 +129,17 @@ def execute_authoring_phase(
     issue = int(assignment.get("issue_number"))
     generation = int(assignment.get("generation"))
     sources = _required_mapping(assignment.get("sources"), "assignment.sources")
-    run_dir = workspace / ".temp/kwc-authoring" / str(issue)
+    output_dir = (
+        artifact_paths.triage_output_dir
+        if phase == "triage"
+        else artifact_paths.task_graph_output_dir
+    )
+    run_dir = output_dir(
+        workspace,
+        board=board,
+        issue_number=issue,
+        generation=generation,
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     output = run_dir / f"{phase}-result.json"
     output_arg = output.relative_to(workspace).as_posix()

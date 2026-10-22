@@ -22,13 +22,13 @@ class TopologyValidationTests(unittest.TestCase):
             "impl": {
                 "card_type": "implementation",
                 "status": "todo",
-                "priority": 1,
+                "priority": 2,
                 "parents": ["triage"],
             },
             "review": {
                 "card_type": "review",
                 "status": "todo",
-                "priority": 0,
+                "priority": 1,
                 "parents": ["impl"],
             },
             "summary": {
@@ -87,13 +87,13 @@ class TopologyValidationTests(unittest.TestCase):
             "impl": {
                 "card_type": "implementation",
                 "status": "todo",
-                "priority": 1,
+                "priority": 2,
                 "parents": ["summary"],
             },
             "review": {
                 "card_type": "review",
                 "status": "todo",
-                "priority": 0,
+                "priority": 1,
                 "parents": [],
             },
             "summary": {

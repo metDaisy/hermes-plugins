@@ -44,7 +44,7 @@ class ActivateGraphTest(unittest.TestCase):
             )
 
             with mock.patch("activate_graph.shutil.which", return_value=str(launcher)):
-                self.assertEqual(str(python), _hermes_python("hermes"))
+                self.assertEqual(str(python.resolve()), _hermes_python("hermes"))
 
     def triage_body(self):
         body = template(
@@ -125,17 +125,20 @@ class ActivateGraphTest(unittest.TestCase):
                 "title": "Seller product creation 책임 정리",
                 "outcome": "Seller product creation 책임 위반을 수정한다.",
                 "gap_ids": ["GAP-PRODUCT-CREATE"],
-                "scope": ["Seller product creation application flow"],
-                "out_of_scope": ["Unrelated P2 flows"],
+                "scope": [
+                    "modify: src/main/java/example/SellerService.java#create - 판매자 상품 생성 application 흐름 책임을 정리한다."
+                ],
+                "out_of_scope": ["관련 없는 P2 흐름 변경"],
                 "acceptance": [
                     {
                         "id": "ACCEPT-PRODUCT-CREATE",
-                        "criterion": "Seller product creation이 approved application boundary를 사용한다.",
+                        "criterion": "SellerService#create가 승인된 application boundary를 사용한다.",
                         "requirement_ids": ["CHANGE-PRODUCT-CREATE"],
                         "observable_ids": ["OBS-PRODUCT-CREATE"],
                         "verification_ids": ["VERIFY-PRODUCT-CREATE"],
                     }
                 ],
+                "contract_change_ids": [],
                 "depends_on": [],
             }
         ]
@@ -146,11 +149,13 @@ class ActivateGraphTest(unittest.TestCase):
                 "current_coverage": "missing",
                 "evidence": [],
                 "production_seam": {
-                    "locator": "src/main/java/example/SellerService.java#L1-L20",
+                    "locator": "src/main/java/example/SellerService.java#create",
                     "claim": "Seller product creation을 실행하는 current application owner다.",
                 },
                 "coverage_gap": "Focused integration coverage is absent.",
-                "required_verification": ["Add focused integration coverage for product creation."],
+                "required_verification": [
+                    "example.SellerServiceTest#createsProduct로 product creation을 검증한다."
+                ],
             }
         ]
         body["contract_changes"] = []
@@ -526,8 +531,8 @@ class ActivateGraphTest(unittest.TestCase):
                 "why_unresolved": "The fixed contract allows two implementation seams.",
                 "evidence": [
                     {
-                        "locator": "docs/backend-development-guide.md#Port-adapter와-module-seam",
-                        "claim": "Both options preserve the approved module seam.",
+                        "locator": "https://github.com/example/repository/issues/138#상품-등록",
+                        "claim": "승인된 Issue가 사용자 선택이 필요한 상품 등록 contract 권한을 소유한다.",
                     }
                 ],
                 "affected_observable_ids": ["OBS-PRODUCT-CREATE"],

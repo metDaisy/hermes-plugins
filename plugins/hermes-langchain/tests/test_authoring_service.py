@@ -14,6 +14,33 @@ SERVICE = load_module("authoring.authoring_service")
 
 
 class AuthoringServiceTests(unittest.TestCase):
+    def test_assignments_on_different_boards_use_distinct_artifact_namespaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.db"
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+
+            first = SERVICE.begin_authoring(
+                state_path=state,
+                board="issue-151-board-a",
+                issue_number=151,
+                generation=1,
+                workspace_path=workspace,
+                pm_session_key="pm-session-a",
+            )
+            second = SERVICE.begin_authoring(
+                state_path=state,
+                board="issue-151-board-b",
+                issue_number=151,
+                generation=1,
+                workspace_path=workspace,
+                pm_session_key="pm-session-b",
+            )
+
+            self.assertNotEqual(first["artifact_file"], second["artifact_file"])
+            self.assertTrue(first["artifact_file"].endswith("/intake-authoring.json"))
+            self.assertTrue(second["artifact_file"].endswith("/intake-authoring.json"))
+
     def test_existing_assignment_is_resumed_independent_of_initiating_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "state.db"
@@ -108,10 +135,12 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertEqual(["kwc_advance_triage"], assignment["allowed_tools"])
             self.assertEqual("kwc_advance_triage", assignment["next_action"])
             self.assertEqual("kwc-triage-intake-authoring-v1", assignment["artifact_schema"])
-            self.assertEqual(
-                ".temp/kwc-authoring/151/generation-1/intake-authoring.json",
-                assignment["artifact_file"],
+            self.assertTrue(
+                assignment["artifact_file"].startswith(
+                    ".temp/kwc-authoring/151/generation-1/issue-151-authoring-"
+                )
             )
+            self.assertTrue(assignment["artifact_file"].endswith("/intake-authoring.json"))
             self.assertIn("요구사항", assignment["instruction"])
             self.assertEqual(str(workspace.resolve()), assignment["workspace_path"])
 
@@ -254,6 +283,7 @@ class AuthoringServiceTests(unittest.TestCase):
                 workspace_path=workspace,
                 pm_session_key="pm-session",
             )
+            artifact_parent = Path(assignment["artifact_file"]).parent
 
             expected = [
                 ("intake", "discovery", "kwc-triage-discovery-v2", "discovery-authoring.json"),
@@ -286,9 +316,7 @@ class AuthoringServiceTests(unittest.TestCase):
                 self.assertEqual(next_stage, assignment["triage_stage"])
                 self.assertEqual(next_schema, assignment["artifact_schema"])
                 expected_file = (
-                    f".temp/kwc-authoring/151/generation-1/{next_file}"
-                    if next_file is not None
-                    else None
+                    (artifact_parent / next_file).as_posix() if next_file is not None else None
                 )
                 self.assertEqual(expected_file, assignment["artifact_file"])
 
@@ -373,8 +401,14 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertEqual("t_123abc", impl["sources"]["triage_id"])
             self.assertIsNone(impl["skill"])
             self.assertEqual(["kwc_create_impl_graph"], impl["allowed_tools"])
+            task_graph_parent = Path(impl["artifact_file"]).parent
+            self.assertTrue(
+                impl["artifact_file"].startswith(
+                    ".temp/task-graphs/151/generation-1/issue-151-authoring-"
+                )
+            )
             self.assertEqual(
-                ".temp/task-graphs/151/impl-card-batch.json",
+                (task_graph_parent / "impl-card-batch.json").as_posix(),
                 impl["artifact_file"],
             )
 
@@ -390,7 +424,7 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertIsNone(review["skill"])
             self.assertEqual(["t_111aaa", "t_222bbb"], review["sources"]["impl_ids"])
             self.assertEqual(
-                ".temp/task-graphs/151/review-body.json",
+                (task_graph_parent / "review-body.json").as_posix(),
                 review["artifact_file"],
             )
 
@@ -406,7 +440,7 @@ class AuthoringServiceTests(unittest.TestCase):
             self.assertIsNone(summary["skill"])
             self.assertEqual("t_333ccc", summary["sources"]["review_id"])
             self.assertEqual(
-                ".temp/task-graphs/151/summary-body.json",
+                (task_graph_parent / "summary-body.json").as_posix(),
                 summary["artifact_file"],
             )
 
