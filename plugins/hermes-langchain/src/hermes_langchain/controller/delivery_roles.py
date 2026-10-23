@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Protocol
 
-from hermes_langchain.authoring.graph import implementation_card_v6
+from hermes_langchain.authoring.graph import implementation_card
 
 from .contracts import StepDefinition, Transition, WorkflowDefinition, _freeze
 from .process_executor import validate_process_invocation_budget
@@ -242,7 +242,7 @@ def _admit_coder(
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("CODER_ROLE_INPUT_FIELDS")
     card = _json_copy(value["implementation_card"])
-    errors = implementation_card_v6.validate(card)
+    errors = implementation_card.validate(card)
     if errors:
         raise ValueError(f"CODER_CARD_INVALID:{errors[0]}")
     workspace_value = value["workspace"]
@@ -338,7 +338,7 @@ def _admit_reviewer(value: Any) -> dict[str, Any]:
     }:
         raise ValueError("REVIEWER_ROLE_INPUT_FIELDS")
     plan = _json_copy(value["accepted_plan"])
-    if implementation_card_v6.validate(plan):
+    if implementation_card.validate(plan):
         raise ValueError("REVIEWER_PLAN_INVALID")
     diff = _json_copy(value["diff"])
     verification = _json_copy(value["verification_evidence"])

@@ -1,4 +1,4 @@
-"""Native adapters for the four KWC-owned PM card-authoring phases."""
+"""Native adapters for the four KWC-owned controller authoring phases."""
 
 from __future__ import annotations
 
@@ -78,18 +78,18 @@ def _run(command: list[str], *, cwd: Path, run_fn: Callable[..., Any]) -> None:
             )
         if structured_errors:
             raise ValueError(
-                "PM_HELPER_FAILED:" + "|".join(structured_errors[:8])
+                "KWC_HELPER_FAILED:" + "|".join(structured_errors[:8])
             ) from exc
-        raise ValueError(f"PM_HELPER_EXIT_{exc.returncode}") from exc
+        raise ValueError(f"KWC_HELPER_EXIT_{exc.returncode}") from exc
 
 
 def _read_report(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("PM helper did not write a valid JSON report") from exc
+        raise ValueError("KWC helper did not write a valid JSON report") from exc
     if not isinstance(value, dict):
-        raise ValueError("PM helper report must be an object")
+        raise ValueError("KWC helper report must be an object")
     return value
 
 
@@ -104,7 +104,7 @@ def execute_authoring_phase(
     *,
     assignment: Any,
     arguments: Any,
-    profile_home: Path,
+    host_profile: str,
     run_fn: Callable[..., Any] = subprocess.run,
     triage_execute_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -113,15 +113,17 @@ def execute_authoring_phase(
     arguments = _required_mapping(arguments, "arguments")
     if assignment.get("schema") != "kwc-assignment-v1":
         raise ValueError("assignment schema is invalid")
-    if assignment.get("profile") != "project-manager":
-        raise ValueError("assignment profile is invalid")
+    if assignment.get("role") != "orchestrator":
+        raise ValueError("assignment role is invalid")
     phase = str(assignment.get("phase") or "")
     if phase not in _PHASES:
         raise ValueError("assignment phase is not authorable")
     workspace = Path(str(assignment.get("workspace_path") or "")).resolve()
     if not workspace.is_dir():
         raise ValueError("assignment workspace is unavailable")
-    del profile_home
+    host_profile = str(host_profile or "").strip()
+    if not host_profile:
+        raise ValueError("host_profile is required")
     graph_script = Path(__file__).resolve().parent / "graph" / "build_task_graph.py"
     if phase != "triage" and not graph_script.is_file():
         raise ValueError("KWC authoring helper is unavailable")
@@ -182,7 +184,7 @@ def execute_authoring_phase(
                 "--body-dir",
                 body_dir_arg,
                 "--profile",
-                "project-manager",
+                host_profile,
                 "--board",
                 board,
                 "--triage-id",
@@ -219,7 +221,7 @@ def execute_authoring_phase(
             *base,
             "prepare-review-fast-path",
             "--profile",
-            "project-manager",
+            host_profile,
             "--board",
             board,
             "--triage-id",
@@ -249,7 +251,7 @@ def execute_authoring_phase(
                 "--body",
                 str(body),
                 "--profile",
-                "project-manager",
+                host_profile,
                 "--board",
                 board,
                 "--workspace",
@@ -276,7 +278,7 @@ def execute_authoring_phase(
                 *base,
                 "regenerate-summary-native",
                 "--profile",
-                "project-manager",
+                host_profile,
                 "--board",
                 board,
                 "--triage-id",

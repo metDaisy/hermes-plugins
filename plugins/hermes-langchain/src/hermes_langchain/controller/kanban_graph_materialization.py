@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -1614,7 +1615,12 @@ def _identity(
 def _workspace(value: Any, field: str, code: str = "REQUEST_INVALID") -> str:
     text = _text(value, field, 4096, code)
     path = Path(text)
-    if not path.is_absolute() or not path.is_dir() or path.resolve().as_posix() != text:
+    resolved = path.resolve()
+    if (
+        not path.is_absolute()
+        or not resolved.is_dir()
+        or os.path.normcase(str(resolved)) != os.path.normcase(str(path.absolute()))
+    ):
         raise KanbanGraphMaterializationError(code, f"{field} is invalid")
     return text
 

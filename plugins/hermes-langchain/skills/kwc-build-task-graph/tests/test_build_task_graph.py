@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,8 @@ import review_fast_path as review_fast  # noqa: E402
 import triage as triage_contract  # noqa: E402
 import test_triage as triage_test_fixtures  # noqa: E402
 from build_task_graph import (  # noqa: E402
+    _implementation_acceptance_ids,
+    _implementation_slice_id,
     apply_impl_completions,
     create_impl_batch_native,
     create_review_native,
@@ -48,9 +51,10 @@ from graph_contract import (  # noqa: E402
 from native_e2e import bind_frozen_triage_digest  # noqa: E402
 from hermes_langchain.authoring.graph.implementation_batch import (  # noqa: E402
     apply_impl_completions as core_apply_impl_completions,
+    impl_batch_template as legacy_impl_batch_template,
     validate_impl_batch as core_validate_impl_batch,
 )
-from hermes_langchain.authoring.graph.implementation_card_v5 import (  # noqa: E402
+from hermes_langchain.authoring.graph.legacy_implementation_card import (  # noqa: E402
     validate as core_validate_card,
 )
 
@@ -60,14 +64,143 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     @staticmethod
     def valid_frozen_triage():
-        case = triage_test_fixtures.TriageV7ContractTest()
-        case.setUp()
-        return triage_contract.freeze(case.populate_analysis())
+        source = json.loads(
+            (PLUGIN_ROOT / "tests" / "fixtures" / "valid-triage-authoring.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        identity = source["identity"]
+        body = triage_contract.template(
+            identity["issue_number"],
+            identity["title"],
+            identity["issue_url"],
+            identity["planning_sha"],
+            identity["current_state_sha"],
+            identity["requirement_locators"],
+            identity["current_state_locators"],
+        )
+        intake = triage_contract.compose_intake(body, source["intake"])
+        return triage_contract.freeze(
+            triage_contract.compose_analysis(intake, source["analysis"])
+        )
+
+    def valid_legacy_wrapper(
+        self,
+        body=None,
+        *,
+        ordinal=1,
+        priority=1,
+        issue=138,
+        generation=1,
+        parent_ids=None,
+    ):
+        body = copy.deepcopy(body or self.valid_card())
+        acceptance_ids = [
+            item["id"]
+            for item in body.get("acceptance", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        acceptance_id = acceptance_ids[0]
+        for entry_point in body.get("context", {}).get("entry_points", []):
+            reason = re.sub(
+                r"^(?:\[[A-Za-z0-9-]+\])+\s*",
+                "",
+                str(entry_point.get("reason") or "구현 진입점을 명시한다."),
+            )
+            entry_point["reason"] = f"[{acceptance_id}][modify] {reason}"
+        verification = [
+            item
+            for item in body.get("verification", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        wrapper = {
+            "ordinal": ordinal,
+            "title": f"G{generation}-Issue{issue}-Impl{ordinal}",
+            "priority": priority,
+            "body": body,
+            "contract_changes": [],
+            "required_entry_points": [],
+            "required_contract_symbols": [],
+            "required_verification_ids": [item["id"] for item in verification],
+            "required_verification_scenarios": {
+                item["id"]: list(item.get("scenarios", [])) for item in verification
+            },
+            "depends_on_ordinals": [],
+        }
+        if parent_ids is not None:
+            wrapper["parent_ids"] = list(parent_ids)
+        return wrapper
 
     def test_skill_uses_validator_as_black_box(self):
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("kwc-orchestrator-contract/references/script-usage.md", skill)
         self.assertIn("template → 입력 작성 → validate", skill)
+
+    def test_native_v6_closure_uses_trace_and_authored_contract_ids(self):
+        body = {
+            "schema": "backend-implementation-card-v6",
+            "trace": {"slice_id": "S-1"},
+            "obligations": [],
+            "constraints": [{"id": "S1-A1"}, {"id": "G-001"}],
+        }
+
+        self.assertEqual("S-1", _implementation_slice_id(body))
+        self.assertEqual(
+            ["S1-A1"],
+            _implementation_acceptance_ids(body, ["S1-A1"]),
+        )
+
+    def test_script_review_prepare_accepts_v6_implementation_body(self):
+        workspace = Path.cwd().resolve()
+        triage = self.valid_frozen_triage()
+        issue = triage["issue"]["number"]
+        implementation = impl_batch_template(triage, triage_id="t_triage")["cards"][0]["body"]
+        obligation = implementation["obligations"][0]
+        obligation["given"] = ["수량을 변경할 주문이 존재한다."]
+        obligation["operation"]["invocation_count"] = 1
+        obligation["observables"] = [
+            {
+                "target": "Order items",
+                "source": "in-memory-state",
+                "comparison": "unchanged",
+                "identity": ["OrderItem.id"],
+                "values": ["quantity"],
+                "expected": "zero quantity item is removed",
+            }
+        ]
+        implementation["verification"][0]["level"] = "unit"
+        tasks = [
+            {
+                "id": "t_triage",
+                "title": f"G1-Issue{issue}-Triage",
+                "body": json.dumps(triage, ensure_ascii=False),
+                "assignee": "project-manager",
+                "status": "triage",
+                "priority": 0,
+                "workspace_kind": "dir",
+                "workspace_path": workspace.as_posix(),
+            },
+            {
+                "id": "t_impl",
+                "title": f"G1-Issue{issue}-Impl1",
+                "body": json.dumps(implementation, ensure_ascii=False),
+                "assignee": "coder",
+                "status": "todo",
+                "priority": 1,
+                "workspace_kind": "dir",
+                "workspace_path": workspace.as_posix(),
+            },
+        ]
+
+        bundle = prepare_review_fast_path(
+            tasks,
+            triage_id="t_triage",
+            implementation_ids=["t_impl"],
+            issue=issue,
+            generation=1,
+        )
+
+        self.assertEqual(["impl-1"], bundle["review_body_template"]["implementation_card_keys"])
 
     def test_skill_requires_proof_for_each_impl_dependency_edge(self):
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -76,9 +209,9 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         self.assertIn("dependency-audit.json", skill)
         self.assertIn("why_baseline_cannot_satisfy", skill)
         self.assertIn("공유 파일·충돌 회피·선호 실행 순서", skill)
-        self.assertIn("dependency-audit.json", contract)
-        self.assertIn("parent가 만드는 exact artifact", contract)
-        self.assertIn('`source.kind`는 정확히 `repository`', contract)
+        self.assertIn("`dependency_audit.edges[]`", contract)
+        self.assertIn("`required_artifact`", contract)
+        self.assertIn("`source {locator, claim}`", contract)
 
     def test_skill_requires_exact_artifact_closure_for_each_impl_acceptance(self):
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -86,10 +219,10 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("acceptance별 exact artifact closure", skill)
-        self.assertIn("planned target path와 symbol", skill)
-        self.assertIn("generic `command/result`", skill)
-        self.assertIn("생성·이동·삭제할 exact path와 symbol", contract)
+        self.assertIn("acceptance별 obligation과 constraint closure", skill)
+        self.assertIn("exact repository path", skill)
+        self.assertIn("application command/result", skill)
+        self.assertIn("Planned artifact target", contract)
 
     def test_skill_has_bounded_impl_body_only_fast_path(self):
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -121,29 +254,30 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         self.assertIn("validated wrapper body와 exact하게 일치", skill)
         self.assertIn("cleanup을 검증", skill)
         self.assertIn("malformed/ambiguous", skill)
-        self.assertIn("Contract change marker는 `preserved_behaviors`", skill)
-        self.assertIn("--body-dir .temp/task-graphs/<issue>/bodies", skill)
+        self.assertIn("contract change를 immutable `constraints[]`", skill)
+        self.assertIn("--body-dir <artifact-root>/bodies", skill)
         self.assertIn("`session_search`·`--help`를 호출하지 않는다", skill)
         self.assertIn("apply-impl-completions", skill)
         self.assertIn("custom Python fill script를 만들지 않는다", skill)
         self.assertIn("Compact completion의 closed shape", skill)
         self.assertIn("installed Skill directory, references, tests", skill)
-        self.assertIn("`observable_ids`를 `behavior_ids`", skill)
+        self.assertIn("acceptance별 obligation과 constraint closure", skill)
         self.assertIn("planned test method name은 authoring output", skill)
         self.assertIn("existing test method 존재를 확인하려고", skill)
         self.assertIn("최대 4개 file", skill)
-        self.assertIn("validate-impl-batch .temp/task-graphs/<issue>/impl-card-batch.json", skill)
+        self.assertIn("validate-impl-batch <artifact-root>/impl-card-batch.json", skill)
+        self.assertIn("generation-<generation>/<board-namespace>", skill)
         self.assertIn("top-level `parents`", skill)
         self.assertIn("`task` 내부의 `parent_ids`나 `parents`를 찾지 않는다", skill)
         self.assertIn("source Triage의 native `workspace_path`", skill)
         self.assertIn("전체 Triage validator와 digest", skill)
         self.assertIn("각각 한 번만 읽고", skill)
-        self.assertIn("exact matching path/symbol", skill)
-        self.assertIn("full change text", skill)
+        self.assertIn("Prefill constraint locator나 exact symbol", skill)
+        self.assertIn("required_contract_symbols", skill)
         self.assertIn("closed wrapper shape", skill)
         self.assertIn("모든 helper terminal call의 `workdir`", skill)
         self.assertIn("다른 repository root로 fallback하지 않는다", skill)
-        self.assertIn("Codebase Memory의 `project`는 `e-commerce-clone-coding`", skill)
+        self.assertIn("Codebase Memory의 `project`는 repository에 등록된 project name", skill)
         self.assertIn("workspace absolute path를 `project`로 전달하지 않는다", skill)
 
     def test_profile_has_bounded_summary_regeneration_skill(self):
@@ -168,22 +302,8 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             "issue": 138,
             "generation": 1,
             "cards": [
-                {
-                    "ordinal": 1,
-                    "title": "G1-Issue138-Impl1",
-                    "priority": 2,
-                    "body": self.valid_card(),
-                    "contract_changes": [],
-                    "required_contract_symbols": [],
-                },
-                {
-                    "ordinal": 2,
-                    "title": "G1-Issue138-Impl2",
-                    "priority": 1,
-                    "body": self.valid_card(),
-                    "contract_changes": [],
-                    "required_contract_symbols": [],
-                },
+                self.valid_legacy_wrapper(ordinal=1, priority=2),
+                self.valid_legacy_wrapper(ordinal=2, priority=1),
             ],
             "dependency_audit": {"edges": []},
         }
@@ -211,16 +331,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         batch = {
             "issue": 138,
             "generation": 1,
-            "cards": [
-                {
-                    "ordinal": 1,
-                    "title": "G1-Issue138-Impl1",
-                    "priority": 1,
-                    "body": self.valid_card(),
-                    "contract_changes": [],
-                    "required_contract_symbols": [],
-                }
-            ],
+            "cards": [self.valid_legacy_wrapper(ordinal=1, priority=1)],
             "dependency_audit": {"edges": []},
         }
 
@@ -231,6 +342,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_create_impl_batch_native_uses_bounded_calls_and_rolls_back_failure(self):
         source_triage = self.valid_frozen_triage()
+        issue = source_triage["issue"]["number"]
         body = self.valid_card()
         body["slice"]["id"] = source_triage["implementation_slices"][0]["id"]
         source_acceptance = source_triage["implementation_slices"][0]["acceptance"][0]
@@ -238,26 +350,23 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         body["verification"][0]["id"] = source_acceptance["verification_ids"][0]
         body["verification"][0]["acceptance_ids"] = [source_acceptance["id"]]
         body["issue"] = {
-            "number": 151,
+            "number": issue,
             "url": source_triage["issue"]["url"],
         }
         body["triage_digest"] = source_triage["frozen_digest"]
         batch = {
-            "issue": 151,
+            "issue": issue,
             "generation": 1,
-            "cards": [
-                {
-                    "ordinal": 1,
-                    "title": "G1-Issue151-Impl1",
-                    "priority": 1,
-                    "body": body,
-                    "contract_changes": [],
-                    "required_contract_symbols": [],
-                    "parent_ids": ["t_triage"],
-                }
-            ],
+            "cards": [self.valid_legacy_wrapper(
+                body,
+                ordinal=1,
+                priority=1,
+                issue=issue,
+                parent_ids=["t_triage"],
+            )],
             "dependency_audit": {"edges": []},
         }
+        body = batch["cards"][0]["body"]
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory).resolve()
             body_dir = workspace / ".temp/task-graphs/151/bodies"
@@ -278,7 +387,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             )
             empty_list = subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
             create = subprocess.CompletedProcess(
-                [], 0, stdout=json.dumps({"id": "t_new", "title": "G1-Issue151-Impl1"}), stderr=""
+                [], 0, stdout=json.dumps({"id": "t_new", "title": f"G1-Issue{issue}-Impl1"}), stderr=""
             )
             show = subprocess.CompletedProcess(
                 [],
@@ -287,7 +396,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                     {
                         "task": {
                             "id": "t_new",
-                            "title": "G1-Issue151-Impl1",
+                            "title": f"G1-Issue{issue}-Impl1",
                             "body": expected_body,
                             "assignee": "coder",
                             "skills": [],
@@ -343,7 +452,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             recovered_list = subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps([{"id": "t_new", "title": "G1-Issue151-Impl1"}]),
+                stdout=json.dumps([{"id": "t_new", "title": f"G1-Issue{issue}-Impl1"}]),
                 stderr="",
             )
             with patch.object(task_graph.Path, "cwd", return_value=workspace), patch.object(
@@ -408,30 +517,28 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_create_impl_batch_native_rejects_incomplete_triage_slice_closure(self):
         source_triage = self.valid_frozen_triage()
+        issue = source_triage["issue"]["number"]
         source_slice_id = source_triage["implementation_slices"][0]["id"]
         body = self.valid_card()
         body["issue"] = {
-            "number": 151,
+            "number": issue,
             "url": source_triage["issue"]["url"],
         }
         body["triage_digest"] = source_triage["frozen_digest"]
         body["slice"]["id"] = "SLICE-NOT-FROM-TRIAGE"
         batch = {
-            "issue": 151,
+            "issue": issue,
             "generation": 1,
-            "cards": [
-                {
-                    "ordinal": 1,
-                    "title": "G1-Issue151-Impl1",
-                    "priority": 1,
-                    "body": body,
-                    "contract_changes": [],
-                    "required_contract_symbols": [],
-                    "parent_ids": ["t_triage"],
-                }
-            ],
+            "cards": [self.valid_legacy_wrapper(
+                body,
+                ordinal=1,
+                priority=1,
+                issue=issue,
+                parent_ids=["t_triage"],
+            )],
             "dependency_audit": {"edges": []},
         }
+        body = batch["cards"][0]["body"]
 
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory).resolve()
@@ -476,6 +583,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_create_impl_batch_native_rejects_incomplete_triage_verification_closure(self):
         source_triage = self.valid_frozen_triage()
+        issue = source_triage["issue"]["number"]
         source_slice = source_triage["implementation_slices"][0]
         source_acceptance = source_slice["acceptance"][0]
         body = self.valid_card()
@@ -484,26 +592,23 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         body["verification"][0]["id"] = "VERIFY-NOT-FROM-TRIAGE"
         body["verification"][0]["acceptance_ids"] = [source_acceptance["id"]]
         body["issue"] = {
-            "number": 151,
+            "number": issue,
             "url": source_triage["issue"]["url"],
         }
         body["triage_digest"] = source_triage["frozen_digest"]
         batch = {
-            "issue": 151,
+            "issue": issue,
             "generation": 1,
-            "cards": [
-                {
-                    "ordinal": 1,
-                    "title": "G1-Issue151-Impl1",
-                    "priority": 1,
-                    "body": body,
-                    "contract_changes": [],
-                    "required_contract_symbols": [],
-                    "parent_ids": ["t_triage"],
-                }
-            ],
+            "cards": [self.valid_legacy_wrapper(
+                body,
+                ordinal=1,
+                priority=1,
+                issue=issue,
+                parent_ids=["t_triage"],
+            )],
             "dependency_audit": {"edges": []},
         }
+        body = batch["cards"][0]["body"]
 
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory).resolve()
@@ -596,7 +701,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                     "id": "VERIFY-001",
                     "production_seam": {
                         "locator": "src/main/java/example/Cart.java#addItem",
-                        "claim": "생산 진입점",
+                        "claim": "[ACCEPT-001][modify] 생산 진입점",
                     },
                     "required_verification": ["장바구니 경계 분리를 검증한다."],
                 }
@@ -610,7 +715,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             ],
         }
 
-        batch = impl_batch_template(triage)
+        batch = legacy_impl_batch_template(triage)
 
         self.assertEqual({"edges": []}, batch["dependency_audit"])
         self.assertEqual("G1-Issue151-Impl1", batch["cards"][0]["title"])
@@ -667,7 +772,17 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             "phase": "frozen",
             "frozen_digest": "d" * 64,
             "issue": {"number": 151, "url": "https://github.com/example/repo/issues/151"},
-            "confirmed_gaps": [{"id": "GAP-001", "evidence": [], "rules": []}],
+            "confirmed_gaps": [{
+                "id": "GAP-001",
+                "evidence": [{
+                    "locator": "src/main/java/example/Cart.java#Cart#addItem",
+                    "claim": "현재 Cart 동작이 구현되어 있다.",
+                }],
+                "rules": [{
+                    "locator": "docs/backend-development-guide.md#application 구현 규칙",
+                    "claim": "application 경계를 분리한다.",
+                }],
+            }],
             "implementation_slices": [
                 {
                     "id": "SLICE-001",
@@ -692,13 +807,13 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                     "id": "VERIFY-001",
                     "production_seam": {
                         "locator": "src/main/java/example/Cart.java#Cart#addItem",
-                        "claim": "생산 진입점",
+                        "claim": "[ACCEPT-001][modify] 생산 진입점",
                     },
                     "required_verification": ["경계 분리를 검증한다."],
                 }
             ],
         }
-        batch = impl_batch_template(triage)
+        batch = legacy_impl_batch_template(triage)
         contract = self.valid_card()["implementation_contract"]
         completions = {
             "cards": [
@@ -709,7 +824,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                         {
                             "path": "src/main/java/example/NewCommand.java",
                             "symbol": "NewCommand",
-                            "reason": "새 command",
+                            "reason": "[ACCEPT-001][create] 새 command를 생성한다.",
                         }
                     ],
                     "verification": [
@@ -729,7 +844,10 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         body = merged["cards"][0]["body"]
         self.assertEqual(contract, body["implementation_contract"])
         self.assertEqual("Cart#addItem", body["context"]["entry_points"][0]["symbol"])
-        self.assertEqual("생산 진입점", body["context"]["entry_points"][0]["reason"])
+        self.assertEqual(
+            "[ACCEPT-001][modify] 생산 진입점",
+            body["context"]["entry_points"][0]["reason"],
+        )
         self.assertEqual("NewCommand", body["context"]["entry_points"][-1]["symbol"])
         self.assertEqual("unit", body["verification"][0]["test_level"])
         self.assertEqual(["example.CartTest#separatesBoundary"], body["verification"][0]["tests"])
@@ -738,14 +856,24 @@ class BackendImplementationCardContractTest(unittest.TestCase):
     def test_apply_impl_completions_deduplicates_prefilled_entry_points(self):
         seam = {
             "locator": "src/main/java/example/Cart.java#Cart#addItem",
-            "claim": "생산 진입점",
+            "claim": "[ACCEPT-001][modify] 생산 진입점",
         }
         triage = {
             "schema": "triage-v7",
             "phase": "frozen",
             "frozen_digest": "d" * 64,
             "issue": {"number": 151, "url": "https://github.com/example/repo/issues/151"},
-            "confirmed_gaps": [{"id": "GAP-001", "evidence": [], "rules": []}],
+            "confirmed_gaps": [{
+                "id": "GAP-001",
+                "evidence": [{
+                    "locator": "src/main/java/example/Cart.java#Cart#addItem",
+                    "claim": "현재 Cart 동작이 구현되어 있다.",
+                }],
+                "rules": [{
+                    "locator": "docs/backend-development-guide.md#application 구현 규칙",
+                    "claim": "application 경계를 분리한다.",
+                }],
+            }],
             "implementation_slices": [
                 {
                     "id": "SLICE-001",
@@ -777,12 +905,12 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                 },
             ],
         }
-        batch = impl_batch_template(triage)
+        batch = legacy_impl_batch_template(triage)
         verification = [
             {
                 "id": verification_id,
                 "test_level": "unit",
-                "tests": [f"example.CartTest#{verification_id.lower()}"],
+                "tests": [f"example.CartTest#{verification_id.lower().replace('-', '')}"],
                 "scenarios": ["경계 동작을 검증한다."],
             }
             for verification_id in ("VERIFY-001", "VERIFY-002")
@@ -809,16 +937,12 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         batch = {
             "issue": 138,
             "generation": 1,
-            "cards": [{
-                "ordinal": 1,
-                "title": "G1-Issue138-Impl1",
-                "priority": 1,
-                "body": body,
-                "contract_changes": [],
-                "required_contract_symbols": [],
-                "parent_ids": ["t_triage"],
-                "depends_on_ordinals": [],
-            }],
+            "cards": [self.valid_legacy_wrapper(
+                body,
+                ordinal=1,
+                priority=1,
+                parent_ids=["t_triage"],
+            )],
             "dependency_audit": {"edges": []},
         }
         expected = batch["cards"][0]["body"]["context"]["entry_points"][0]
@@ -842,7 +966,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                         {
                             "path": expected["path"],
                             "symbol": authored_symbol,
-                            "reason": "확인된 구현 진입점",
+                            "reason": "[AC-PRODUCT-CREATE][modify] 확인된 구현 진입점",
                         }
                     ],
                     "verification": verification,
@@ -864,16 +988,12 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         batch = {
             "issue": 138,
             "generation": 1,
-            "cards": [{
-                "ordinal": 1,
-                "title": "G1-Issue138-Impl1",
-                "priority": 1,
-                "body": body,
-                "contract_changes": [],
-                "required_contract_symbols": [],
-                "parent_ids": ["t_triage"],
-                "depends_on_ordinals": [],
-            }],
+            "cards": [self.valid_legacy_wrapper(
+                body,
+                ordinal=1,
+                priority=1,
+                parent_ids=["t_triage"],
+            )],
             "dependency_audit": {"edges": []},
         }
         batch["cards"][0]["body"]["context"]["entry_points"][0]["symbol"] = "unknown"
@@ -949,6 +1069,10 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         first = self.valid_card()
         second = copy.deepcopy(first)
         second["slice"]["id"] = "slice-product-create-consumer"
+        for body in (first, second):
+            body["context"]["entry_points"][0]["reason"] = (
+                "[AC-PRODUCT-CREATE][create] 상품 등록 공개 경계를 소유한다."
+            )
         batch = {
             "issue": 138,
             "generation": 1,
@@ -986,6 +1110,19 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         )
         for validator in (validate_impl_batch, core_validate_impl_batch):
             with self.subTest(validator=validator.__module__):
+                counterfeit = copy.deepcopy(batch)
+                counterfeit_edge = counterfeit["dependency_audit"]["edges"][0]
+                counterfeit_edge["required_artifact"] = "AC-PRODUCT-CREATE"
+                counterfeit_edge["consumer_entry_point"] = "AC-PRODUCT-CREATE"
+                counterfeit_errors = validator(counterfeit)
+                self.assertIn(
+                    "IMPL_DEPENDENCY_ARTIFACT_UNPROVEN:1:2",
+                    counterfeit_errors,
+                )
+                self.assertIn(
+                    "IMPL_DEPENDENCY_CONSUMER_UNPROVEN:1:2",
+                    counterfeit_errors,
+                )
                 errors = validator(batch)
                 self.assertFalse(
                     [error for error in errors if error.startswith(dependency_error_prefixes)],
@@ -994,11 +1131,12 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_prepare_impl_fast_path_validates_and_materializes_once(self):
         triage = self.valid_frozen_triage()
+        issue = triage["issue"]["number"]
         workdir = Path.cwd().resolve()
         envelope = {
             "task": {
                 "id": "t_triage",
-                "title": "G1-Issue151-Triage",
+                "title": f"G1-Issue{issue}-Triage",
                 "status": "triage",
                 "workspace_kind": "dir",
                 "workspace_path": str(workdir),
@@ -1010,18 +1148,18 @@ class BackendImplementationCardContractTest(unittest.TestCase):
             envelope,
             [envelope["task"]],
             triage_id="t_triage",
-            issue=151,
+            issue=issue,
             generation=1,
             workdir=workdir,
         )
 
         self.assertEqual(triage, prepared["triage_body"])
-        self.assertEqual("G1-Issue151-Impl1", prepared["batch"]["cards"][0]["title"])
+        self.assertEqual(f"G1-Issue{issue}-Impl1", prepared["batch"]["cards"][0]["title"])
         self.assertEqual(
             {
                 "triage_id": "t_triage",
                 "status": "triage",
-                "issue": 151,
+                "issue": issue,
                 "generation": 1,
                 "slice_count": 1,
                 "active_impl_count": 0,
@@ -1032,6 +1170,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_prepare_impl_fast_path_rejects_tampered_digest_and_wrong_workspace(self):
         triage = self.valid_frozen_triage()
+        issue = triage["issue"]["number"]
         workdir = Path.cwd().resolve()
         envelope = {
             "task": {
@@ -1052,7 +1191,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                 tampered,
                 [tampered["task"]],
                 triage_id="t_triage",
-                issue=151,
+                issue=issue,
                 generation=1,
                 workdir=workdir,
             )
@@ -1064,13 +1203,14 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                 wrong_workspace,
                 [wrong_workspace["task"]],
                 triage_id="t_triage",
-                issue=151,
+                issue=issue,
                 generation=1,
                 workdir=workdir,
             )
 
     def test_prepare_impl_fast_path_cli_reads_only_show_and_list_once(self):
         triage = self.valid_frozen_triage()
+        issue = triage["issue"]["number"]
         with tempfile.TemporaryDirectory() as directory:
             workdir = Path(directory).resolve()
             envelope = {
@@ -1096,7 +1236,7 @@ class BackendImplementationCardContractTest(unittest.TestCase):
                 "--triage-id",
                 "t_triage",
                 "--issue",
-                "151",
+                str(issue),
                 "--output-dir",
                 ".temp/task-graphs/151/fast-path",
                 "--batch-output",
@@ -1115,10 +1255,11 @@ class BackendImplementationCardContractTest(unittest.TestCase):
 
     def test_apply_impl_completions_preserves_exact_class_seam_and_contract_change(self):
         triage = self.valid_frozen_triage()
-        batch = impl_batch_template(triage, triage_id="t_triage")
+        batch = legacy_impl_batch_template(triage, triage_id="t_triage")
         card = batch["cards"][0]
         expected = card["body"]["context"]["entry_points"][0]
-        expected["symbol"] = "Cart"
+        expected["symbol"] = "Order"
+        expected["reason"] = "[ACCEPT-001][preserve] Order aggregate 경계를 보존한다."
         card["contract_changes"] = [
             {
                 "id": "CONTRACT-001",
@@ -1128,15 +1269,23 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         authored_entry_points = [
             {
                 "path": expected["path"],
-                "symbol": "Cart#changeQuantity",
-                "reason": "Cart method 구현 위치를 확인한다.",
+                "symbol": "Order#changeQuantity",
+                "reason": "[ACCEPT-001][modify] Order 수량 변경 메서드의 구현 위치를 확인한다.",
             }
         ]
+        authored_entry_points.extend(
+            {
+                "path": item["path"],
+                "symbol": item["symbol"],
+                "reason": "[ACCEPT-001][modify] frozen gap의 필수 구현 진입점을 반영한다.",
+            }
+            for item in card["required_entry_points"]
+        )
         authored_verification = [
             {
                 "id": item["id"],
                 "test_level": "unit",
-                "tests": ["example.CartTest#verifyContractBoundary"],
+                "tests": ["example.CartTest#quantityZeroDeletes"],
                 "scenarios": list(item["scenarios"]),
             }
             for item in card["body"]["verification"]
@@ -1157,7 +1306,10 @@ class BackendImplementationCardContractTest(unittest.TestCase):
         )
 
         symbols = [item["symbol"] for item in merged["cards"][0]["body"]["context"]["entry_points"]]
-        self.assertEqual(["Cart", "Cart#changeQuantity"], symbols)
+        self.assertEqual(
+            ["Order", "Order#changeQuantity", "OrderService#changeQuantity"],
+            symbols,
+        )
         marker = "CONTRACT-001: OfferQueryApi contract와 OFFER_NOT_FOUND 상수를 함께 보존한다."
         self.assertIn(
             marker,
@@ -1724,6 +1876,15 @@ class ReviewFastPathTest(unittest.TestCase):
         )
         self.assertNotIn("final_implementation_sha", body)
         self.assertNotIn("review_result", body)
+
+    def test_summary_body_rejects_missing_frozen_triage_digest(self):
+        triage = json.loads(self.source_tasks(Path.cwd().resolve())[0]["body"])
+        triage["frozen_digest"] = None
+
+        with self.assertRaisesRegex(
+            ValueError, "SUMMARY_SOURCE_TRIAGE_DIGEST_INVALID"
+        ):
+            review_fast.summary_body_from_triage(triage)
 
     def test_prepare_summary_uses_complete_generation_parent_closure(self):
         workspace = Path.cwd().resolve()

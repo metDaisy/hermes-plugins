@@ -1,0 +1,70 @@
+{
+  "schema": "kwc-delivery-responsibility-coverage-v1",
+  "source_profile": "coder",
+  "runtime_profile_dependency": false,
+  "intentionally_excluded_profile_state": [
+    "memory",
+    "session_history",
+    "profile_soul_loading",
+    "profile_runtime_paths"
+  ],
+  "responsibilities": [
+    {
+      "id": "immutable-card-admission",
+      "status": "ported",
+      "plugin_owners": ["skills/kwc-implementation-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["backend-implementation-card-v6", "product file을 수정하지 않고 typed blocker"]
+    },
+    {
+      "id": "expected-value-contradiction",
+      "status": "ported",
+      "plugin_owners": [
+        "skills/kwc-implementation-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ],
+      "runtime_markers": ["CARD_EXPECTED_VALUE_CONTRADICTION"]
+    },
+    {
+      "id": "scenario-selector-contradiction",
+      "status": "ported",
+      "plugin_owners": [
+        "skills/kwc-implementation-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ],
+      "runtime_markers": ["CARD_SCENARIO_SELECTOR_CONTRADICTION"]
+    },
+    {
+      "id": "exact-assertion-coverage",
+      "status": "ported",
+      "plugin_owners": ["skills/kwc-implementation-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["assertion coverage checklist", "generic conflict"]
+    },
+    {
+      "id": "external-producer-adapter-proof",
+      "status": "ported",
+      "plugin_owners": [
+        "skills/kwc-implementation-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ],
+      "runtime_markers": ["producer public contract", "adapter execution path", "placeholder adapter"]
+    },
+    {
+      "id": "gradle-verification",
+      "status": "adapted",
+      "plugin_owners": ["skills/kwc-implementation-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["gradle-mcp", "checkstyleMain", "checkstyleTest"]
+    },
+    {
+      "id": "completion-boundary",
+      "status": "adapted",
+      "plugin_owners": ["skills/kwc-implementation-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["residual_risks", "status: blocked"]
+    },
+    {
+      "id": "lifecycle-and-provenance",
+      "status": "controller-owned",
+      "plugin_owners": ["src/hermes_langchain/controller/kanban_agent_delivery.py"],
+      "runtime_markers": ["native claim", "invocation_key", "task_agent_delivery"]
+    }
+  ]
+}

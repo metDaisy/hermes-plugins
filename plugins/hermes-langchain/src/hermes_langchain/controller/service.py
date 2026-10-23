@@ -36,6 +36,10 @@ from .kanban_materialization import (
     HermesNativeKanbanMaterializationPort,
 )
 from .runtime import ControllerRuntime
+from .workflow_orchestration import (
+    WorkflowOrchestrator,
+    read_git_state,
+)
 
 _CONTROLLER_DIR = Path("plugin-data") / "hermes-langchain" / "controller" / "v2"
 _WORKFLOW_ID = "controller-probe-v1"
@@ -47,6 +51,7 @@ _DISPATCH_WORKFLOW_ID = "canonical-task-dispatch-v1"
 _AGENT_DELIVERY_WORKFLOW_ID = "canonical-task-agent-delivery-v1"
 _AGENT_RESULT_STORE_ID = "canonical-task-agent-result-v1"
 _COMPLETION_WORKFLOW_ID = "canonical-task-completion-v1"
+_ORCHESTRATION_WORKFLOW_ID = "kanban-workflow-orchestration-v1"
 _REGISTERED_WORKFLOW_IDS = (
     _WORKFLOW_ID,
     _TRIAGE_WORKFLOW_ID,
@@ -56,6 +61,7 @@ _REGISTERED_WORKFLOW_IDS = (
     _DISPATCH_WORKFLOW_ID,
     _AGENT_DELIVERY_WORKFLOW_ID,
     _COMPLETION_WORKFLOW_ID,
+    _ORCHESTRATION_WORKFLOW_ID,
 )
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _MAX_PROBE_TEXT_CHARS = 8_000
@@ -142,6 +148,47 @@ def execute_controller_action(
     if response.get("error") is None:
         response.pop("error", None)
     return response
+
+
+def execute_workflow_orchestration_action(
+    *,
+    ctx: Any,
+    profile_home: Path,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one migrated PM workflow situation through a fresh Agent."""
+
+    workflow_id = str(arguments.get("workflow_id") or "").strip()
+    if workflow_id != _ORCHESTRATION_WORKFLOW_ID:
+        raise ControllerPublicError(
+            f"unknown workflow orchestration contract: {workflow_id or '<empty>'}"
+        )
+    request = dict(arguments)
+    request["schema"] = "kanban-workflow-orchestration-request-v1"
+    from ..kanban.snapshot_service import read_board_snapshot
+
+    store = SQLiteArtifactStore.open(
+        controller_artifact_store_path(profile_home, workflow_id)
+    )
+    try:
+        receipt = WorkflowOrchestrator(
+            artifact_store=store,
+            staging_root=(
+                Path(profile_home).resolve()
+                / _CONTROLLER_DIR
+                / "workflow-orchestration-inputs"
+            ),
+            executor=HermesSubagentExecutor.from_plugin_context(
+                ctx,
+                durable_root=controller_lifecycle_root(profile_home),
+                defer_release=True,
+            ),
+            snapshot_reader=read_board_snapshot,
+            git_state_reader=read_git_state,
+        ).invoke(request)
+    finally:
+        store.close()
+    return {"ok": True, "workflow_id": workflow_id, **receipt}
 
 
 def execute_materialization_action(

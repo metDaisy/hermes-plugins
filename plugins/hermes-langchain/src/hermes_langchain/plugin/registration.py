@@ -1,9 +1,4 @@
-"""Hermes hook and tool registration for the plugin boundary.
-
-The reference plugins keep ``register(ctx)`` as a small composition root.  This
-module owns the declarative Hermes contracts while runtime handlers remain in
-``entrypoint``.
-"""
+"""Hermes tool registration for the Profile-independent Plugin boundary."""
 
 from __future__ import annotations
 
@@ -60,15 +55,82 @@ def _register_tool(
 def register_plugin(
     ctx: Any,
     *,
-    hooks: Mapping[str, Callback],
     handlers: Mapping[str, Handler],
-    checks: Mapping[str, Callback],
 ) -> None:
     """Register the fixed Hermes contracts against supplied runtime callbacks."""
 
-    for name, callback in hooks.items():
-        ctx.register_hook(name, callback)
-
+    _register_tool(
+        ctx,
+        name="hermes_langchain_run_workflow",
+        schema=_schema(
+            "hermes_langchain_run_workflow",
+            "Run one Plugin-owned PM workflow situation through a fresh Agent.",
+            {
+                "workflow_id": {
+                    "type": "string",
+                    "enum": ["kanban-workflow-orchestration-v1"],
+                },
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                },
+                "situation": {
+                    "type": "string",
+                    "enum": [
+                        "run-workflow",
+                        "implementation-checkpoint",
+                        "worker-needs-input",
+                        "route-review-findings",
+                        "summary-finalization",
+                        "service-planning",
+                        "sync-docs",
+                        "update-current-state",
+                        "regenerate-summary",
+                    ],
+                },
+                "board": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                },
+                "issue_number": {"type": "integer", "minimum": 1},
+                "generation": {"type": "integer", "minimum": 1},
+                "workspace_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
+                },
+                "task_id": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                        },
+                        {"type": "null"},
+                    ]
+                },
+            },
+            [
+                "workflow_id",
+                "artifact_id",
+                "situation",
+                "board",
+                "issue_number",
+                "generation",
+                "workspace_path",
+                "task_id",
+            ],
+        ),
+        handler=handlers["hermes_langchain_run_workflow"],
+        description="Execute and persist one Profile-independent KWC workflow situation.",
+        emoji="🧭",
+    )
     _register_tool(
         ctx,
         name="hermes_langchain_begin_authoring",
@@ -179,100 +241,6 @@ def register_plugin(
             emoji="🧭",
         )
 
-    shared_properties = {
-        "board": {"type": "string", "description": "Kanban board slug; omit for current board."},
-        "task_id": {"type": "string", "description": "Native Kanban task id."},
-        "body": {"type": "string", "description": "Comment body."},
-        "idempotency_key": {
-            "type": "string",
-            "description": "Stable unique key reused when retrying the same comment request.",
-        },
-    }
-    _register_tool(
-        ctx,
-        name="kwc_comment",
-        schema=_schema(
-            "kwc_comment",
-            "Add a KWC-routed comment. Mentions override the task assignee.",
-            shared_properties,
-            ["task_id", "body", "idempotency_key"],
-            additional_properties=None,
-        ),
-        handler=handlers["kwc_comment"],
-        description="Add a native Kanban comment and wake the routed Profile.",
-        emoji="💬",
-    )
-    _register_tool(
-        ctx,
-        name="kwc_reply",
-        schema=_schema(
-            "kwc_reply",
-            "Reply to a KWC comment without recursively waking another agent.",
-            {
-                **shared_properties,
-                "reply_to_comment_id": {
-                    "type": "integer",
-                    "description": "Source comment id being answered.",
-                },
-            },
-            ["task_id", "reply_to_comment_id", "body", "idempotency_key"],
-            additional_properties=None,
-        ),
-        handler=handlers["kwc_reply"],
-        description="Reply in the native Kanban thread without a routing loop.",
-        emoji="↩️",
-    )
-
-    response_properties = {
-        "invocation_id": {
-            "type": "string",
-            "description": "Opaque invocation id supplied by KWC.",
-        },
-        "outcome": {
-            "type": "string",
-            "description": "One of the outcomes allowed by this invocation.",
-        },
-        "task_id": {
-            "type": "string",
-            "description": "Related native Kanban task id, when applicable.",
-        },
-        "reason_code": {
-            "type": "string",
-            "description": "Compact stable reason code, not free-form reasoning.",
-        },
-    }
-    _register_tool(
-        ctx,
-        name="kwc_pm_response",
-        schema=_schema(
-            "kwc_pm_response",
-            "Submit the structured result for the current KWC PM invocation. "
-            "The invocation, Profile, session, and allowed outcome are validated.",
-            response_properties,
-            ["invocation_id", "outcome"],
-            additional_properties=None,
-        ),
-        handler=handlers["kwc_pm_response"],
-        check_fn=checks["kwc_pm_response"],
-        description="Submit a Profile/session-bound PM result without mutating Kanban.",
-        emoji="📨",
-    )
-    _register_tool(
-        ctx,
-        name="kwc_profile_response",
-        schema=_schema(
-            "kwc_profile_response",
-            "Submit the structured result for the current KWC Profile invocation. "
-            "The invocation, Profile, session, and allowed outcome are validated.",
-            response_properties,
-            ["invocation_id", "outcome"],
-            additional_properties=None,
-        ),
-        handler=handlers["kwc_profile_response"],
-        check_fn=checks["kwc_profile_response"],
-        description="Submit a Profile/session-bound typed result without mutating Kanban.",
-        emoji="📨",
-    )
     _register_tool(
         ctx,
         name="hermes_langchain_route",

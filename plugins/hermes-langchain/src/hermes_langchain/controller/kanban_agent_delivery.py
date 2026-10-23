@@ -37,25 +37,29 @@ _REQUEST_FIELDS = {
 }
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_IMPLEMENTATION_TOOLSETS = (
+_DELIVERY_VERIFICATION_TOOLSETS = (
     "file",
     "gradle-mcp",
     "codebase-memory-mcp",
     "semble-mcp",
 )
 _IMPLEMENTATION_GOAL = (
-    "CONTROLLER_IMPLEMENTATION_DELIVERY_V1\n"
+    "CONTROLLER_IMPLEMENTATION_DELIVERY_V2\n"
     "Read the exact staged skill.md and hydrate only files in the supplied immutable artifact directory. "
-    "Execute the accepted implementation card in the pinned workspace. Do not access Kanban, "
-    "Profile SOUL, memory, prior conversation, or select workflow transitions. Return only one "
+    "Execute the accepted implementation card in the pinned workspace using the plugin-owned Coder "
+    "contract. Validate card meaning against repository facts before mutation, preserve exact observable "
+    "and verification coverage, and block contradictions instead of inventing policy. Do not access "
+    "Kanban, Profile SOUL, memory, prior conversation, or select workflow transitions. Return only one "
     "JSON object matching the supplied delivery schema."
 )
 _REVIEW_GOAL = (
-    "CONTROLLER_REVIEW_DELIVERY_V1\n"
+    "CONTROLLER_REVIEW_DELIVERY_V2\n"
     "Read the exact staged skill.md and hydrate only files in the supplied immutable artifact directory. "
-    "Execute the accepted aggregate Review card in the pinned workspace. Do not access Profile "
-    "SOUL, memory, prior conversation, or select workflow transitions. Return only one JSON object "
-    "matching the supplied delivery schema."
+    "Execute the accepted aggregate Review card in the pinned workspace using the plugin-owned Reviewer "
+    "contract. Independently inspect the fixed diff and repository evidence, complete every review axis "
+    "and required verification, and remain read-only. Do not access Profile SOUL, memory, prior "
+    "conversation, or select workflow transitions. Return only one JSON object matching the supplied "
+    "delivery schema."
 )
 _SUMMARY_GOAL = (
     "CONTROLLER_SUMMARY_DELIVERY_V1\n"
@@ -64,6 +68,58 @@ _SUMMARY_GOAL = (
     "prior conversation, or select workflow transitions. Return only one JSON object matching the "
     "supplied delivery schema."
 )
+
+
+def _role_execution_contract(role: Any) -> dict[str, Any]:
+    """Return the closed Profile-independent execution contract for one card role."""
+
+    contracts = {
+        "implementation": {
+            "step_id": "implementation_delivery",
+            "goal": _IMPLEMENTATION_GOAL,
+            "toolsets": _DELIVERY_VERIFICATION_TOOLSETS,
+            "skills": ("kwc-implementation-delivery-runtime",),
+            "acceptance_criteria": (
+                "Use only accepted ArtifactRefs and the pinned workspace; block "
+                "CARD_EXPECTED_VALUE_CONTRADICTION or CARD_SCENARIO_SELECTOR_CONTRADICTION "
+                "before product mutation.",
+                "Prove every obligation, constraint, and observable leaf with exact assertion "
+                "coverage; verify the external producer public contract and adapter execution path.",
+                "Complete the declared focused, full backend, and quality gates without weakening "
+                "selectors or moving required scenarios into residual risk.",
+                "Return a typed delivery bound to the exact native task, run, and dispatch key.",
+            ),
+        },
+        "review": {
+            "step_id": "review_delivery",
+            "goal": _REVIEW_GOAL,
+            "toolsets": _DELIVERY_VERIFICATION_TOOLSETS,
+            "skills": ("kwc-review-delivery-runtime",),
+            "acceptance_criteria": (
+                "Reconstruct the fixed baseline-to-reviewed-head diff and independently inspect "
+                "source, tests, configuration, migration, and predecessor evidence.",
+                "Complete the five review axes plus security with exact evidence and disposition "
+                "every prior finding as resolved or continues.",
+                "Run the applicable Gradle, Modulith, and database verification without changing "
+                "product or workflow state; missing evidence is a blocker.",
+                "Return a typed delivery bound to the exact native task, run, and dispatch key.",
+            ),
+        },
+        "summary": {
+            "step_id": "summary_delivery",
+            "goal": _SUMMARY_GOAL,
+            "toolsets": ("file",),
+            "skills": ("kwc-summary-delivery-runtime",),
+            "acceptance_criteria": (
+                "Use only accepted ArtifactRefs and the pinned workspace contract.",
+                "Return a typed delivery bound to the exact native task, run, and dispatch key.",
+            ),
+        },
+    }
+    contract = contracts.get(role)
+    if contract is None:
+        raise KanbanAgentDeliveryError("EXECUTION_CONTRACT_INVALID", "task role is not canonical")
+    return dict(contract)
 
 
 class KanbanAgentDeliveryError(ValueError):
@@ -350,10 +406,7 @@ class AcceptedTaskAgentInvoker:
             step_id=execution["step_id"],
             goal=execution["goal"],
             allowed_toolsets=execution["toolsets"],
-            acceptance_criteria=(
-                "Use only accepted ArtifactRefs and the pinned workspace contract.",
-                "Return a typed delivery bound to the exact native task, run, and dispatch key.",
-            ),
+            acceptance_criteria=execution["acceptance_criteria"],
             output_schema=self._delivery_output_schema(),
             input=agent_input,
             working_directory=dispatch["workspace_path"],
@@ -972,36 +1025,7 @@ class AcceptedTaskAgentInvoker:
             raise KanbanAgentDeliveryError(
                 "EXECUTION_CONTRACT_INVALID", "task role is not uniquely graph-bound"
             )
-        contracts = {
-            "implementation": {
-                "step_id": "implementation_delivery",
-                "goal": _IMPLEMENTATION_GOAL,
-                "toolsets": _IMPLEMENTATION_TOOLSETS,
-                "skill": "kwc-implementation-delivery-runtime",
-            },
-            "review": {
-                "step_id": "review_delivery",
-                "goal": _REVIEW_GOAL,
-                "toolsets": _IMPLEMENTATION_TOOLSETS,
-                "skill": "kwc-review-delivery-runtime",
-            },
-            "summary": {
-                "step_id": "summary_delivery",
-                "goal": _SUMMARY_GOAL,
-                "toolsets": ("file",),
-                "skill": "kwc-summary-delivery-runtime",
-            },
-        }
-        contract = contracts.get(candidates[0].get("role"))
-        if contract is None:
-            raise KanbanAgentDeliveryError("EXECUTION_CONTRACT_INVALID", "task role is not canonical")
-        skill = contract["skill"]
-        return {
-            "step_id": contract["step_id"],
-            "goal": contract["goal"],
-            "toolsets": contract["toolsets"],
-            "skills": (skill,),
-        }
+        return _role_execution_contract(candidates[0].get("role"))
 
     def _delivery(
         self,

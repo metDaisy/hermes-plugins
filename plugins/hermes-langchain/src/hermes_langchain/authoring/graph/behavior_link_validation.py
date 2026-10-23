@@ -21,6 +21,20 @@ def _behavior_impl_keys(behavior: dict[str, Any]) -> set[str]:
     return {singular} if isinstance(singular, str) else set()
 
 
+def _implementation_behavior_ids(body: Any) -> set[str]:
+    if not isinstance(body, dict):
+        return set()
+    if body.get("schema") == "backend-implementation-card-v6":
+        trace = body.get("trace")
+        return set(trace.get("observable_ids", [])) if isinstance(trace, dict) else set()
+    body_slice = body.get("slice")
+    return (
+        set(body_slice.get("behavior_ids", []))
+        if isinstance(body_slice, dict)
+        else set()
+    )
+
+
 def validate_behavior_implementation_links(
     behaviors: Any,
     records: dict[str, dict[str, Any]],
@@ -39,12 +53,7 @@ def validate_behavior_implementation_links(
             if impl is None or impl.get("card_type") != "implementation":
                 errors.append(f"BEHAVIOR_IMPL_NOT_FOUND:{behavior_id}:{impl_key}")
             if impl and isinstance(impl.get("body"), dict):
-                body_slice = impl["body"].get("slice")
-                linked_ids = (
-                    set(body_slice.get("behavior_ids", []))
-                    if isinstance(body_slice, dict)
-                    else set()
-                )
+                linked_ids = _implementation_behavior_ids(impl["body"])
                 if behavior_id not in linked_ids:
                     errors.append(f"BEHAVIOR_IMPL_MISMATCH:{behavior_id}:{impl_key}")
 
@@ -63,13 +72,7 @@ def validate_behavior_implementation_links(
         if implementation_keys != planned_impl_keys:
             errors.append("IMPLEMENTATION_BEHAVIOR_COVERAGE")
         for impl_key in implementation_keys:
-            body = records[impl_key].get("body", {})
-            body_slice = body.get("slice") if isinstance(body, dict) else None
-            actual_ids = (
-                set(body_slice.get("behavior_ids", []))
-                if isinstance(body_slice, dict)
-                else set()
-            )
+            actual_ids = _implementation_behavior_ids(records[impl_key].get("body"))
             assigned_ids = {
                 behavior.get("id")
                 for behavior in behaviors or []

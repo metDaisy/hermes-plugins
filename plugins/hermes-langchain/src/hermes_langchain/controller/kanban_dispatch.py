@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -669,6 +670,11 @@ def _workspace(value: Any) -> str:
     if not isinstance(value, str) or value != value.strip() or not value:
         raise KanbanDispatchError("REQUEST_INVALID", "request.workspace_path is invalid")
     path = Path(value)
-    if not path.is_absolute() or path.resolve().as_posix() != path.as_posix() or not path.is_dir():
+    resolved = path.resolve()
+    if (
+        not path.is_absolute()
+        or os.path.normcase(str(resolved)) != os.path.normcase(str(path.absolute()))
+        or not resolved.is_dir()
+    ):
         raise KanbanDispatchError("REQUEST_INVALID", "request.workspace_path is unavailable")
-    return path.as_posix()
+    return value

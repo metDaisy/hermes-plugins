@@ -1,0 +1,67 @@
+{
+  "schema": "kwc-delivery-responsibility-coverage-v1",
+  "source_profile": "reviewer",
+  "runtime_profile_dependency": false,
+  "intentionally_excluded_profile_state": [
+    "memory",
+    "session_history",
+    "profile_soul_loading",
+    "profile_runtime_paths"
+  ],
+  "responsibilities": [
+    {
+      "id": "fixed-review-scope",
+      "status": "ported",
+      "plugin_owners": [
+        "skills/kwc-review-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ],
+      "runtime_markers": ["baseline_sha..reviewed_head_sha", "fixed baseline-to-reviewed-head diff"]
+    },
+    {
+      "id": "direct-source-discovery",
+      "status": "ported",
+      "plugin_owners": ["skills/kwc-review-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["direct source", "Codebase Memory", "Semble"]
+    },
+    {
+      "id": "independent-review-axes",
+      "status": "ported",
+      "plugin_owners": ["skills/kwc-review-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["spec", "maintainability", "persistence", "architecture", "evolution-compatibility", "security"]
+    },
+    {
+      "id": "independent-verification",
+      "status": "ported",
+      "plugin_owners": [
+        "skills/kwc-review-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ],
+      "runtime_markers": ["gradle-mcp", "Modulith", "database"]
+    },
+    {
+      "id": "prior-finding-lineage",
+      "status": "ported",
+      "plugin_owners": ["skills/kwc-review-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["prior_findings", "resolved", "continues"]
+    },
+    {
+      "id": "finding-classification",
+      "status": "ported",
+      "plugin_owners": ["skills/kwc-review-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["correction-required", "context-required", "decision-required"]
+    },
+    {
+      "id": "read-only-boundary",
+      "status": "adapted",
+      "plugin_owners": ["skills/kwc-review-delivery-runtime/SKILL.md"],
+      "runtime_markers": ["Product와 workflow state는 read-only", "implementation 수정은 수행하지 않는다"]
+    },
+    {
+      "id": "lifecycle-and-provenance",
+      "status": "controller-owned",
+      "plugin_owners": ["src/hermes_langchain/controller/kanban_agent_delivery.py"],
+      "runtime_markers": ["native claim", "predecessors.json", "task_agent_delivery"]
+    }
+  ]
+}

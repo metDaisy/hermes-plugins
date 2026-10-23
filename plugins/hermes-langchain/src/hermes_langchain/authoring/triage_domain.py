@@ -54,6 +54,9 @@ CROSS_MODULE_FACT_GROUPS = {
     "purchase-limit": ("구매 한도", "구매 제한", "purchase limit", "max purchase"),
 }
 ERROR_OWNERSHIP_MARKERS = ("오류 소유", "error ownership", "error origin", "오류의 producer")
+REQUIRED_ACCEPTANCE_SYMBOL = re.compile(
+    r"(?<![A-Za-z0-9_$])[A-Z][A-Za-z0-9_$]*(?:Exception|Error)(?![A-Za-z0-9_$])"
+)
 
 TOP_LEVEL_FIELDS = {
     "schema",
@@ -96,6 +99,129 @@ def _repository_source(value: Any) -> bool:
         return False
     locator = str(value.get("locator") or "").strip()
     return bool(locator) and not locator.startswith(("http://", "https://"))
+
+
+def _exact_production_method(locator: Any) -> bool:
+    if not isinstance(locator, str):
+        return False
+    match = re.fullmatch(
+        r"src/main/java/(.+)\.java#([A-Za-z_$][\w$]*)",
+        locator.replace("\\", "/"),
+    )
+    if match is None:
+        return False
+    class_name = match.group(1).rsplit("/", 1)[-1]
+    return match.group(2) != class_name
+
+
+def _method_token(locator: Any) -> str | None:
+    if not isinstance(locator, str) or "#" not in locator:
+        return None
+    path, member = locator.replace("\\", "/").rsplit("#", 1)
+    method = member.split("(", 1)[0]
+    type_name = path.rsplit("/", 1)[-1].removesuffix(".java")
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", type_name):
+        return None
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", method) or method == type_name:
+        return None
+    return f"{type_name}#{method}"
+
+
+def _planned_method_signatures(value: Any) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    signatures = {
+        token
+        for locator in re.findall(
+            r"src/main/java/[^\s]+\.java#[A-Za-z_$][A-Za-z0-9_$]*\s*\([^)]*\)",
+            value.replace("\\", "/"),
+        )
+        if (token := _method_token(locator)) is not None
+    }
+    signatures.update(
+        match.group(0).split("(", 1)[0].strip()
+        for match in re.finditer(
+            r"\b[A-Z][A-Za-z0-9_$]*#[A-Za-z_$][A-Za-z0-9_$]*\s*\([^)]*\)",
+            value,
+        )
+    )
+    return signatures
+
+
+def _exact_test_selector(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.replace("\\", "/")
+    return bool(
+        re.search(
+            r"src/test/java/(?:[^\s/]+/)*[A-Z][A-Za-z0-9_$]*(?:Test|Tests|Spec|Specs|IT)\.java#[A-Za-z_$][\w$]*",
+            normalized,
+        )
+        or re.search(
+            r"\b(?:[a-z_][\w$]*\.)+[A-Z][A-Za-z0-9_$]*(?:Test|Tests|Spec|Specs|IT)#[A-Za-z_$][\w$]*",
+            normalized,
+        )
+    )
+
+
+def _test_selector_identity(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.replace("\\", "/")
+    patterns = (
+        r"src/test/java/(?:[^\s/]+/)*([A-Z][A-Za-z0-9_$]*(?:Test|Tests|Spec|Specs|IT))\.java#([A-Za-z_$][A-Za-z0-9_$]*)",
+        r"\b(?:[a-z_][A-Za-z0-9_$]*\.)*([A-Z][A-Za-z0-9_$]*(?:Test|Tests|Spec|Specs|IT))#([A-Za-z_$][A-Za-z0-9_$]*)",
+        r"\b([A-Z][A-Za-z0-9_$]*(?:Test|Tests|Spec|Specs|IT))\.([A-Za-z_$][A-Za-z0-9_$]*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match is not None:
+            return f"{match.group(1)}#{match.group(2)}"
+    return None
+
+
+def _source_confirms_role(source: Any, markers: tuple[str, ...]) -> bool:
+    if not isinstance(source, dict):
+        return False
+    locator = str(source.get("locator") or "").replace("\\", "/")
+    if re.search(r"src/main/java/[^\s]+\.java(?:#[A-Za-z_$][\w$]*)?$", locator) is None:
+        return False
+    text = f"{locator} {source.get('claim', '')}".casefold()
+    return any(marker in text for marker in markers)
+
+
+def _production_method_locator(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = re.search(
+        r"src/main/java/[^\s/]+(?:/[^\s/]+)*/([A-Za-z_$][\w$]*)\.java#([A-Za-z_$][\w$]*)$",
+        value.replace("\\", "/"),
+    )
+    return match is not None and match.group(1) != match.group(2)
+
+
+def _slice_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts: list[str] = []
+    for field in ("outcome", "scope", "out_of_scope"):
+        current = value.get(field)
+        if isinstance(current, str):
+            parts.append(current)
+        elif isinstance(current, list):
+            parts.extend(item for item in current if isinstance(item, str))
+    return " ".join(parts)
+
+
+def _verification_only_slice(value: Any) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("scope"), list):
+        return False
+    normalized = " ".join(
+        item.casefold() for item in value["scope"] if isinstance(item, str)
+    )
+    return "production change 없음" in normalized and (
+        "verification" in normalized or "검증" in normalized
+    )
 
 
 def _string_list(value: Any, *, nonempty: bool = False) -> bool:
@@ -669,6 +795,48 @@ def _validate_targets(body: dict[str, Any], errors: list[str]) -> set[str]:
     return known
 
 
+_TARGET_COVERAGE_CATEGORIES = {
+    "persistence": (
+        "repository",
+        "persistence",
+        "transaction",
+        "pessimistic",
+        "lock",
+        "영속",
+        "트랜잭션",
+        "잠금",
+        "동시성",
+    ),
+}
+
+
+def _validate_requirement_target_coverage(body: dict[str, Any], errors: list[str]) -> None:
+    intent = body.get("intent")
+    targets = body.get("investigation_targets")
+    if not isinstance(intent, dict) or not isinstance(targets, list):
+        return
+    target_text = " ".join(
+        f"{target.get('locator', '')} {target.get('question', '')}".lower()
+        for target in targets
+        if isinstance(target, dict)
+    )
+    requirements = intent.get("change_requirements")
+    if not isinstance(requirements, list):
+        return
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        requirement_id = requirement.get("id")
+        outcome = str(requirement.get("outcome") or "").lower()
+        for category, markers in _TARGET_COVERAGE_CATEGORIES.items():
+            if any(marker in outcome for marker in markers) and not any(
+                marker in target_text for marker in markers
+            ):
+                errors.append(
+                    f"UNCOVERED_CHANGE_REQUIREMENT_TARGET:{requirement_id or 'unknown'}:{category}"
+                )
+
+
 def _validate_gaps(
     body: dict[str, Any],
     errors: list[str],
@@ -698,11 +866,73 @@ def _validate_gaps(
         gap_identifier = _unique_id(gap, known, errors, "CONFIRMED_GAP")
         for field in ("subject", "current_state", "required_state"):
             _error(errors, _non_empty_string(gap.get(field)), f"MISSING_{prefix}_{field.upper()}")
+        required_state = str(gap.get("required_state") or "")
+        normalized_gap = f"{gap.get('subject', '')} {required_state}".lower()
+        if any(
+            marker in normalized_gap
+            for marker in ("이름 있는 behavior", "named behavior")
+        ) and not re.search(
+            r"\b[A-Z][A-Za-z0-9_$]*(?:#[a-zA-Z_$][\w$]*|\.[a-zA-Z_$][\w$]*\([^)]*\))",
+            required_state,
+        ):
+            errors.append(f"EXACT_NAMED_BEHAVIOR_REQUIRED:{gap_identifier or index}")
+        rules = gap.get("rules")
+        has_layer_rule = isinstance(rules, list) and any(
+            isinstance(rule, dict)
+            and str(rule.get("locator") or "").startswith(
+                "docs/backend-development-guide.md#"
+            )
+            for rule in rules
+        )
+        if has_layer_rule and any(
+            marker in normalized_gap
+            for marker in ("계층", "package", "layer", "배치", " port", "port ")
+        ) and not (
+            re.search(
+                r"(?:src/main/java/[^\s]+|(?:[a-z_][\w$]*\.){2,}[a-z_][\w$]*)",
+                required_state,
+            )
+            or re.search(
+                r"(?:domain|application|presentation|infra)/[a-z0-9_/.-]+",
+                required_state,
+            )
+        ):
+            errors.append(f"EXACT_LAYER_PLACEMENT_REQUIRED:{gap_identifier or index}")
+        evidence = gap.get("evidence")
+        if (
+            "http" in normalized_gap
+            and "dto" in normalized_gap
+            and "command" in normalized_gap
+            and "result" in normalized_gap
+        ):
+            evidence_rows = evidence if isinstance(evidence, list) else []
+            if not any(
+                _source_confirms_role(item, ("request", "요청"))
+                for item in evidence_rows
+            ):
+                errors.append(
+                    f"HTTP_DTO_REQUEST_EVIDENCE_REQUIRED:{gap_identifier or index}"
+                )
+            if not any(
+                _source_confirms_role(item, ("response", "result", "응답", "결과"))
+                for item in evidence_rows
+            ):
+                errors.append(
+                    f"HTTP_DTO_RESPONSE_EVIDENCE_REQUIRED:{gap_identifier or index}"
+                )
+            if not any(
+                isinstance(item, dict)
+                and _production_method_locator(item.get("locator"))
+                for item in evidence_rows
+            ):
+                errors.append(
+                    f"HTTP_DTO_OPERATION_SIGNATURE_EVIDENCE_REQUIRED:"
+                    f"{gap_identifier or index}"
+                )
         _validate_sources(gap.get("evidence"), errors, f"{prefix}_EVIDENCE", unique_locators=True)
         _validate_sources(gap.get("rules"), errors, f"{prefix}_RULES", unique_locators=True)
         _validate_korean_source_claims(gap.get("evidence"), errors, f"{prefix}_EVIDENCE")
         _validate_korean_source_claims(gap.get("rules"), errors, f"{prefix}_RULES")
-        rules = gap.get("rules")
         _error(
             errors,
             isinstance(rules, list) and any(_repository_source(rule) for rule in rules),
@@ -812,6 +1042,11 @@ def _validate_verification(
                 _non_empty_string(locator) and locator.replace("\\", "/").startswith("src/main/"),
                 f"INVALID_{prefix}_PRODUCTION_SEAM_LOCATOR",
             )
+            _error(
+                errors,
+                _exact_production_method(locator),
+                f"EXACT_VERIFICATION_PRODUCTION_SEAM_REQUIRED:{identifier or index}",
+            )
         if coverage == "covered":
             if not isinstance(evidence, list) or not any(_is_test_evidence(item) for item in evidence):
                 errors.append(f"COVERED_VERIFICATION_WITHOUT_TEST_EVIDENCE:{identifier}")
@@ -824,7 +1059,30 @@ def _validate_verification(
         elif coverage == "missing":
             _error(errors, evidence == [], f"MISSING_VERIFICATION_WITH_EVIDENCE:{identifier}")
             _error(errors, _non_empty_string(entry.get("coverage_gap")), f"MISSING_VERIFICATION_WITHOUT_GAP:{identifier}")
-        _error(errors, _string_list(entry.get("required_verification"), nonempty=True), f"MISSING_{prefix}_REQUIRED_VERIFICATION")
+        required_verification = entry.get("required_verification")
+        _error(errors, _string_list(required_verification, nonempty=True), f"MISSING_{prefix}_REQUIRED_VERIFICATION")
+        selector_counts: dict[str, int] = {}
+        if isinstance(required_verification, list):
+            for item in required_verification:
+                identity = _test_selector_identity(item)
+                if identity is not None:
+                    selector_counts[identity] = selector_counts.get(identity, 0) + 1
+        for identity, count in sorted(selector_counts.items()):
+            if count > 1:
+                errors.append(
+                    "DUPLICATE_REQUIRED_VERIFICATION_SELECTOR:"
+                    f"{identifier or index}:{identity}"
+                )
+        exact_evidence = isinstance(evidence, list) and any(
+            _exact_test_selector(item.get("locator"))
+            for item in evidence
+            if isinstance(item, dict)
+        )
+        exact_planned = isinstance(required_verification, list) and any(
+            _exact_test_selector(item) for item in required_verification
+        )
+        if not (exact_evidence or exact_planned):
+            errors.append(f"EXACT_VERIFICATION_SELECTOR_REQUIRED:{identifier or index}")
     for identifier in sorted(observable_ids - observed_observables):
         errors.append(f"UNMAPPED_PRESERVED_OBSERVABLE:{identifier}")
     return known
@@ -845,6 +1103,50 @@ def _validate_slices(
     sliced_gaps: set[str] = set()
     mapped_contract_changes: set[str] = set()
     dependencies: list[tuple[str, list[Any], str]] = []
+    accepted_observables: set[str] = set()
+    raw_verification = body.get("verification_matrix")
+    verification_seams = {
+        item.get("id"): item.get("production_seam", {}).get("locator")
+        for item in (raw_verification if isinstance(raw_verification, list) else [])
+        if isinstance(item, dict)
+        and isinstance(item.get("production_seam"), dict)
+    }
+    verification_required_selectors = {
+        item.get("id"): {
+            identity
+            for required in item.get("required_verification", [])
+            if (identity := _test_selector_identity(required)) is not None
+        }
+        for item in (raw_verification if isinstance(raw_verification, list) else [])
+        if isinstance(item, dict) and _non_empty_string(item.get("id"))
+    }
+    intent = body.get("intent")
+    requirements = intent.get("change_requirements") if isinstance(intent, dict) else None
+    requirement_outcomes = {
+        item.get("id"): str(item.get("outcome") or "").casefold()
+        for item in (requirements if isinstance(requirements, list) else [])
+        if isinstance(item, dict) and _non_empty_string(item.get("id"))
+    }
+    http_binding_requirements = {
+        identifier
+        for identifier, outcome in requirement_outcomes.items()
+        if "http binding" in outcome
+        or ("presentation" in outcome and "입력 형식" in outcome)
+    }
+    application_boundary_requirements = {
+        identifier
+        for identifier, outcome in requirement_outcomes.items()
+        if "application" in outcome
+        and any(marker in outcome for marker in ("command", "result"))
+        and any(marker in outcome for marker in ("transport-neutral", "request", "response"))
+    }
+    structural_finalization_requirements = {
+        identifier
+        for identifier, outcome in requirement_outcomes.items()
+        if any(marker in outcome for marker in ("modulith", "모듈 경계", "구조 검증", "계층 회귀"))
+        and any(marker in outcome for marker in ("검증", "테스트", "test", "verification"))
+    }
+    mutating_contract_owners: dict[str, str] = {}
     if not isinstance(slices, list):
         return mapped_contract_changes
     fields = {
@@ -886,13 +1188,17 @@ def _validate_slices(
         acceptance = item.get("acceptance")
         _error(errors, isinstance(acceptance, list) and bool(acceptance), f"MISSING_{prefix}_ACCEPTANCE")
         acceptance_ids: set[str] = set()
+        slice_requirement_ids: set[str] = set()
+        slice_verification_ids: set[str] = set()
         if isinstance(acceptance, list):
             for acceptance_index, criterion in enumerate(acceptance):
                 criterion_prefix = f"{prefix}_ACCEPTANCE:{acceptance_index}"
                 criterion_fields = {"id", "criterion", "requirement_ids", "observable_ids", "verification_ids"}
                 if not _exact_fields(criterion, criterion_fields, errors, criterion_prefix):
                     continue
-                _unique_id(criterion, acceptance_ids, errors, f"{prefix}_ACCEPTANCE")
+                acceptance_id = _unique_id(
+                    criterion, acceptance_ids, errors, f"{prefix}_ACCEPTANCE"
+                )
                 _error(errors, _non_empty_string(criterion.get("criterion")), f"MISSING_{criterion_prefix}_CRITERION")
                 _error(
                     errors,
@@ -909,6 +1215,92 @@ def _validate_slices(
                     if isinstance(references, list):
                         for reference in references:
                             _error(errors, reference in known_ids, f"UNKNOWN_{criterion_prefix}_{field.upper()}:{reference}")
+                        if field == "observable_ids":
+                            accepted_observables.update(
+                                reference
+                                for reference in references
+                                if reference in observable_ids
+                            )
+                        elif field == "requirement_ids":
+                            slice_requirement_ids.update(
+                                reference
+                                for reference in references
+                                if reference in requirement_ids
+                            )
+                        elif field == "verification_ids":
+                            slice_verification_ids.update(
+                                reference
+                                for reference in references
+                                if reference in verification_ids
+                            )
+                if not _verification_only_slice(item):
+                    acceptance_verifications = criterion.get("verification_ids")
+                    tokens = {
+                        _method_token(verification_seams.get(verification_id))
+                        for verification_id in (
+                            acceptance_verifications
+                            if isinstance(acceptance_verifications, list)
+                            else []
+                        )
+                    }
+                    tokens.discard(None)
+                    criterion_text = str(criterion.get("criterion") or "")
+                    if len(tokens) == 1 and not any(
+                        token in criterion_text for token in tokens
+                    ):
+                        errors.append(
+                            "ACCEPTANCE_PRODUCTION_METHOD_REQUIRED:"
+                            f"{identifier or index}:{acceptance_id or acceptance_index}"
+                        )
+        if (
+            slice_requirement_ids & http_binding_requirements
+            and slice_requirement_ids & application_boundary_requirements
+        ):
+            errors.append(
+                f"MIXED_HTTP_AND_APPLICATION_BOUNDARY_SLICE:{identifier or index}"
+            )
+        for requirement_id in sorted(
+            slice_requirement_ids & structural_finalization_requirements
+        ):
+            if not _verification_only_slice(item):
+                errors.append(
+                    "STRUCTURAL_FINALIZATION_SLICE_REQUIRED:"
+                    f"{identifier or index}:{requirement_id}"
+                )
+        if _verification_only_slice(item):
+            if index != len(slices) - 1:
+                errors.append(
+                    f"VERIFICATION_SLICE_MUST_BE_LAST:{identifier or index}"
+                )
+            for scope_index, scope_entry in enumerate(item.get("scope") or []):
+                if isinstance(scope_entry, str) and re.match(
+                    r"\s*(?:create|modify|move|delete|생성|수정|이동|삭제)\s*:?\s*",
+                    scope_entry,
+                    re.IGNORECASE,
+                ):
+                    errors.append(
+                        "VERIFICATION_SLICE_OWNS_PRODUCTION_CHANGE:"
+                        f"{identifier or index}:{scope_index}"
+                    )
+            scope_selectors = {
+                identity
+                for scope_entry in item.get("scope") or []
+                if isinstance(scope_entry, str)
+                and scope_entry.lstrip().casefold().startswith("verify:")
+                and (identity := _test_selector_identity(scope_entry)) is not None
+            }
+            referenced_selectors = {
+                selector
+                for verification_id in slice_verification_ids
+                for selector in verification_required_selectors.get(
+                    verification_id, set()
+                )
+            }
+            for selector in sorted(scope_selectors - referenced_selectors):
+                errors.append(
+                    "FINALIZATION_SCOPE_SELECTOR_NOT_IN_VERIFICATION:"
+                    f"{identifier or index}:{selector}"
+                )
         depends_on = item.get("depends_on")
         _error(errors, _string_list(depends_on), f"INVALID_{prefix}_DEPENDS_ON")
         if identifier is not None and isinstance(depends_on, list):
@@ -926,12 +1318,305 @@ def _validate_slices(
                 )
                 if contract_id in contract_change_ids:
                     mapped_contract_changes.add(contract_id)
+                    if not _verification_only_slice(item) and identifier is not None:
+                        previous = mutating_contract_owners.get(contract_id)
+                        if previous is not None and previous != identifier:
+                            errors.append(
+                                "DUPLICATE_MUTATING_CONTRACT_OWNER:"
+                                f"{contract_id}:{previous}:{identifier}"
+                            )
+                        mutating_contract_owners[contract_id] = identifier
     for identifier, depends_on, prefix in dependencies:
         for dependency in depends_on:
             _error(errors, dependency in known and dependency != identifier, f"UNKNOWN_{prefix}_DEPENDENCY:{dependency}")
+    for observable_id in sorted(observable_ids - accepted_observables):
+        errors.append(f"UNACCEPTED_PRESERVED_OBSERVABLE:{observable_id}")
     for gap_id in sorted(gap_ids - sliced_gaps):
         errors.append(f"UNSLICED_CONFIRMED_GAP:{gap_id}")
     return mapped_contract_changes
+
+
+def _validate_acceptance_production_seams(
+    body: dict[str, Any], errors: list[str]
+) -> None:
+    raw_verification = body.get("verification_matrix")
+    raw_slices = body.get("implementation_slices")
+    if not isinstance(raw_verification, list) or not isinstance(raw_slices, list):
+        return
+    verification_seams = {
+        item.get("id"): item.get("production_seam", {}).get("locator")
+        for item in raw_verification
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and isinstance(item.get("production_seam"), dict)
+    }
+    for slice_body in raw_slices:
+        if not isinstance(slice_body, dict) or _verification_only_slice(slice_body):
+            continue
+        slice_id = slice_body.get("id", "unknown")
+        for acceptance in slice_body.get("acceptance", []):
+            if not isinstance(acceptance, dict):
+                continue
+            seams = {
+                verification_seams.get(verification_id)
+                for verification_id in acceptance.get("verification_ids", [])
+                if _exact_production_method(verification_seams.get(verification_id))
+            }
+            if len(seams) > 1:
+                errors.append(
+                    "MULTIPLE_ACCEPTANCE_PRODUCTION_SEAMS:"
+                    f"{slice_id}:{acceptance.get('id', 'unknown')}"
+                )
+
+
+def _validate_acceptance_required_symbols(
+    body: dict[str, Any], errors: list[str]
+) -> None:
+    raw_gaps = body.get("confirmed_gaps")
+    raw_slices = body.get("implementation_slices")
+    if not isinstance(raw_gaps, list) or not isinstance(raw_slices, list):
+        return
+    gaps = {
+        item.get("id"): item
+        for item in raw_gaps
+        if isinstance(item, dict) and _non_empty_string(item.get("id"))
+    }
+    for slice_body in raw_slices:
+        if not isinstance(slice_body, dict):
+            continue
+        slice_id = slice_body.get("id", "unknown")
+        required_symbols = {
+            symbol
+            for gap_id in slice_body.get("gap_ids", [])
+            for symbol in REQUIRED_ACCEPTANCE_SYMBOL.findall(
+                str(gaps.get(gap_id, {}).get("required_state") or "")
+            )
+        }
+        acceptance_text = "\n".join(
+            str(item.get("criterion") or "")
+            for item in slice_body.get("acceptance", [])
+            if isinstance(item, dict)
+        )
+        for symbol in sorted(required_symbols):
+            if symbol not in acceptance_text:
+                errors.append(
+                    f"ACCEPTANCE_REQUIRED_SYMBOL_MISSING:{slice_id}:{symbol}"
+                )
+
+
+def _validate_gap_artifact_plans(body: dict[str, Any], errors: list[str]) -> None:
+    gaps = body.get("confirmed_gaps")
+    slices = body.get("implementation_slices")
+    contracts = body.get("contract_changes")
+    verification = body.get("verification_matrix")
+    if not all(isinstance(value, list) for value in (gaps, slices, contracts, verification)):
+        return
+    contract_by_id = {
+        item.get("id"): item
+        for item in contracts
+        if isinstance(item, dict) and _non_empty_string(item.get("id"))
+    }
+    verification_tokens = {
+        _method_token(item.get("production_seam", {}).get("locator"))
+        for item in verification
+        if isinstance(item, dict) and isinstance(item.get("production_seam"), dict)
+    }
+    verification_tokens.discard(None)
+    operation_markers = (
+        "create",
+        "modify",
+        "move-source",
+        "move-target",
+        "delete",
+        "preserve",
+        "verify",
+        "생성",
+        "수정",
+        "이동",
+        "삭제",
+        "보존",
+        "검증",
+    )
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+        gap_id = gap.get("id")
+        linked = [
+            item
+            for item in slices
+            if isinstance(item, dict) and gap_id in (item.get("gap_ids") or [])
+        ]
+        plan_entries = [
+            entry
+            for item in linked
+            for entry in item.get("scope", [])
+            if isinstance(entry, str)
+        ]
+        plan_text = " ".join(plan_entries)
+        gap_text = " ".join(
+            str(gap.get(field) or "")
+            for field in ("subject", "current_state", "required_state")
+        )
+        evidence = gap.get("evidence") if isinstance(gap.get("evidence"), list) else []
+        evidence_methods: set[str] = set()
+        for source in evidence:
+            if not isinstance(source, dict):
+                continue
+            locator = str(source.get("locator") or "").replace("\\", "/")
+            if not locator.startswith("src/main/java/"):
+                continue
+            path = locator.split("#", 1)[0]
+            type_name = path.rsplit("/", 1)[-1].removesuffix(".java")
+            token = _method_token(locator)
+            if token is not None:
+                evidence_methods.add(token)
+                if (token in gap_text or type_name in gap_text) and not any(
+                    locator in entry and any(marker in entry.casefold() for marker in operation_markers)
+                    for entry in plan_entries
+                ):
+                    errors.append(f"METHOD_PLAN_DISPOSITION_REQUIRED:{gap_id}:{locator}")
+            elif type_name in gap_text:
+                if not any(
+                    path in entry and any(marker in entry.casefold() for marker in operation_markers)
+                    for entry in plan_entries
+                ):
+                    errors.append(f"ARTIFACT_PLAN_DISPOSITION_REQUIRED:{gap_id}:{path}")
+
+        required_state = str(gap.get("required_state") or "")
+        planned_tokens = set(
+            re.findall(
+                r"\b[A-Z][A-Za-z0-9_$]*#[A-Za-z_$][A-Za-z0-9_$]*",
+                required_state,
+            )
+        ) - evidence_methods
+        planned_signatures = _planned_method_signatures(plan_text)
+        for token in sorted(planned_tokens):
+            if token not in planned_signatures:
+                errors.append(f"PLANNED_METHOD_SIGNATURE_REQUIRED:{gap_id}:{token}")
+            if token not in verification_tokens:
+                errors.append(f"PLANNED_METHOD_VERIFICATION_SEAM_REQUIRED:{gap_id}:{token}")
+
+        normalized_gap = gap_text.casefold()
+        if all(marker in normalized_gap for marker in ("http", "dto", "command", "result")):
+            operation_sources = [
+                source
+                for source in evidence
+                if isinstance(source, dict)
+                and _production_method_locator(source.get("locator"))
+            ]
+            role_markers = {
+                "HTTP_REQUEST": ("http request", "request dto", "요청 dto", "요청 모델"),
+                "HTTP_RESPONSE": ("http response", "response dto", "응답 dto", "응답 모델"),
+                "APPLICATION_COMMAND": ("application command", "command", "명령"),
+                "APPLICATION_RESULT": ("application result", "result", "결과"),
+            }
+            role_paths: dict[str, set[str]] = {}
+            for label, markers in role_markers.items():
+                role_paths[label] = {
+                    path
+                    for entry in plan_entries
+                    if any(marker in entry.casefold() for marker in markers)
+                    for path in re.findall(r"src/main/java/[^\s]+\.java", entry)
+                }
+                if not role_paths[label]:
+                    errors.append(f"HTTP_DTO_PLANNED_{label}_REQUIRED:{gap_id}")
+            planned_paths = set().union(*role_paths.values())
+            if len(planned_paths) < len(role_paths):
+                errors.append(f"HTTP_DTO_DISTINCT_BOUNDARY_ARTIFACTS_REQUIRED:{gap_id}")
+            for source in operation_sources:
+                locator = str(source.get("locator") or "")
+                if re.search(rf"{re.escape(locator)}\s*\([^)]*\)", plan_text) is None:
+                    errors.append(f"HTTP_DTO_OPERATION_SIGNATURE_PLAN_REQUIRED:{gap_id}:{locator}")
+            referenced_contracts = {
+                contract_id
+                for item in linked
+                for contract_id in (item.get("contract_change_ids") or [])
+            }
+            contract_text = " ".join(
+                " ".join(str(contract_by_id[contract_id].get(field) or "") for field in ("consumer", "producer", "change"))
+                for contract_id in referenced_contracts
+                if contract_id in contract_by_id
+            ).casefold()
+            if not all(
+                any(marker in contract_text for marker in markers)
+                for markers in role_markers.values()
+            ):
+                errors.append(f"HTTP_DTO_CONTRACT_CHANGE_REQUIRED:{gap_id}")
+
+        if any(marker in normalized_gap for marker in ("계층", "package", "layer", "이동", "move")):
+            for source in evidence:
+                if not isinstance(source, dict):
+                    continue
+                locator = str(source.get("locator") or "").replace("\\", "/")
+                if not locator.startswith("src/main/java/") or "#" in locator:
+                    continue
+                basename = locator.rsplit("/", 1)[-1]
+                targets = {
+                    match
+                    for match in re.findall(r"src/main/java/[^\s]+\.java", plan_text)
+                    if match.endswith("/" + basename) and match != locator
+                }
+                if not targets:
+                    errors.append(f"MOVE_TARGET_ARTIFACT_REQUIRED:{gap_id}:{locator}")
+
+
+def _validate_modulith_verification(body: dict[str, Any], errors: list[str]) -> None:
+    intent = body.get("intent")
+    quality_gates = intent.get("quality_gates") if isinstance(intent, dict) else None
+    if not isinstance(quality_gates, list) or not any(
+        any(marker in str(item.get("outcome") or "").casefold() for marker in ("modulith", "module", "구조"))
+        for item in quality_gates
+        if isinstance(item, dict)
+    ):
+        return
+    gaps = body.get("confirmed_gaps")
+    slices = body.get("implementation_slices")
+    structural_gap = isinstance(gaps, list) and any(
+        any(
+            marker in " ".join(
+                str(item.get(field) or "")
+                for field in ("subject", "current_state", "required_state")
+            ).casefold()
+            for marker in ("modulith", "module", "모듈", "구조", "계층", "layer", "package")
+        )
+        for item in gaps
+        if isinstance(item, dict)
+    )
+    verification_slice = isinstance(slices, list) and any(
+        _verification_only_slice(item) for item in slices
+    )
+    if not (structural_gap or verification_slice):
+        return
+    verification = body.get("verification_matrix")
+    texts: list[str] = []
+    if isinstance(verification, list):
+        for item in verification:
+            if not isinstance(item, dict):
+                continue
+            texts.extend(
+                str(source.get("locator") or "")
+                for source in item.get("evidence", [])
+                if isinstance(source, dict)
+            )
+            texts.extend(
+                value
+                for value in item.get("required_verification", [])
+                if isinstance(value, str)
+            )
+    if isinstance(slices, list):
+        for item in slices:
+            if not isinstance(item, dict):
+                continue
+            texts.extend(
+                value for value in item.get("scope", []) if isinstance(value, str)
+            )
+            texts.extend(
+                str(criterion.get("criterion") or "")
+                for criterion in item.get("acceptance", [])
+                if isinstance(criterion, dict)
+            )
+    if not any("ModularityTest#" in text and _exact_test_selector(text) for text in texts):
+        errors.append("MODULITH_EXACT_SELECTOR_REQUIRED")
 
 
 def _validate_contract_changes(body: dict[str, Any], errors: list[str], verification_ids: set[str]) -> None:
@@ -1106,6 +1791,7 @@ def validate(body: Any, status: str | None = None) -> list[str]:
     _validate_identity(body, errors)
     requirement_ids, observable_ids, _ = _validate_intent(body, errors)
     target_ids = _validate_targets(body, errors)
+    _validate_requirement_target_coverage(body, errors)
     handoff = body.get("handoff")
     if _exact_fields(handoff, {"graph_allowed", "blocker"}, errors, "HANDOFF"):
         _error(errors, isinstance(handoff.get("graph_allowed"), bool), "INVALID_HANDOFF_GRAPH_ALLOWED")
@@ -1155,6 +1841,10 @@ def validate(body: Any, status: str | None = None) -> list[str]:
         verification_ids,
         contract_change_ids,
     )
+    _validate_acceptance_production_seams(body, errors)
+    _validate_acceptance_required_symbols(body, errors)
+    _validate_gap_artifact_plans(body, errors)
+    _validate_modulith_verification(body, errors)
     _validate_contract_changes(body, errors, verification_ids)
     for contract_id in sorted(contract_change_ids - mapped_contract_changes):
         errors.append(f"UNMAPPED_CONTRACT_CHANGE:{contract_id}")

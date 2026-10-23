@@ -19,6 +19,10 @@ CARD_SCHEMAS = {
     "summary": "issue-summary-card-v3",
     "decision": "policy-decision-card-v1",
 }
+IMPLEMENTATION_SCHEMAS = {
+    "backend-implementation-card-v5",
+    "backend-implementation-card-v6",
+}
 
 
 def validate_card_body(
@@ -40,7 +44,7 @@ def validate_card_body(
         if isinstance(body, dict):
             append_error(
                 errors,
-                body.get("schema") == "backend-implementation-card-v5",
+                body.get("schema") in IMPLEMENTATION_SCHEMAS,
                 f"IMPLEMENTATION_SCHEMA:{key}",
             )
         return tuple(errors)

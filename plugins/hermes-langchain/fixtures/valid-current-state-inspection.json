@@ -1,8 +1,0 @@
-{
-  "schema": "current-state-inspection-v1",
-  "freshness": "fresh",
-  "inspection_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "snapshot_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "worktree_clean": true,
-  "snapshot_is_ancestor": true
-}

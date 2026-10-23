@@ -87,7 +87,7 @@
         ],
         "rules": [
           {
-            "locator": "docs/development-guide.md#Application-구현-규칙",
+            "locator": "docs/backend-development-guide.md#Application-구현-규칙",
             "claim": "Application은 aggregate의 이름 있는 behavior를 호출한다."
           }
         ],
@@ -189,22 +189,22 @@
         "action": null
       },
       {
-        "document": "docs/development-guide.md",
+        "document": "docs/backend-development-guide.md",
         "disposition": "no-change",
         "evidence": [
           {
-            "locator": "docs/development-guide.md#Backend development guide",
+            "locator": "docs/backend-development-guide.md#Backend development guide",
             "claim": "The backend implementation conventions were reviewed."
           }
         ],
         "action": null
       },
       {
-        "document": "docs/test-guide.md",
+        "document": "docs/backend-test-guide.md",
         "disposition": "no-change",
         "evidence": [
           {
-            "locator": "docs/test-guide.md#Backend test guide",
+            "locator": "docs/backend-test-guide.md#Backend test guide",
             "claim": "The backend verification conventions were reviewed."
           }
         ],

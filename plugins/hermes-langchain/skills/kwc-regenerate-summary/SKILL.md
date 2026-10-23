@@ -23,6 +23,7 @@ metadata:
 - Issue 번호와 generation
 - complete Impl/Review가 공유하는 canonical workspace
 - repository root
+- assignment의 board/generation-isolated `artifact_file`
 
 필수 입력이 없으면 추측하지 않고 중단한다.
 
@@ -31,7 +32,7 @@ metadata:
 repository root를 terminal `workdir`로 지정하고 다음 helper를 **정확히 한 번** 실행한다.
 
 ```text
-python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_graph.py" regenerate-summary-native --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --issue <issue> --generation <generation> --workspace <canonical-workspace> --bundle-output .temp/task-graphs/<issue>/summary-source.json --body-output .temp/task-graphs/<issue>/summary-body.json --output .temp/task-graphs/<issue>/summary-create-result.json
+python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_graph.py" regenerate-summary-native --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --issue <issue> --generation <generation> --workspace <canonical-workspace> --bundle-output <assignment.artifact_file의 parent>/summary-source.json --body-output <assignment.artifact_file> --output <assignment.artifact_file의 parent>/summary-create-result.json
 ```
 
 이 helper가 active Summary 탐색·archive·archive read-back, frozen Triage projection, source freshness 검증,

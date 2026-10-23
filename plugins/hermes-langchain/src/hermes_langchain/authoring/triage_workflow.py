@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..paths import PLUGIN_ROOT
-from . import triage_domain
+from . import artifact_paths, triage_domain
 
 
 _STAGE_SCHEMAS = {
@@ -81,18 +81,22 @@ def _relative_metadata(workspace: Path, metadata: dict[str, str]) -> dict[str, s
     }
 
 
-def _output_dir(workspace: Path, issue_number: int, generation: int) -> Path:
-    return (
-        workspace
-        / ".temp"
-        / "kwc-authoring"
-        / str(issue_number)
-        / f"generation-{generation}"
+def _output_dir(
+    workspace: Path,
+    *,
+    board: Any,
+    issue_number: int,
+    generation: int,
+) -> Path:
+    return artifact_paths.triage_output_dir(
+        workspace,
+        board=board,
+        issue_number=issue_number,
+        generation=generation,
     )
 
 
-def _default_inspection(workspace: Path, profile_home: Path | None) -> dict[str, Any]:
-    del profile_home
+def _default_inspection(workspace: Path) -> dict[str, Any]:
     script = (
         PLUGIN_ROOT
         / "skills"
@@ -213,12 +217,44 @@ def _candidate_base(locator: str) -> str:
 
 def _module_from_path(value: Any) -> str | None:
     path = _candidate_base(str(value))
-    marker = "/amaazon/"
+    marker = "/java/"
     if marker not in path:
         return None
-    remainder = path.split(marker, 1)[1]
-    module = remainder.split("/", 1)[0]
-    return module or None
+    package_parts = path.split(marker, 1)[1].split("/")
+    layer_names = {"application", "domain", "presentation", "infra", "infrastructure"}
+    layer_index = next(
+        (index for index, part in enumerate(package_parts) if part in layer_names),
+        None,
+    )
+    if layer_index is None or layer_index == 0:
+        return None
+    return package_parts[layer_index - 1] or None
+
+
+def _producer_evidence_locators(target: dict[str, Any], producer: Any) -> set[str]:
+    producer_name = str(producer or "").casefold()
+    return {
+        _normalized_locator(item["locator"])
+        for item in target.get("evidence", [])
+        if isinstance(item, dict)
+        and item.get("kind") == "production"
+        and isinstance(item.get("locator"), str)
+        and "#" in item["locator"]
+        and str(_module_from_path(item["locator"]) or "").casefold() == producer_name
+    }
+
+
+def _scope_mutation_base(scope_entry: Any) -> str | None:
+    if not isinstance(scope_entry, str):
+        return None
+    match = re.match(
+        r"\s*(?:create|modify|move-source|move-target|delete)\s*:\s*(src/main/java/\S+)",
+        scope_entry,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return _candidate_base(match.group(1).rstrip(".,;"))
 
 
 def _canonicalize_discovery_authoring(value: Any, workspace: Path) -> Any:
@@ -433,6 +469,39 @@ def _confirmed_locators(output_dir: Path) -> set[str]:
     return locators
 
 
+def _validate_production_seam_confirmation(
+    confirmation: dict[str, Any], analysis: dict[str, Any]
+) -> None:
+    confirmed = {
+        _normalized_locator(item["locator"])
+        for target in confirmation.get("targets", [])
+        if isinstance(target, dict)
+        for item in target.get("evidence", [])
+        if isinstance(item, dict) and isinstance(item.get("locator"), str)
+    }
+    confirmed_bases = {_candidate_base(locator) for locator in confirmed}
+    required_states = "\n".join(
+        str(gap.get("required_state") or "")
+        for gap in analysis.get("confirmed_gaps", [])
+        if isinstance(gap, dict)
+    )
+    invalid: list[str] = []
+    for row in analysis.get("verification_matrix", []):
+        if not isinstance(row, dict) or not isinstance(row.get("production_seam"), dict):
+            continue
+        locator = _normalized_locator(row["production_seam"].get("locator"))
+        if locator in confirmed:
+            continue
+        base, separator, member = locator.partition("#")
+        class_name = Path(base).stem
+        planned_symbol = f"{class_name}#{member}" if separator and member else ""
+        if base in confirmed_bases and planned_symbol and planned_symbol in required_states:
+            continue
+        invalid.append(locator)
+    if invalid:
+        raise ValueError("UNCONFIRMED_PRODUCTION_SEAM:" + ",".join(sorted(invalid)))
+
+
 def _source_locators(value: Any) -> set[str]:
     locators: set[str] = set()
     if isinstance(value, dict):
@@ -499,6 +568,21 @@ def _validate_public_contract_analysis(
                 or not disposition.get("finding_ids")
             ):
                 raise ValueError(f"MISSING_APPROVED_CONTRACT_CHANGE:{target_id}")
+        elif status == "published":
+            producer_locators = _producer_evidence_locators(
+                target, public_contract.get("producer")
+            )
+            producer_bases = {_candidate_base(locator) for locator in producer_locators}
+            for slice_body in analysis.get("implementation_slices", []):
+                if not isinstance(slice_body, dict):
+                    continue
+                for scope_entry in slice_body.get("scope", []):
+                    mutation_base = _scope_mutation_base(scope_entry)
+                    if mutation_base in producer_bases:
+                        raise ValueError(
+                            "PUBLISHED_CONTRACT_PRODUCER_MUTATION:"
+                            f"{target_id}:{mutation_base}"
+                        )
         elif status == "undecided" and not decisions:
             raise ValueError(f"MISSING_PUBLIC_CONTRACT_DECISION:{target_id}")
 
@@ -516,9 +600,6 @@ def _analysis_evidence_locators(analysis: dict[str, Any]) -> set[str]:
         for item in verification.get("evidence", []):
             if isinstance(item, dict):
                 locators.add(_normalized_locator(item.get("locator")))
-        production_seam = verification.get("production_seam")
-        if isinstance(production_seam, dict):
-            locators.add(_normalized_locator(production_seam.get("locator")))
     for contract in analysis.get("contract_changes", []):
         if isinstance(contract, dict):
             for item in contract.get("evidence", []):
@@ -566,7 +647,6 @@ def _advance_intake(
     workspace: Path,
     output_dir: Path,
     inspection_fn: Callable[..., dict[str, Any]] | None,
-    profile_home: Path | None,
 ) -> dict[str, str]:
     _exact_fields(payload, {"schema", "identity", "intake"}, "INTAKE")
     identity = _exact_fields(
@@ -584,8 +664,8 @@ def _advance_intake(
     )
     if int(identity["issue_number"]) != int(assignment["issue_number"]):
         raise ValueError("ISSUE_IDENTITY_MISMATCH")
-    inspector = inspection_fn or (lambda repo, profile: _default_inspection(repo, profile))
-    inspection = inspector(workspace, profile_home)
+    inspector = inspection_fn or _default_inspection
+    inspection = inspector(workspace)
     if not isinstance(inspection, dict):
         raise ValueError("CURRENT_STATE_INSPECTION_INVALID")
     if inspection.get("inspection_sha") != identity.get("planning_sha"):
@@ -678,7 +758,7 @@ def _advance_discovery(
             _required_text(candidate["reason"], "candidate.reason")
             if path_counts[path] <= 2:
                 bounded_candidates.append(candidate)
-        if len(bounded_candidates) > 5:
+        if len(bounded_candidates) > 8:
             raise ValueError(f"DISCOVERY_CANDIDATE_LIMIT:{target_id}")
         intake_target = intake_targets.get(target_id, {})
         question = str(intake_target.get("question") or "").lower()
@@ -694,6 +774,34 @@ def _advance_discovery(
             )
             if consumer_module is not None and not has_producer:
                 raise ValueError(f"DISCOVERY_PRODUCER_CANDIDATE_REQUIRED:{target_id}")
+        if any(
+            marker in question
+            for marker in (
+                "repository",
+                "persistence",
+                "transaction",
+                "pessimistic",
+                "lock",
+                "영속",
+                "트랜잭션",
+                "잠금",
+                "동시성",
+            )
+        ):
+            has_repository = any(
+                candidate.get("kind") == "production"
+                and "repository" in str(candidate.get("path") or "").lower()
+                for candidate in bounded_candidates
+            )
+            if not has_repository:
+                raise ValueError(f"DISCOVERY_PERSISTENCE_REPOSITORY_REQUIRED:{target_id}")
+            has_repository_test = any(
+                candidate.get("kind") == "test"
+                and "repository" in str(candidate.get("path") or "").lower()
+                for candidate in bounded_candidates
+            )
+            if not has_repository_test:
+                raise ValueError(f"DISCOVERY_PERSISTENCE_TEST_REQUIRED:{target_id}")
         target["candidates"] = bounded_candidates
     questions = " ".join(
         str(item.get("question") or "").lower() for item in intake_targets.values()
@@ -710,6 +818,19 @@ def _advance_discovery(
         and glossary not in candidate_paths
     ):
         raise ValueError(f"DISCOVERY_GOVERNING_DOCUMENT_REQUIRED:{glossary}")
+    backend_targets = any(
+        str(item.get("locator") or "").replace("\\", "/").startswith("src/main/java/")
+        for item in intake_targets.values()
+    )
+    required_backend_documents = []
+    if backend_targets:
+        required_backend_documents.append("docs/backend-development-guide.md")
+    quality_gates = intake.get("intent", {}).get("quality_gates", [])
+    if backend_targets and isinstance(quality_gates, list) and quality_gates:
+        required_backend_documents.append("docs/backend-test-guide.md")
+    for document in required_backend_documents:
+        if (workspace / document).is_file() and document not in candidate_paths:
+            raise ValueError(f"DISCOVERY_GOVERNING_DOCUMENT_REQUIRED:{document}")
     return _relative_metadata(workspace, _write_json(output_dir / "triage-discovery.json", payload))
 
 
@@ -727,6 +848,11 @@ def _advance_source_confirmation(
         _candidate_base(item["path"])
         for target in discovery["targets"]
         for item in target["candidates"]
+    }
+    intake_targets = {
+        str(item.get("id")): item
+        for item in intake.get("investigation_targets", [])
+        if isinstance(item, dict)
     }
     approved_source_locators = _source_locators(intake.get("intent"))
     for target in targets:
@@ -750,6 +876,39 @@ def _advance_source_confirmation(
             if item["kind"] not in _CANDIDATE_KINDS:
                 raise ValueError("SOURCE_EVIDENCE_KIND")
             _required_text(item["claim"], "evidence.claim")
+        target_id = str(target["target_id"])
+        question = str(intake_targets.get(target_id, {}).get("question") or "").lower()
+        if all(marker in question for marker in ("request", "response", "service", "signature")):
+            def confirms_role(item: dict[str, Any], markers: tuple[str, ...]) -> bool:
+                locator = str(item.get("locator") or "").replace("\\", "/")
+                text = f"{locator} {item.get('claim', '')}".casefold()
+                return (
+                    re.search(r"src/main/java/[^\s]+\.java(?:#[A-Za-z_$][\w$]*)?$", locator)
+                    is not None
+                    and any(marker in text for marker in markers)
+                )
+
+            if not any(confirms_role(item, ("request", "요청")) for item in evidence):
+                raise ValueError(f"SOURCE_HTTP_DTO_REQUEST_EVIDENCE_REQUIRED:{target_id}")
+            if not any(
+                confirms_role(item, ("response", "result", "응답", "결과"))
+                for item in evidence
+            ):
+                raise ValueError(f"SOURCE_HTTP_DTO_RESPONSE_EVIDENCE_REQUIRED:{target_id}")
+            if not any(
+                (
+                    (match := re.search(
+                        r"src/main/java/[^\s/]+(?:/[^\s/]+)*/([A-Za-z_$][\w$]*)\.java#([A-Za-z_$][\w$]*)$",
+                        str(item.get("locator") or "").replace("\\", "/"),
+                    ))
+                    is not None
+                    and match.group(1) != match.group(2)
+                )
+                for item in evidence
+            ):
+                raise ValueError(
+                    f"SOURCE_HTTP_DTO_OPERATION_SIGNATURE_EVIDENCE_REQUIRED:{target_id}"
+                )
         public_contract = target["public_contract"]
         if public_contract is not None:
             _exact_fields(
@@ -764,6 +923,12 @@ def _advance_source_confirmation(
                 raise ValueError("PUBLIC_CONTRACT_STATUS")
             if status == "approved-unimplemented" and target["disposition"] not in {"partial", "absent"}:
                 raise ValueError("APPROVED_CONTRACT_DISPOSITION")
+            if status == "published" and not _producer_evidence_locators(
+                target, public_contract.get("producer")
+            ):
+                raise ValueError(
+                    f"PUBLISHED_CONTRACT_PRODUCER_EVIDENCE_REQUIRED:{target_id}"
+                )
             if status == "undecided" and target["disposition"] not in {"partial", "absent", "unknown"}:
                 raise ValueError("UNDECIDED_CONTRACT_DISPOSITION")
             approval_evidence = public_contract["approval_evidence"]
@@ -796,6 +961,7 @@ def _advance_analysis(
     analysis_body = module.compose_analysis.execute(intake, analysis)
     confirmation = _load_json(output_dir / "triage-source-confirmation.json")
     _validate_public_contract_analysis(confirmation, analysis)
+    _validate_production_seam_confirmation(confirmation, analysis)
     _validate_document_impact_coverage(analysis_body, confirmation)
     unconfirmed = sorted(
         _analysis_evidence_locators(analysis) - _confirmed_locators(output_dir)
@@ -820,7 +986,6 @@ def advance_stage(
     *,
     assignment: dict[str, Any],
     artifact_file: Path | str,
-    profile_home: Path | None = None,
     inspection_fn: Callable[..., dict[str, Any]] | None = None,
     git_head_fn: Callable[[Path], str] = _git_head,
 ) -> dict[str, Any]:
@@ -842,11 +1007,16 @@ def advance_stage(
         raise ValueError(f"artifact schema must be {expected_schema}")
     issue_number = int(assignment["issue_number"])
     generation = int(assignment["generation"])
-    output_dir = _output_dir(workspace, issue_number, generation)
+    output_dir = _output_dir(
+        workspace,
+        board=assignment["board"],
+        issue_number=issue_number,
+        generation=generation,
+    )
 
     if stage == "intake":
         metadata = _advance_intake(
-            assignment, payload, workspace, output_dir, inspection_fn, profile_home
+            assignment, payload, workspace, output_dir, inspection_fn
         )
     elif stage == "discovery":
         metadata = _advance_discovery(
@@ -865,7 +1035,12 @@ def materialization_arguments(assignment: dict[str, Any]) -> dict[str, str]:
     workspace = _workspace_path(assignment)
     issue_number = int(assignment["issue_number"])
     generation = int(assignment["generation"])
-    output_dir = _output_dir(workspace, issue_number, generation)
+    output_dir = _output_dir(
+        workspace,
+        board=assignment["board"],
+        issue_number=issue_number,
+        generation=generation,
+    )
     artifacts = assignment.get("stage_artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(_STAGE_SCHEMAS):
         raise ValueError("TRIAGE_ARTIFACT_SET_INCOMPLETE")

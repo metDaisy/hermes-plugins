@@ -2,15 +2,16 @@
 
 `hermes-langchain`은 workflow controller의 **유일한 canonical 구현 대상**입니다. 새 controller 기능은 이
 Plugin에만 추가하며, `kanban-workflow-controller`와 `context-workflow-harness`는 deprecated source
-reference로만 취급합니다.
+reference로만 취급합니다. 현재 전환 순서, 상태 소유권과 milestone non-goal의 정본은
+[`docs/plan.md`](docs/plan.md)입니다.
 
 내부 workflow definition, Step/attempt, transition과 interrupt/resume cursor는 LangGraph durable
 checkpoint가 소유하고, accepted semantic output은 독립 immutable Artifact Store가 소유하는 방향으로
 전환합니다. Hermes native Kanban은 공개 task/run/comment/event와 역할 handoff의 정본이며, 외부 mutation
 뒤 exact read-back이 있어야만 controller transition을 허용합니다.
 
-아래 KWC-compatible runtime 설명은 아직 남아 있는 migration baseline과 compatibility surface를 문서화합니다.
-새 architecture의 상태 소유권은 controller module과 immutable artifact contract가 정의합니다.
+아래 `0.32.x` 이하 Runtime 설명은 migration 이력을 보존한 historical reference입니다. `0.33.0`의 실행
+계약과 상태 소유권은 이 문서의 앞부분, Plugin Skill과 `docs/plan.md`가 우선합니다.
 
 ## Profile-independent fresh agents
 
@@ -18,17 +19,19 @@ KWC의 PM 역할 실행은 특정 Profile의 SOUL, memory, 또는 설치 Skill�
 
 `kwc-orchestrator-contract`는 PM 책임·capability coverage와 38개 distribution-owned source artifact의 KWC target을 machine-readable reference로 고정합니다. Service planning은 `web`·`browser`, Gradle 검증 단계는 `gradle-mcp`를 situation별로만 주입합니다.
 
-`project-manager` Profile은 삭제하거나 비활성화하지 않습니다. 동일 입력에 대한 기존 Profile 방식과 KWC fresh-agent 방식의 품질·시간·artifact를 비교하는 control baseline으로 보존합니다.
+Plugin은 설치된 `project-manager`, `coder`, `reviewer` Profile의 SOUL·memory·Skill을 실행 입력으로 요구하지 않습니다. 같은 문자열은 native Kanban의 task role/assignee identity로만 유지합니다.
 
 ## LangGraph integration
 
-- 기존 `src/hermes_langchain/authoring/route_graph.py`와 KWC-compatible runtime은 migration baseline입니다.
 - canonical controller 경로는 `src/hermes_langchain/controller/`의 `StateGraph`, SQLite checkpointer와 public Hermes fresh-Agent adapter입니다.
-- 새 기능은 canonical controller 경로에만 추가하며, legacy authoring/runtime과 KWC에는 복제하지 않습니다.
+- authoring과 delivery lifecycle은 Plugin-owned Skill, immutable artifact, bounded toolset과 native Kanban read-back으로 구성합니다.
+- legacy `runtime/`, Profile launcher와 KWC-compatible background worker는 shipped source에서 제거했으며 새 기능을 deprecated Plugin에 복제하지 않습니다.
 
 ## Kanban board 사용 여부
 
-**사용합니다.** 이 Plugin의 workflow source of truth는 Hermes native Kanban board입니다. LangGraph는 현재 assignment의 다음 KWC Tool을 선택할 뿐이며, task/run/event/comment read-back, snapshot fingerprint, durable outbox, lease, fencing, idempotent mutation은 모두 Kanban adapter와 Plugin SQLite가 담당합니다.
+**사용합니다.** Hermes native Kanban board는 공개 task/run/comment/event와 역할 handoff의 source of truth입니다.
+LangGraph는 controller-private workflow cursor와 transition을 소유하며, Plugin은 외부 mutation 뒤 exact Kanban
+read-back과 artifact provenance가 확인된 경우에만 다음 transition을 허용합니다.
 
 ```text
 Native Kanban board (canonical state)
@@ -47,11 +50,15 @@ Profile을 infrastructure로 유지한 채 `project-manager` execution role과 a
 
 ## KWC migration and cutover
 
-- `plugins/hermes-langchain`은 KWC production modules, dashboard/Desktop assets, prompts, fixtures, and compatibility tests를 독립적으로 보존합니다.
+- `plugins/hermes-langchain`은 canonical controller, authoring/delivery Skill, prompt, contract와 regression test를 독립적으로 소유합니다.
 - 기존 `plugins/kanban-workflow-controller` source는 migration 과정에서 수정하거나 삭제하지 않습니다.
-- 두 Plugin은 호환성을 위해 같은 `kwc_*` Tool contract를 노출하므로 **동시에 enable하지 마십시오**. 동일 Kanban lifecycle event를 두 controller가 처리할 수 있습니다.
-- 새 Plugin은 `$HERMES_ROOT/plugin-data/hermes-langchain/state.db`를 사용합니다. 기존 KWC SQLite runtime/outbox state는 자동 복사하지 않으며 native Kanban board 자체는 계속 canonical state로 사용합니다.
-- cutover 시에는 진행 중인 worker/action이 없는지 확인하고 기존 KWC를 disable한 뒤 `hermes-langchain`을 enable합니다. rollback은 역순으로 수행합니다.
+- deprecated KWC와 context harness는 frozen source reference이며 runtime dependency가 아닙니다.
+- controller checkpoint와 Artifact Store는 Plugin-local state를 사용하고, native Kanban board 자체는 계속 canonical external state로 사용합니다.
+- 설치 시 deprecated controller를 disable하고 `hermes-langchain`만 enable합니다.
+
+Phase 7 read-only assessment와 Issue별 실행 증거는 프로젝트·환경 종속 로컬 자료이므로 Git에 포함하지
+않습니다. `0.33.0`은 Profile 기반 compatibility hook/response/worker와 중복 background Runtime을 제거하고,
+Plugin-owned fresh Agent와 explicit workflow contract를 canonical 실행 경로로 사용합니다.
 
 `0.30.0`은 첫 canonical activation primitive를 추가합니다. `hermes_langchain_activate`는
 `controller-task-activation-v1` accepted Artifact Store record와 exact native snapshot에 결속된 기존
@@ -73,7 +80,10 @@ Hermes LangChain routes native Kanban lifecycle events to the Project Manager an
 
 Every functional change must update `plugin.yaml` and add the matching newest release to `CHANGELOG.md`. Documentation-only corrections may keep the current version.
 
-## Runtime model
+## Removed Runtime model (`0.32.x` 이하 historical reference)
+
+> 다음 Runtime/comment/Profile-response/Desktop 설명은 제거된 compatibility surface의 이력입니다.
+> `0.33.0`에서는 해당 hook, endpoint, worker와 background service를 등록하거나 제공하지 않습니다.
 
 ### Desktop-owned runtime lifecycle
 

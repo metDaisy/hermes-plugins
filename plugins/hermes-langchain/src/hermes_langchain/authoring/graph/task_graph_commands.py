@@ -13,7 +13,7 @@ from .implementation_batch import (
     _parse_json_values, apply_impl_completions, impl_batch_template, prepare_impl_fast_path,
     render_impl_batch, validate_impl_batch,
 )
-from .implementation_card_v5 import _validate_implementation_v6, template, validate
+from .legacy_implementation_card import _validate_implementation_v6, template, validate
 from .native_authoring import (
     create_impl_batch_native, create_review_native, create_summary_native,
     prepare_review_fast_path, prepare_summary_fast_path, regenerate_summary_native,

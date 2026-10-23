@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -405,7 +406,11 @@ class AcceptedMilestoneMaterializer:
                     f"request.{field} must be a positive integer",
                 )
         workspace = Path(request["workspace_path"]).resolve()
-        if not workspace.is_dir() or workspace.as_posix() != request["workspace_path"]:
+        if (
+            not workspace.is_dir()
+            or os.path.normcase(str(workspace))
+            != os.path.normcase(str(Path(request["workspace_path"]).absolute()))
+        ):
             raise KanbanMaterializationError(
                 "WORKSPACE_INVALID",
                 "materialization workspace is unavailable or non-canonical",

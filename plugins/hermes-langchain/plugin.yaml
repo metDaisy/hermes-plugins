@@ -2,19 +2,13 @@ manifest_version: 2
 api_version: 1
 name: hermes-langchain
 label: Hermes LangChain
-version: 0.32.0
+version: 0.33.0
 description: Runs profile-independent KWC fresh agents through explicit prompt, Skill, MCP, and toolset contracts.
 author: metDaisy
 license: MIT
 kind: standalone
-provides_hooks:
-  - pre_llm_call
-  - kanban_task_completed
-  - kanban_task_blocked
-  - on_kanban_worker_exited
-  - on_kanban_worker_stale_claim
-  - on_kanban_dispatch_tick
 provides_tools:
+  - hermes_langchain_run_workflow
   - hermes_langchain_begin_authoring
   - kwc_advance_triage
   - kwc_recover_frozen_triage
@@ -22,10 +16,6 @@ provides_tools:
   - kwc_create_impl_graph
   - kwc_create_review
   - kwc_create_summary
-  - kwc_comment
-  - kwc_reply
-  - kwc_pm_response
-  - kwc_profile_response
   - hermes_langchain_route
   - hermes_langchain_probe_guard
   - hermes_langchain_controller
@@ -48,20 +38,3 @@ tags:
   - orchestration
   - langchain
   - langgraph
-config_schema:
-  coordinator_profile:
-    type: string
-    default: project-manager
-    description: Kanban role identity for coordinator-owned cards and typed responses; fresh-agent behavior is KWC-owned.
-  execution_profiles:
-    type: string
-    default: project-manager,coder,reviewer
-    description: Comma-separated Kanban role identities allowed to submit invocation-bound typed responses.
-  decision_comment_author:
-    type: string
-    default: dashboard
-    description: Exact Kanban comment author treated as the human response on blocked Decision cards.
-  comment_profiles:
-    type: string
-    default: project-manager,coder,reviewer
-    description: Comma-separated Profiles whose latest top-level session can receive workflow comment wakeups.

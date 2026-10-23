@@ -2,6 +2,23 @@
 
 All notable Hermes LangChain changes are recorded here. Versions follow Semantic Versioning.
 
+## [0.33.0] - 2026-10-24
+
+### Added
+
+- Added `hermes_langchain_run_workflow` and Plugin-owned orchestration contracts for profile-independent PM, Coder, and Reviewer fresh agents.
+- Added machine-readable Coder and Reviewer responsibility coverage and source-asset maps.
+
+### Changed
+
+- Moved workflow behavior from installed Profile definitions into Plugin Skills, immutable artifacts, bounded toolsets, and controller-owned validation.
+- Renamed version-suffixed implementation-card modules by role and reorganized tests to mirror the production package layout.
+
+### Removed
+
+- Removed Profile launcher, wake, response, comment-routing, background Runtime, dashboard compatibility, and duplicate Kanban workflow-engine paths.
+- Removed project-specific Issue 151 fixtures and local Phase 7 evidence from the tracked Plugin contract.
+
 ## [0.32.0] - 2026-10-22
 
 ### Added

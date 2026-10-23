@@ -78,7 +78,7 @@ def _connect(state_path: Path) -> sqlite3.Connection:
             issue_number INTEGER NOT NULL,
             generation INTEGER NOT NULL,
             workspace_path TEXT NOT NULL,
-            pm_session_key TEXT NOT NULL,
+            controller_session_key TEXT NOT NULL,
             phase TEXT NOT NULL,
             revision INTEGER NOT NULL,
             assignment_id TEXT NOT NULL,
@@ -103,6 +103,12 @@ def _connect(state_path: Path) -> sqlite3.Connection:
         """
     )
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(authoring_workflow)")}
+    if "pm_session_key" in columns and "controller_session_key" not in columns:
+        conn.execute(
+            "ALTER TABLE authoring_workflow RENAME COLUMN pm_session_key TO controller_session_key"
+        )
+        columns.remove("pm_session_key")
+        columns.add("controller_session_key")
     if "triage_stage" not in columns:
         conn.execute("ALTER TABLE authoring_workflow ADD COLUMN triage_stage TEXT NOT NULL DEFAULT 'intake'")
     if "triage_artifacts_json" not in columns:
@@ -201,7 +207,7 @@ def _public(row: sqlite3.Row) -> dict[str, Any]:
         "workspace_path": str(row["workspace_path"]),
         "phase": phase,
         "triage_stage": triage_stage,
-        "profile": "project-manager",
+        "role": "orchestrator",
         "skill": {"name": skill} if skill else None,
         "allowed_tools": [tool] if tool else [],
         "next_action": next_action,
@@ -223,14 +229,14 @@ def begin_authoring(
     issue_number: Any,
     generation: Any,
     workspace_path: Path,
-    pm_session_key: Any,
+    controller_session_key: Any,
     replace_incomplete: bool = False,
     now_fn: Callable[[], int] = _now,
 ) -> dict[str, Any]:
     board = _required_text(board, "board")
     issue_number = _positive_int(issue_number, "issue_number")
     generation = _positive_int(generation, "generation")
-    session_key = _required_text(pm_session_key, "pm_session_key")
+    session_key = _required_text(controller_session_key, "controller_session_key")
     if not isinstance(replace_incomplete, bool):
         raise ValueError("replace_incomplete must be a boolean")
     workspace = Path(workspace_path).resolve()
@@ -282,7 +288,7 @@ def begin_authoring(
                     """
                     UPDATE authoring_workflow
                     SET schema=?, issue_number=?, generation=?, workspace_path=?,
-                        pm_session_key=?, phase='triage', revision=1, assignment_id=?,
+                        controller_session_key=?, phase='triage', revision=1, assignment_id=?,
                         triage_id=NULL, impl_ids_json='[]', review_id=NULL, summary_id=NULL,
                         created_at=?, updated_at=?, triage_stage='intake',
                         triage_artifacts_json='{}'
@@ -310,7 +316,7 @@ def begin_authoring(
         conn.execute(
             """
             INSERT INTO authoring_workflow(
-                board, schema, issue_number, generation, workspace_path, pm_session_key,
+                board, schema, issue_number, generation, workspace_path, controller_session_key,
                 phase, revision, assignment_id, triage_id, impl_ids_json, review_id,
                 summary_id, created_at, updated_at, triage_stage, triage_artifacts_json
             ) VALUES(?, ?, ?, ?, ?, ?, 'triage', 1, ?, NULL, '[]', NULL, NULL, ?, ?, 'intake', '{}')
@@ -360,19 +366,38 @@ def read_assignment_by_id(*, state_path: Path, assignment_id: Any) -> dict[str, 
         conn.close()
 
 
+def session_owns_assignment(
+    *,
+    state_path: Path,
+    assignment_id: Any,
+    caller_session_key: Any,
+) -> bool:
+    assignment_id = _required_text(assignment_id, "assignment_id")
+    session_key = _required_text(caller_session_key, "caller_session_key")
+    conn = _connect(state_path)
+    try:
+        row = conn.execute(
+            "SELECT controller_session_key FROM authoring_workflow WHERE assignment_id=?",
+            (assignment_id,),
+        ).fetchone()
+        return row is not None and str(row["controller_session_key"]) == session_key
+    finally:
+        conn.close()
+
+
 def complete_triage_stage(
     *,
     state_path: Path,
     assignment_id: Any,
-    caller_profile: Any,
+    caller_role: Any,
     caller_session_key: Any,
     stage: Any,
     artifact: Any,
     now_fn: Callable[[], int] = _now,
 ) -> dict[str, Any]:
     assignment_id = _required_text(assignment_id, "assignment_id")
-    if _required_text(caller_profile, "caller_profile") != "project-manager":
-        raise ValueError("caller profile is not project-manager")
+    if _required_text(caller_role, "caller_role") != "orchestrator":
+        raise ValueError("caller role is not orchestrator")
     session_key = _required_text(caller_session_key, "caller_session_key")
     stage = _required_text(stage, "stage")
     if stage not in _TRIAGE_STAGES[:-1]:
@@ -390,6 +415,8 @@ def complete_triage_stage(
         ).fetchone()
         if row is None:
             raise ValueError("assignment is stale or unknown")
+        if str(row["controller_session_key"]) != session_key:
+            raise ValueError("caller session does not own assignment")
         if str(row["phase"]) != "triage":
             raise ValueError("assignment phase is stale")
         if str(row["triage_stage"]) != stage:
@@ -435,7 +462,7 @@ def replace_impl_triage_source(
     *,
     state_path: Path,
     assignment_id: Any,
-    caller_profile: Any,
+    caller_role: Any,
     caller_session_key: Any,
     expected_triage_id: Any,
     replacement_triage_id: Any,
@@ -443,8 +470,8 @@ def replace_impl_triage_source(
 ) -> dict[str, Any]:
     """Replace a bad frozen Triage before any Impl task has been materialized."""
     assignment_id = _required_text(assignment_id, "assignment_id")
-    if _required_text(caller_profile, "caller_profile") != "project-manager":
-        raise ValueError("caller profile is not project-manager")
+    if _required_text(caller_role, "caller_role") != "orchestrator":
+        raise ValueError("caller role is not orchestrator")
     session_key = _required_text(caller_session_key, "caller_session_key")
     expected = _required_text(expected_triage_id, "expected_triage_id")
     replacement = _required_text(replacement_triage_id, "replacement_triage_id")
@@ -461,6 +488,8 @@ def replace_impl_triage_source(
         ).fetchone()
         if row is None:
             raise ValueError("assignment is stale or unknown")
+        if str(row["controller_session_key"]) != session_key:
+            raise ValueError("caller session does not own assignment")
         if str(row["phase"]) != "impl":
             raise ValueError("assignment phase is stale")
         if str(row["triage_id"] or "") != expected:
@@ -504,15 +533,15 @@ def reopen_unreviewed_impl_graph(
     *,
     state_path: Path,
     assignment_id: Any,
-    caller_profile: Any,
+    caller_role: Any,
     caller_session_key: Any,
     expected_impl_ids: Any,
     now_fn: Callable[[], int] = _now,
 ) -> dict[str, Any]:
     """Return an unreviewed Impl graph to authoring after its cards are rejected."""
     assignment_id = _required_text(assignment_id, "assignment_id")
-    if _required_text(caller_profile, "caller_profile") != "project-manager":
-        raise ValueError("caller profile is not project-manager")
+    if _required_text(caller_role, "caller_role") != "orchestrator":
+        raise ValueError("caller role is not orchestrator")
     session_key = _required_text(caller_session_key, "caller_session_key")
     if not isinstance(expected_impl_ids, list) or not expected_impl_ids:
         raise ValueError("expected_impl_ids must be a non-empty list")
@@ -528,6 +557,8 @@ def reopen_unreviewed_impl_graph(
         ).fetchone()
         if row is None:
             raise ValueError("assignment is stale or unknown")
+        if str(row["controller_session_key"]) != session_key:
+            raise ValueError("caller session does not own assignment")
         if str(row["phase"]) != "review":
             raise ValueError("assignment phase is stale")
         if json.loads(str(row["impl_ids_json"])) != expected:
@@ -570,15 +601,15 @@ def complete_phase(
     *,
     state_path: Path,
     assignment_id: Any,
-    caller_profile: Any,
+    caller_role: Any,
     caller_session_key: Any,
     phase: Any,
     created_task_ids: Any,
     now_fn: Callable[[], int] = _now,
 ) -> dict[str, Any]:
     assignment_id = _required_text(assignment_id, "assignment_id")
-    if _required_text(caller_profile, "caller_profile") != "project-manager":
-        raise ValueError("caller profile is not project-manager")
+    if _required_text(caller_role, "caller_role") != "orchestrator":
+        raise ValueError("caller role is not orchestrator")
     session_key = _required_text(caller_session_key, "caller_session_key")
     phase = _required_text(phase, "phase")
     if phase not in _TOOL_BY_PHASE:
@@ -599,6 +630,8 @@ def complete_phase(
         ).fetchone()
         if row is None:
             raise ValueError("assignment is stale or unknown")
+        if str(row["controller_session_key"]) != session_key:
+            raise ValueError("caller session does not own assignment")
         if str(row["phase"]) != phase:
             raise ValueError("assignment phase is stale")
         if phase == "triage" and str(row["triage_stage"]) != "materialize":

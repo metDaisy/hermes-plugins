@@ -34,10 +34,12 @@ single-target promotion을 fail-closed로 수행한다. 설치된 Skill 경로�
 
 ## 시작과 재개
 
-1. 새 authoring workflow는 host session에서 `hermes_langchain_begin_authoring`을 정확히 한 번 호출해
-   시작한다. `hermes_langchain_route`를 시작·권한 부여 도구로 사용하지 않고, 과거 `.temp` artifact나
-   assignment id를 검색해 수동 재사용하지 않는다. 이 도구가 반환한 assignment와 dedicated fresh-agent
-   session만 staged Triage/Impl/Review/Summary authoring을 소유한다.
+1. 이 workflow는 host session이 `hermes_langchain_run_workflow`로 시작한 Plugin-owned fresh agent가
+   소유한다. 새 authoring workflow는 그 fresh agent 안에서 `hermes_langchain_begin_authoring`을 정확히 한 번
+   호출해 초기 assignment를 받는다. 이 도구는 별도 Profile process를 실행하지 않는다.
+   `hermes_langchain_route`를 시작·권한 부여 도구로 사용하지 않고, 과거 `.temp` artifact나 assignment id를
+   검색해 수동 재사용하지 않는다. 반환된 assignment의 `skill`, `artifact_file`, `next_action`을 그대로 따라
+   staged Triage→Impl→Review→Summary authoring을 같은 controller invocation 안에서 순서대로 수행한다.
 2. Native Kanban tool schema를 확인하고 exact board의 active·archived task를 모두 read-back한다. Native
    tool이 없는 일반 PM session은 공식 `hermes kanban` CLI의 현재 `--help`를 읽은 뒤 사용한다.
 3. Branch, `HEAD`, 전체 Git status, `current-state.md` freshness와 active marker를 읽는다.

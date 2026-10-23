@@ -2,5 +2,14 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
 state.db*
 .codebase-memory/
+
+# Local project-specific test fixtures
+*/fixtures/
+
+# Local runtime state and project-specific verification evidence
+/plugin-data/
+/docs/phase7-*
+/GATES.md

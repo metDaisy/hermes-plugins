@@ -79,7 +79,7 @@
       {
         "path": "src/main/java/example/product/ProductController.java",
         "symbol": "ProductController#create",
-        "reason": "상품 등록 HTTP 요청을 받는 전달 경계이다."
+        "reason": "[AC-PRODUCT-CREATE][create] 상품 등록 HTTP 요청을 받는 전달 경계이다."
       }
     ],
     "constraints": [

@@ -150,11 +150,15 @@ class NativeE2E:
             raise RuntimeError("native task body did not preserve the rendered body")
         if assignee == "coder":
             admission = {
-                "schema": "backend-implementation-admission-v1",
+                "schema": "backend-implementation-admission-v2",
                 "task_id": task_id,
                 "issue": self.issue,
                 "workspace": self.workspace,
-                "card_schema": "backend-implementation-card-v5",
+                "card_schema": "backend-implementation-card-v6",
+                "baseline": {
+                    "head_sha": "a" * 40,
+                    "dirty_paths": [],
+                },
                 "restart": None,
             }
             failures = validate_implementation_admission(admission)
@@ -244,17 +248,20 @@ class NativeE2E:
                 "title": "Seller flow 책임 정리",
                 "outcome": "Seller flow 책임 위반을 수정한다.",
                 "gap_ids": ["GAP-SELLER-FLOW"],
-                "scope": ["Seller flow application boundary"],
-                "out_of_scope": ["Unrelated P2 flows"],
+                "scope": [
+                    "modify: src/main/java/example/SellerService.java#create - 판매자 상품 생성 application 경계를 정리한다."
+                ],
+                "out_of_scope": ["관련 없는 P2 흐름 변경"],
                 "acceptance": [
                     {
                         "id": "ACCEPT-SELLER-FLOW",
-                        "criterion": "Seller flow가 approved application boundary를 사용한다.",
+                        "criterion": "SellerService#create가 승인된 application boundary를 사용한다.",
                         "requirement_ids": [requirement["id"]],
                         "observable_ids": ["OBS-SELLER-FLOW"],
                         "verification_ids": ["VERIFY-SELLER-FLOW"],
                     }
                 ],
+                "contract_change_ids": [],
                 "depends_on": [],
             }
         ]
@@ -269,7 +276,9 @@ class NativeE2E:
                     "claim": "Seller flow의 current application owner를 직접 확인한다.",
                 },
                 "coverage_gap": "Focused integration coverage is absent.",
-                "required_verification": ["Add focused integration coverage for the seller flow."],
+                "required_verification": [
+                    "example.SellerServiceTest#createsProduct로 seller flow를 검증한다."
+                ],
             }
         ]
         body["contract_changes"] = []
@@ -323,7 +332,7 @@ class NativeE2E:
                         payload = json.loads(text)
                     except json.JSONDecodeError:
                         continue
-                    if isinstance(payload, dict) and payload.get("schema") == "backend-implementation-admission-v1":
+                    if isinstance(payload, dict) and payload.get("schema") == "backend-implementation-admission-v2":
                         admissions.append(payload)
                 if not admissions or validate_implementation_admission(admissions[-1]):
                     raise RuntimeError(f"implementation admission comment read-back failed: {key}")

@@ -1,0 +1,96 @@
+{
+  "schema": "kwc-delivery-source-asset-map-v1",
+  "source_profile": "reviewer",
+  "baseline_distribution_version": "0.9.2",
+  "source_distribution_owned_count": 16,
+  "source_distribution_owned": [
+    "SOUL.md",
+    "README.md",
+    "capabilities.yaml",
+    "skills/run-review/SKILL.md",
+    "skills/run-review/README.md",
+    "skills/run-review/references/aggregate-review-contract.md",
+    "skills/run-review/references/axis-result-contract.md",
+    "skills/run-review/references/bounded-context-review.md",
+    "skills/run-review/references/code-discovery-guide.md",
+    "skills/run-review/references/review-rubric-provenance.md",
+    "skills/review-spec/SKILL.md",
+    "skills/review-maintainability/SKILL.md",
+    "skills/review-persistence/SKILL.md",
+    "skills/review-architecture/SKILL.md",
+    "skills/review-evolution-compatibility/SKILL.md",
+    "skills/improve-codebase-architecture/SKILL.md"
+  ],
+  "mappings": {
+    "SOUL.md": {
+      "mode": "adapted",
+      "targets": [
+        "skills/kwc-review-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ]
+    },
+    "README.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "capabilities.yaml": {
+      "mode": "controller-owned",
+      "targets": ["src/hermes_langchain/controller/kanban_agent_delivery.py"]
+    },
+    "skills/run-review/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-review/README.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-review/references/aggregate-review-contract.md": {
+      "mode": "adapted",
+      "targets": [
+        "skills/kwc-review-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ]
+    },
+    "skills/run-review/references/axis-result-contract.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-review/references/bounded-context-review.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-review/references/code-discovery-guide.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-review/references/review-rubric-provenance.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/review-spec/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/review-maintainability/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/review-persistence/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/review-architecture/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/review-evolution-compatibility/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    },
+    "skills/improve-codebase-architecture/SKILL.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-review-delivery-runtime/SKILL.md"]
+    }
+  }
+}

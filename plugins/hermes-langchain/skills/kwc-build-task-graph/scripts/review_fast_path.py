@@ -50,6 +50,44 @@ def _body(task: dict[str, Any], label: str) -> dict[str, Any]:
     return value
 
 
+def _implementation_triage_digest(body: dict[str, Any]) -> Any:
+    if body.get("schema") == "backend-implementation-card-v6":
+        trace = body.get("trace")
+        return trace.get("triage_digest") if isinstance(trace, dict) else None
+    return body.get("triage_digest")
+
+
+def _implementation_behavior_ids(body: dict[str, Any]) -> list[str]:
+    if body.get("schema") == "backend-implementation-card-v6":
+        trace = body.get("trace")
+        values = trace.get("observable_ids") if isinstance(trace, dict) else None
+        return list(values) if isinstance(values, list) else []
+    implementation_slice = body.get("slice")
+    values = (
+        implementation_slice.get("behavior_ids")
+        if isinstance(implementation_slice, dict)
+        else None
+    )
+    return list(values) if isinstance(values, list) else []
+
+
+def _implementation_contract_ids(body: dict[str, Any]) -> list[str]:
+    if body.get("schema") == "backend-implementation-card-v6":
+        return list(
+            dict.fromkeys(
+                item.get("id")
+                for field in ("obligations", "constraints")
+                for item in body.get(field, [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            )
+        )
+    return [
+        row.get("id")
+        for row in body.get("acceptance", [])
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    ]
+
+
 def _json_values(text: str) -> list[Any]:
     decoder = json.JSONDecoder()
     values: list[Any] = []
@@ -112,6 +150,9 @@ def summary_body_from_triage(triage_body: dict[str, Any]) -> dict[str, Any]:
     intent = triage_body.get("intent")
     if not isinstance(issue, dict) or not isinstance(intent, dict):
         raise ValueError("SUMMARY_SOURCE_TRIAGE_INCOMPLETE")
+    triage_digest = triage_body.get("frozen_digest")
+    if not isinstance(triage_digest, str) or re.fullmatch(r"[0-9a-f]{64}", triage_digest) is None:
+        raise ValueError("SUMMARY_SOURCE_TRIAGE_DIGEST_INVALID")
     target_outcomes = [
         {"id": row.get("id"), "outcome": row.get("outcome")}
         for row in intent.get("change_requirements", [])
@@ -129,7 +170,7 @@ def summary_body_from_triage(triage_body: dict[str, Any]) -> dict[str, Any]:
             "title": issue.get("title"),
             "url": issue.get("url"),
         },
-        "triage_digest": triage_body.get("frozen_digest"),
+        "triage_digest": triage_digest,
         "objective": intent.get("goal"),
         "target_outcomes": target_outcomes,
         "preserved_behaviors": preserved_behaviors,
@@ -195,19 +236,27 @@ def prepare_summary_fast_path(
         kind = match.group("kind")
         if kind.startswith("Impl"):
             order = (0, int(kind.removeprefix("Impl")))
-            expected_schema = "backend-implementation-card-v5"
+            expected_schemas = {
+                "backend-implementation-card-v5",
+                "backend-implementation-card-v6",
+            }
         elif kind.startswith("Review"):
             order = (1, int(kind.removeprefix("Review")))
-            expected_schema = "aggregate-review-card-v5"
+            expected_schemas = {"aggregate-review-card-v5"}
         elif kind.startswith("Decision"):
             order = (2, int(kind.removeprefix("Decision")))
-            expected_schema = "policy-decision-card-v1"
+            expected_schemas = {"policy-decision-card-v1"}
         else:
             continue
         body = _body(task, f"SUMMARY_PARENT:{task.get('id')}")
-        if body.get("schema") != expected_schema:
+        if body.get("schema") not in expected_schemas:
             raise ValueError(f"SUMMARY_PARENT_SCHEMA_INVALID:{task.get('id')}")
-        if kind.startswith(("Impl", "Review")) and body.get("triage_digest") != triage_body.get("frozen_digest"):
+        body_digest = (
+            _implementation_triage_digest(body)
+            if kind.startswith("Impl")
+            else body.get("triage_digest")
+        )
+        if kind.startswith(("Impl", "Review")) and body_digest != triage_body.get("frozen_digest"):
             raise ValueError(f"SUMMARY_PARENT_TRIAGE_DIGEST_MISMATCH:{task.get('id')}")
         parent_rows.append((order, task))
     parent_rows.sort(key=lambda item: item[0])
@@ -302,7 +351,7 @@ def prepare_review_fast_path(
         errors = validate_implementation(body)
         if errors:
             raise ValueError(f"SOURCE_IMPL_INVALID:{task_id}:{errors[0]}")
-        if body.get("triage_digest") != triage_body.get("frozen_digest"):
+        if _implementation_triage_digest(body) != triage_body.get("frozen_digest"):
             raise ValueError(f"SOURCE_IMPL_TRIAGE_DIGEST_MISMATCH:{task_id}")
         ordinal = int(match.group("kind")[len("Impl") :])
         implementations.append(
@@ -312,8 +361,8 @@ def prepare_review_fast_path(
                 "title": task["title"],
                 "task": _snapshot(task),
                 "body": body,
-                "behavior_ids": body.get("slice", {}).get("behavior_ids", []),
-                "acceptance_ids": [row.get("id") for row in body.get("acceptance", [])],
+                "behavior_ids": _implementation_behavior_ids(body),
+                "acceptance_ids": _implementation_contract_ids(body),
                 "verification_ids": [row.get("id") for row in body.get("verification", [])],
             }
         )

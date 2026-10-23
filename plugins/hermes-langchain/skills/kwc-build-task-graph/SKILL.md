@@ -66,6 +66,10 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
 제품 의미와 현재 상태를 이미 고정하므로 Issue·requirement·`current-state.md`·production/test source를 다시
 전수 조사하지 않는다.
 
+Fresh-agent assignment에서는 `<artifact-root>`를 exact `assignment.artifact_file`의 parent로 정의한다. 이 경로는
+`.temp/task-graphs/<issue>/generation-<generation>/<board-namespace>`이며 Agent가 namespace를 계산하거나
+다른 board/generation의 issue-only directory로 축약하지 않는다.
+
 1. `build-task-graph`와 `references/implementation-card-contract.md`만 읽는다. Full graph topology가 입력이
    아니므로 `board-contract.md`, `run-workflow`, Kanban CLI `--help`를 읽지 않는다.
 2. source Triage의 native `workspace_path`를 canonical repo root로 사용하고 모든 helper terminal call의 `workdir`을
@@ -74,7 +78,7 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    Triage `show --json`과 active board `list --json`을 각각 한 번만 읽고 exact task ID, `triage-v7`,
    `phase=frozen`, 전체 Triage validator와 digest, native `workspace_kind=dir` 및 `workspace_path=workdir`,
    issue와 active Impl 부재를 fail-closed 검증한다. Raw 응답, extracted Triage body와 prefilled batch를 각각
-   `.temp/task-graphs/<issue>/fast-path/` 및 `.temp/task-graphs/<issue>/impl-card-batch.json`에 저장하고 stdout에는
+   `<artifact-root>/fast-path/` 및 `<artifact-root>/impl-card-batch.json`에 저장하고 stdout에는
    identity/status/count/digest만 출력한다. Agent는 compact stdout과 `impl-card-batch.json`만 읽으며
    source-triage.json이나 triage-body.json을 별도로 읽지 않는다. Custom preflight Python과 large terminal output
    spillover를 만들지 않고 terminal output log를 재파싱하지 않는다. 과거 Impl card와 archived card의 card body를 읽지 않는다.
@@ -86,49 +90,38 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    production symbol 또는 test owner class FQCN 자체를 Triage locator만으로 결정할 수 없을 때만
    `MCP_LOOKUP_REQUIRED:<slice>:<question>`을 메모리상의 lookup 목록에 추가한다. 목록이 비어 있지 않으면
    Codebase Memory `search_graph`와 Semble `search`를 한 번의 parallel turn에 직접 호출한다. 이 repository에서
-   Codebase Memory의 `project`는 `e-commerce-clone-coding`이며 workspace absolute path를 `project`로 전달하지 않는다. MCP snippet으로
+   Codebase Memory의 `project`는 repository에 등록된 project name이며 workspace absolute path를 `project`로 전달하지 않는다. MCP snippet으로
    class owner를 확정할 수 없을 때만 다음 한 turn에서 최대 4개 file의 class declaration 범위를 읽는다.
    이미 Triage가 고정한 제품 의미를 다시 검증하려고 production source를 읽거나, 같은 의미를 다른 검색어로
    반복하거나, module file listing으로 되돌아가지 않는다. Verification마다 required behavior를 판정하는
-   최소 1~3개의 decisive selector와 1~3개의 scenario만 남기며 발견한 test를 전부 나열하지 않는다.
-   Completion을 쓰기 전에 acceptance별 exact artifact closure를 만든다. 각 acceptance가 수정하는 현재 seam뿐
-   아니라 생성·이동·이름 변경·삭제할 type/method/DTO/exception의 exact current 또는 planned target path와 symbol을
-   `entry_points`에 포함한다. `reason`은 해당 artifact가 어느 acceptance를 어떻게 충족하는지 밝힌다. 특히
-   generic `command/result`, `named behavior`, `inner layer로 이동`, `duplicate 제거` 문구만 남기지 않는다.
-   새 application DTO는 planned target path와 symbol, aggregate 위임은 새 named behavior symbol, port 이동은
-   source와 target path, duplicate 제거는 삭제할 consumer type과 사용할 producer type을 모두 적는다. Exact
-   HTTP DTO boundary는 request와 response를 독립적으로 닫는다. 기존 application request/response DTO,
-   planned presentation request/response DTO, planned application command/result를 모두 exact path와 symbol로
-   적고 한쪽 방향만 작성한 completion은 제출하지 않는다. Planned application output은
-   `application/result` 하나로 고정하고 별도 planned `application/response` DTO를 병행하지 않는다. 기존
-   application response DTO는 이동·제거 source이고 planned application result가 transport-neutral output
-   target이다. artifact를 확정할 수 없으면 vague card를 materialize하지 않고 `MCP_LOOKUP_REQUIRED`로 되돌린다.
+   최소 1~3개의 decisive selector만 남기며 발견한 test를 전부 나열하지 않는다.
+   Completion을 쓰기 전에 acceptance별 obligation과 constraint closure를 확인한다. Helper가 acceptance의
+   production seam을 `obligations[].operation.symbol`로, exact repository path와 gap·구조·contract change를
+   `constraints[]`로 prefill한다. HTTP DTO request/response, application command/result, aggregate named
+   behavior, port source/target, duplicate consumer/producer처럼 서로 다른 artifact는 하나의 generic 문장으로
+   합치지 않는다. Prefill constraint locator나 exact symbol이 없거나 한쪽 boundary만 있으면 completion에서 추측하지 않고
+   `MCP_LOOKUP_REQUIRED` 또는 source-Triage blocker로 되돌린다.
 4. `prepare-impl-fast-path`가 Frozen Triage의 issue/digest, slice, acceptance, gap evidence, constraint,
    production seam, verification ID와 canonical wrapper를 이미
-   `.temp/task-graphs/<issue>/impl-card-batch.json`에 채웠으므로 `impl-batch-template`을 별도로 실행하지 않는다.
+   `<artifact-root>/impl-card-batch.json`에 채웠으므로 `impl-batch-template`을 별도로 실행하지 않는다.
    Wrapper의 `contract_changes`와 `required_contract_symbols`는 해당 verification에 연결된 Frozen Triage의
-   cross-domain contract change를 보존한다. `apply-impl-completions`는 method뿐 아니라 DTO·class·event·field·endpoint를
-   포함한 각 contract change의 ID와 full change text를 `preserved_behaviors`에 자동 materialize한다. Required
-   symbol 이름을 동의어나 새 이름으로 바꾸지 말고 applicable `implementation_contract` rule 또는 exact
-   `entry_points[].symbol`에 materialize한다. Contract change marker는 `preserved_behaviors`에 있어야 한다.
+   cross-domain contract change를 보존한다. Helper는 contract change를 immutable `constraints[]`에 source와
+   함께 materialize하고 required named behavior symbol을 obligation operation 또는 constraint에서 검증한다.
    `validate-impl-batch`가 contract change나 required symbol을 하나라도 누락하면 native mutation을 거부한다.
    별도 single-card `template` 실행,
    validator `--help`, stale artifact 검색을 하지 않는다. Helper가 채운 사실을 다시 타이핑하지 말고
-   비어 있는 `implementation_contract`, prefilled seam 중 reason을 더 구체화할 항목과 새 symbol만 담은 `entry_points`, `test_level`, actual/new FQCN selector와 구체
-   scenario만 ordinal별 `.temp/task-graphs/<issue>/impl-card-completions.json`에 한 번의 batched write로 작성한다.
+   prefilled ID·symbol·covers를 보존한 전체 `obligations`와 `level`, actual/new `FQCN#method` selector를 담은
+   전체 `verification`만 ordinal별 `<artifact-root>/impl-card-completions.json`에
+   한 번의 batched write로 작성한다.
    Compact completion의 closed shape는
-   `{"cards":[{"ordinal":<int>,"implementation_contract":<7-dimension object>,"entry_points":[{"path":<path>,"symbol":<symbol>,"reason":<reason>}],"verification":[{"id":<prefilled VERIFY id>,"test_level":<level>,"tests":[<FQCN#method>],"scenarios":[<scenario>]}],"depends_on_ordinals":[<semantic parent ordinal>]}],"dependency_audit":{"edges":[<semantic proof>]}}`다.
+   `{"cards":[{"ordinal":<int>,"obligations":[<complete prefilled-ID obligation rows>],"verification":[{"id":<prefilled VERIFY id>,"covers":[<prefilled IDs>],"level":<level>,"selectors":[<FQCN#method>]}],"depends_on_ordinals":[<semantic parent ordinal>]}],"dependency_audit":{"edges":[<semantic proof>]}}`다.
    이 shape의 예시나 template을 찾으려고 installed Skill directory, references, tests 또는 stale artifact를
    `search_files`·`read_file`로 다시 조사하지 않는다.
    전체 batch를 다시 직렬화하는 custom Python fill script를 만들지 않는다. `apply-impl-completions`로 compact
    completions를 prefilled batch에 merge한 뒤 같은 `impl-card-batch.json`에 원자적으로 덮어쓴다. Helper는
-   completions에서 생략한 prefilled entry point를 자동 보존하고 exact matching path/symbol만 authored reason으로
-   교체하며 여러 verification row가 같은 path/symbol을 가리키면 entry point를 하나로 deduplicate한다. Prefill
-   symbol이 `unknown`이면 같은 path의 확인된 concrete symbol로 반드시 대체하며, merge 뒤 `unknown`·`unresolved`·
-   `todo`·`tbd` placeholder가 하나라도 남으면 native mutation 전에 실패한다.
-   또한 ordinal·verification ID cardinality와 authored field allowlist를 검사해 immutable Triage
-   fact의 재작성을 차단한다. Body-only graph에는 별도 behavior wrapper가 없으므로 각 slice acceptance의
-   ordered `observable_ids`를 `behavior_ids`로 사용한다.
+   ordinal·obligation ID·verification ID cardinality와 authored field allowlist를 검사해 immutable Triage
+   fact의 재작성을 차단한다. `constraints`와 `trace`는 completion에 넣지 않는다. Merge 뒤
+   `unknown`·`unresolved`·`todo`·`tbd` placeholder가 하나라도 남으면 native mutation 전에 실패한다.
    `--output`은 helper가 허용하는 repo-relative `.temp/` path를
    사용하며 absolute path 실패를 먼저 시도하지 않는다. 새 attempt 시작 시 stale batch는 helper 실행 전에
    generated artifact로 제거하고 입력으로 읽거나 검색하지 않는다.
@@ -136,9 +129,9 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    Impl dependency로 복사하지 않는다. 실제 semantic prerequisite가 확인된 경우에만 completion의
    `depends_on_ordinals`와 `dependency_audit.edges[]`를 함께 작성하며 각 edge는 `from_ordinal`, `to_ordinal`,
    `required_artifact`, `consumer_entry_point`, `why_baseline_cannot_satisfy`를 모두 가진다. Proof가 없으면
-   dependency를 만들지 않는다. 각 body는 독립적으로
-   `backend-implementation-card-v5` validator를 통과해야 한다. 정확한 batch 검증 명령은
-   `validate-impl-batch .temp/task-graphs/<issue>/impl-card-batch.json`이며 존재하지 않는 `--batch` option을
+   dependency를 만들지 않는다. 각 body는 독립적으로 current writer
+   `backend-implementation-card-v6` validator를 통과해야 한다. 정확한 batch 검증 명령은
+   `validate-impl-batch <artifact-root>/impl-card-batch.json`이며 존재하지 않는 `--batch` option을
    시도하지 않는다. Wrapper title은 canonical graph naming을
    그대로 사용해 순서대로 `G{generation}-Issue{issue}-Impl{ordinal}`로 작성하며 slice ID를 title에 삽입하지
    않는다. `validate-impl-batch`로 closed wrapper shape, title·wrapper ordinal·priority·Issue·generation·parent와 모든 body를 batch 단위로 먼저 검증한 뒤 validation을
@@ -158,12 +151,12 @@ aggregate Review 승인 뒤 requirement가 바뀌면 기존 graph를 수정하�
    verification row를 생략한 batch는 phase 완료로 인정하지 않는다.
    지원하지 않는 `--status`를 전달하지 않는다. 각 create는 source Triage를 실제 parent로 포함하고 native
    default `todo`, `coder`, `workspace_kind=dir`, canonical `workspace_path`, priority와 `skills=[]`를
-   read-back하며 결과를 `.temp/task-graphs/<issue>/native-readback.json`에 쓴다. `show --json` envelope에서는 card field를 top-level `task`에서, parent ID를
+   read-back하며 결과를 `<artifact-root>/native-readback.json`에 쓴다. `show --json` envelope에서는 card field를 top-level `task`에서, parent ID를
    top-level `parents`에서 읽는다. `task` 내부의 `parent_ids`나 `parents`를 찾지 않는다. 마지막에 source Triage가
    여전히 `triage`인지 한 번 확인한다. 이미 검증한 card를 별도
    terminal call로 다시 show하지 않는다.
    정확한 호출은
-   `create-impl-batch-native --batch .temp/task-graphs/<issue>/impl-card-batch.json --body-dir .temp/task-graphs/<issue>/bodies --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --workspace <canonical-path> --output .temp/task-graphs/<issue>/native-readback.json`이다.
+   `create-impl-batch-native --batch <artifact-root>/impl-card-batch.json --body-dir <artifact-root>/bodies --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --workspace <canonical-path> --output <artifact-root>/native-readback.json`이다.
    `--bodies-dir` 같은 추측 option을 시도하거나 사용법을 찾기 위해 `session_search`·`--help`를 호출하지 않는다.
 
 완료 기준: historical/source 재조사 없이 Triage lineage가 정확한 Impl body를 생성하고, 모든 validator와
@@ -176,7 +169,7 @@ graph topology를 재구성해 `validate-graph`로 판정하지 않는다. 먼�
 closure와 immutable Review envelope를 materialize한다.
 
 ```text
-python scripts/build_task_graph.py prepare-review-fast-path --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --implementation-id <impl-id>... --issue <issue> --generation <generation> --bundle-output .temp/task-graphs/<issue>/review-source.json --body-output .temp/task-graphs/<issue>/review-body.json
+python scripts/build_task_graph.py prepare-review-fast-path --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --implementation-id <impl-id>... --issue <issue> --generation <generation> --bundle-output <artifact-root>/review-source.json --body-output <artifact-root>/review-body.json
 ```
 
 Helper가 채우는 값은 schema, Triage digest, baseline, complete behavior IDs, Impl key와 source
@@ -198,7 +191,7 @@ serialization으로 정규화하므로 의미 필드와 closure 작성에만 집
 create하며, 생성 card와 모든 source 불변성을 즉시 read-back한다.
 
 ```text
-python scripts/build_task_graph.py create-review-native --bundle .temp/task-graphs/<issue>/review-source.json --body .temp/task-graphs/<issue>/review-body.json --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --workspace <source-card-workspace> --output .temp/task-graphs/<issue>/review-create-result.json
+python scripts/build_task_graph.py create-review-native --bundle <artifact-root>/review-source.json --body <artifact-root>/review-body.json --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --workspace <source-card-workspace> --output <artifact-root>/review-create-result.json
 ```
 
 실제 mutation 없이 동일 validation과 native source freshness 비용을 측정하려면 `--dry-run`을 추가한다. 성공
@@ -219,7 +212,7 @@ body에 포함하지 않는다.
 prepare, create command를 조립하지 않는다.
 
 ```text
-python scripts/build_task_graph.py regenerate-summary-native --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --issue <issue> --generation <generation> --workspace <source-card-workspace> --bundle-output .temp/task-graphs/<issue>/summary-source.json --body-output .temp/task-graphs/<issue>/summary-body.json --output .temp/task-graphs/<issue>/summary-create-result.json
+python scripts/build_task_graph.py regenerate-summary-native --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --issue <issue> --generation <generation> --workspace <source-card-workspace> --bundle-output <artifact-root>/summary-source.json --body-output <artifact-root>/summary-body.json --output <artifact-root>/summary-create-result.json
 ```
 
 Atomic helper는 board를 읽고 active Summary가 있으면 archive한 뒤 exact status read-back과 source refresh를
@@ -283,7 +276,7 @@ Helper가 실패하면 임시 복사본 수정, runtime monkey patch, manual nat
    Wrapper priority는 create의 `--priority`에 그대로 전달한다. 각 Impl에는 PM-owned comment로
    `backend-implementation-admission-v1`을 남긴다.
    이 closed object는 `schema`, actual `task_id`, positive wrapper Issue number인 `issue`, exact `workspace`,
-   `card_schema: backend-implementation-card-v5`, `restart: null`만 가지며 Coder가 native show에서 읽는
+   `card_schema: backend-implementation-card-v6`, `restart: null`만 가지며 Coder가 native show에서 읽는
    durable execution intent다. 모든 native card의 full `show --json` envelope를 배열로 모아
    `validate-native-readback --phase draft`로 pre-activation lifecycle과
    title/body/assignee/skills/priority/parent를 wrapper와 대조한 뒤
@@ -316,12 +309,12 @@ Built-in decomposer는 이 계약을 표현하지 못하므로 사용하지 않�
    native read-back으로 대조한다. Cross-domain `absent-or-partial` request에만 minimum capability와
    producer·consumer follow-up을 요구한다. 불일치하면 graph를 만들지 않는다.
 2. Impl, Review1, Summary body와 topology를 작성한다. Graph `planning_baseline_sha`와 모든 Review body의
-   baseline_sha`를 frozen Triage baseline으로 고정한다. Impl은 frozen Triage digest에 결합된 한
-   implementation slice의 durable input만 가진 self-contained `backend-implementation-card-v5`이다.
-   `implementation_contract`에 actor/authorization, API, state transition, error semantics,
-   persistence/transaction, event applicability와 preserved behavior를 materialize한다. Coder가 requirement를
-   다시 읽어 제품 의미를 재해석해야 하는 generic 문장, file-name symbol, caller 의미 병합은 허용하지 않는다.
-   각 verification에는 actual FQCN selector, 최소 test level과 scenario만 넣고 runner/CWD/success oracle/full
+   `baseline_sha`를 frozen Triage baseline으로 고정한다. Impl은 frozen Triage digest에 결합된 한
+   implementation slice의 durable input만 가진 self-contained current writer
+   `backend-implementation-card-v6`이다. `obligations`는 behavioral/preservation 동작, exact operation과
+   observable 결과를 materialize하고 `constraints`는 구조·계약·근거를 source와 함께 보존한다. Coder가
+   requirement를 다시 읽어 제품 의미를 재해석해야 하는 generic 문장, file-name symbol, caller 의미 병합은
+   허용하지 않는다. 각 verification에는 actual FQCN selector와 최소 test level만 넣고 runner/CWD/success oracle/full
    backend gate는 workflow 고정값으로 body에 복제하지 않는다. Review body는
    `aggregate-review-card-v5`로 frozen Triage digest, planning baseline, complete behavior scope, Impl checkpoint
    keys, structured aggregate acceptance, concrete `review_checks`와 explicit exclusion을 둔다. Acceptance와
@@ -398,11 +391,11 @@ directory에서 실행한다. Fast path에서 `prepare-impl-fast-path` 성공 �
 
 ```text
 python scripts/build_task_graph.py template --issue <number> --issue-url <url> --output .temp/task-graphs/<issue>/impl-1.json
-python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_graph.py" prepare-impl-fast-path --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --issue <issue> --generation <generation> --output-dir .temp/task-graphs/<issue>/fast-path --batch-output .temp/task-graphs/<issue>/impl-card-batch.json
-python scripts/build_task_graph.py impl-batch-template --triage .temp/task-graphs/<issue>/fast-path/triage-body.json --triage-id <triage-id> --generation <generation> --output .temp/task-graphs/<issue>/impl-card-batch.json
-python scripts/build_task_graph.py apply-impl-completions --batch .temp/task-graphs/<issue>/impl-card-batch.json --completions .temp/task-graphs/<issue>/impl-card-completions.json --output .temp/task-graphs/<issue>/impl-card-batch.json
-python scripts/build_task_graph.py render-impl-batch --batch .temp/task-graphs/<issue>/impl-card-batch.json --output-dir .temp/task-graphs/<issue>/bodies
-python scripts/build_task_graph.py validate-impl-batch .temp/task-graphs/<issue>/impl-card-batch.json
+python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_graph.py" prepare-impl-fast-path --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --issue <issue> --generation <generation> --output-dir <artifact-root>/fast-path --batch-output <artifact-root>/impl-card-batch.json
+python scripts/build_task_graph.py impl-batch-template --triage <artifact-root>/fast-path/triage-body.json --triage-id <triage-id> --generation <generation> --output <artifact-root>/impl-card-batch.json
+python scripts/build_task_graph.py apply-impl-completions --batch <artifact-root>/impl-card-batch.json --completions <artifact-root>/impl-card-completions.json --output <artifact-root>/impl-card-batch.json
+python scripts/build_task_graph.py render-impl-batch --batch <artifact-root>/impl-card-batch.json --output-dir <artifact-root>/bodies
+python scripts/build_task_graph.py validate-impl-batch <artifact-root>/impl-card-batch.json
 python scripts/build_task_graph.py validate .temp/task-graphs/<issue>/impl-1.json
 python scripts/build_task_graph.py validate-graph .temp/task-graphs/<issue>/graph.json --phase draft
 python scripts/build_task_graph.py render-body .temp/task-graphs/<issue>/graph.json --card-key <card-key> --output .temp/task-graphs/<issue>/bodies/<card-key>.json

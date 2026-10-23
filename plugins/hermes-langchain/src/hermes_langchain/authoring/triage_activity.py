@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from . import triage_domain
+from . import artifact_paths, triage_domain
 
 
 _AUTHORING_SCHEMA = "kwc-triage-authoring-v1"
@@ -85,12 +85,12 @@ class HermesKanbanPort:
         self,
         *,
         workspace: Path,
-        profile: str,
+        assignee: str,
         run_fn: Callable[..., Any] = subprocess.run,
         hermes_bin: str = "hermes",
     ) -> None:
         self._workspace = workspace
-        self._profile = profile
+        self._assignee = assignee
         self._run_fn = run_fn
         self._hermes_bin = hermes_bin
 
@@ -125,7 +125,7 @@ class HermesKanbanPort:
                 card["title"],
                 "--triage",
                 "--assignee",
-                self._profile,
+                self._assignee,
                 "--workspace",
                 f"dir:{self._workspace.as_posix()}",
                 "--body-file",
@@ -183,14 +183,15 @@ def recover_frozen_triage(
     if workspace != source_file and workspace not in source_file.parents:
         raise ValueError("frozen Triage file is outside assignment workspace")
     board = str(assignment.get("board") or "").strip()
-    profile = str(assignment.get("profile") or "").strip()
+    role = str(assignment.get("role") or "").strip()
+    assignee = "project-manager"
     issue_number = assignment.get("issue_number")
     generation = assignment.get("generation")
     sources = _required_mapping(assignment.get("sources"), "assignment.sources")
     previous_id = str(sources.get("triage_id") or "").strip()
     if (
         not board
-        or profile != "project-manager"
+        or role != "orchestrator"
         or not isinstance(issue_number, int)
         or isinstance(issue_number, bool)
         or not isinstance(generation, int)
@@ -209,12 +210,17 @@ def recover_frozen_triage(
     if issue.get("number") != issue_number:
         raise ValueError("frozen Triage issue does not match assignment")
 
-    run_dir = workspace / ".temp/kwc-authoring" / str(issue_number)
+    run_dir = artifact_paths.triage_output_dir(
+        workspace,
+        board=board,
+        issue_number=issue_number,
+        generation=generation,
+    )
     recovered_body_file = run_dir / "recovered-triage-body.json"
     _write_json(recovered_body_file, frozen)
     port = kanban_port or HermesKanbanPort(
         workspace=workspace,
-        profile=profile,
+        assignee=assignee,
         run_fn=run_fn,
     )
     title = f"G{generation}-Issue{issue_number}-Triage"
@@ -224,7 +230,7 @@ def recover_frozen_triage(
             board=board,
             card={
                 "title": title,
-                "assignee": profile,
+                "assignee": assignee,
                 "workspace": workspace,
                 "body_file": recovered_body_file,
                 "idempotency_key": (
@@ -238,7 +244,7 @@ def recover_frozen_triage(
             task,
             created_id,
             "triage",
-            profile,
+            assignee,
             int(issue_number),
             issue.get("title"),
             issue.get("url"),
@@ -291,10 +297,11 @@ def execute_triage_authoring(
     if not workspace.is_dir():
         raise ValueError("assignment workspace is unavailable")
     board = str(assignment.get("board") or "").strip()
-    profile = str(assignment.get("profile") or "").strip()
+    role = str(assignment.get("role") or "").strip()
+    assignee = "project-manager"
     issue_number = assignment.get("issue_number")
     generation = assignment.get("generation")
-    if not board or profile != "project-manager":
+    if not board or role != "orchestrator":
         raise ValueError("assignment identity is invalid")
     if isinstance(generation, bool):
         raise ValueError("assignment generation is invalid")
@@ -347,12 +354,17 @@ def execute_triage_authoring(
     if errors:
         raise ValueError(errors[0])
 
-    run_dir = workspace / ".temp/kwc-authoring" / str(issue_number)
+    run_dir = artifact_paths.triage_output_dir(
+        workspace,
+        board=board,
+        issue_number=issue_number,
+        generation=generation,
+    )
     frozen_body_file = run_dir / "triage-body.json"
     _write_json(frozen_body_file, frozen)
     port = kanban_port or HermesKanbanPort(
         workspace=workspace,
-        profile=profile,
+        assignee=assignee,
         run_fn=run_fn,
     )
     if port.list_active_triage(board):
@@ -365,7 +377,7 @@ def execute_triage_authoring(
             board=board,
             card={
                 "title": title,
-                "assignee": profile,
+                "assignee": assignee,
                 "workspace": workspace,
                 "body_file": frozen_body_file,
                 "idempotency_key": (
@@ -379,7 +391,7 @@ def execute_triage_authoring(
             task,
             created_id,
             "triage",
-            profile,
+            assignee,
             int(issue_number),
             identity.title,
             identity.issue_url,

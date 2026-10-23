@@ -1,10 +1,10 @@
 {
   "schema": "kwc-pm-responsibility-coverage-v1",
-  "behavior_owner": "kanban-workflow-controller",
+  "behavior_owner": "hermes-langchain",
   "source_asset_map": "pm-source-asset-map.json",
-  "comparison_baseline": {
+  "source_profile_reference": {
     "profile": "project-manager",
-    "preserved": true,
+    "installed_required": false,
     "runtime_dependency": false
   },
   "fresh_agent_invariants": {

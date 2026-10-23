@@ -9,7 +9,7 @@
     "TERMINOLOGY.md": ["skills/kwc-orchestrator-contract/references/terminology.md"],
     "WORKFLOW-DESIGN.md": ["skills/kwc-orchestrator-contract/references/workflow-design.md"],
     "SCRIPT-USAGE.md": ["skills/kwc-orchestrator-contract/references/script-usage.md"],
-    "capabilities.yaml": ["src/hermes_langchain/runtime/fresh_agent_contract.py", "skills/kwc-orchestrator-contract/references/pm-responsibility-coverage.json"],
+    "capabilities.yaml": ["src/hermes_langchain/controller/workflow_orchestration.py", "skills/kwc-orchestrator-contract/references/pm-responsibility-coverage.json"],
     "skills/index.md": ["src/hermes_langchain/plugin/entrypoint.py"]
   },
   "source_distribution_owned": [

@@ -20,7 +20,7 @@ checkpoint, findings routing, Summary, activation은 수행하지 않는다.
 
 - assignment의 board, issue, generation, sources.triage_id, sources.impl_ids, workspace_path,
   artifact_file, assignment_id, next_action을 그대로 사용한다.
-- `artifact_file`은 `.temp/task-graphs/<issue>/review-body.json`이며 `next_action`은 `kwc_create_review`다.
+- `artifact_file`은 `.temp/task-graphs/<issue>/generation-<generation>/<board-namespace>/review-body.json`이며 `next_action`은 `kwc_create_review`다. Agent는 namespace를 계산하지 않고 assignment 값을 그대로 사용한다.
 - Triage digest, baseline SHA, complete behavior IDs, implementation card keys와 source acceptance/
   verification closure는 helper prefill을 그대로 보존한다. source closure를 subset·duplicate·재해석하지 않는다.
 - body top-level field는 `schema`, `triage_digest`, `baseline_sha`, `behavior_ids`,
@@ -35,9 +35,10 @@ checkpoint, findings routing, Summary, activation은 수행하지 않는다.
 - acceptance는 behavior, Impl, source acceptance와 verification ID를 source closure 안에서 연결한다.
   HTTP binding/DTO, application command/result, aggregate behavior, cross-module seam과 preserved behavior를
   서로 다른 review concern으로 유지한다.
-- `review-source.json`의 각 `implementation_cards[].body.acceptance[].id`와
-  `implementation_cards[].body.verification[].id`를 source closure의 정본으로 사용한다. Review body의
-  `source_acceptance_ids`와 `verification_ids`에는 copy source acceptance IDs and verification IDs exactly를
+- `review-source.json`의 각 `implementation_cards[].body.obligations[].id`,
+  `implementation_cards[].body.constraints[].id`와 `implementation_cards[].body.verification[].id`를 source
+  closure의 정본으로 사용한다. Review body의 `source_acceptance_ids`에는 obligation·constraint ID를,
+  `verification_ids`에는 verification ID를 copy source acceptance IDs and verification IDs exactly로
   적용하며, `vm-*`·`acc-*`를 추측하거나 새 source ID를 만들지 않는다. 모든 source ID는 acceptance와 check에서
   정확히 coverage하고, 각 row의 `implementation_card_keys`는 해당 ID를 실제 소유한 Impl만 가리킨다.
 - runtime/result 필드, reviewed HEAD, test result, worktree, PR, CI, merge, finding, verdict를 body에 넣지 않는다.
@@ -48,7 +49,7 @@ checkpoint, findings routing, Summary, activation은 수행하지 않는다.
    historical card, source production/test 재조사와 broad graph rebuild를 하지 않는다.
 
 ```text
-python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_graph.py" prepare-review-fast-path --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --implementation-id <impl-id>... --issue <issue> --generation <generation> --bundle-output .temp/task-graphs/<issue>/review-source.json --body-output .temp/task-graphs/<issue>/review-body.json
+python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_graph.py" prepare-review-fast-path --profile "${HERMES_KWC_FRESH_HOST_PROFILE:-${HERMES_PROFILE:-main}}" --board <board> --triage-id <triage-id> --implementation-id <impl-id>... --issue <issue> --generation <generation> --bundle-output <assignment.artifact_file의 parent>/review-source.json --body-output <assignment.artifact_file>
 ```
 
 2. helper가 생성한 `review-body.json` template과 `review-source.json`의 exact Impl acceptance/
@@ -60,6 +61,7 @@ python "$HERMES_KWC_PLUGIN_ROOT/skills/kwc-build-task-graph/scripts/build_task_g
 4. 검증된 exact body와 `review-source.json`을 현재 assignment와 함께 `kwc_create_review`에 전달한다. Native
    mutation과 source/body/read-back은 KWC가 소유한다. Agent가 `create-review-native`, 수동 Kanban create/show,
    Review 재생성 또는 Summary를 별도로 실행하지 않는다.
-5. 결과가 Summary phase로 전환되고 Review ID가 하나인지 확인한 뒤 중단한다.
+5. 결과가 Summary phase로 전환되고 Review ID가 하나인지 확인한 뒤 `next_assignment`를 이미 실행 중인 root
+   `kwc-run-workflow` 절차로 반환한다. 별도 Profile process나 session을 실행하지 않는다.
 
 한국어 설명은 일상적인 제품 동작과 책임 경계를 직접 설명해야 하며, 단순한 generic "검증한다" 문장은 금지한다.

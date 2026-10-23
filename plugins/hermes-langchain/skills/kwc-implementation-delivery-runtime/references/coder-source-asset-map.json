@@ -1,0 +1,56 @@
+{
+  "schema": "kwc-delivery-source-asset-map-v1",
+  "source_profile": "coder",
+  "baseline_distribution_version": "0.16.2",
+  "source_distribution_owned_count": 8,
+  "source_distribution_owned": [
+    "SOUL.md",
+    "README.md",
+    "capabilities.yaml",
+    "skills/run-impl-card/SKILL.md",
+    "skills/run-impl-card/README.md",
+    "skills/run-impl-card/references/implementation-card-contract.md",
+    "skills/run-impl-card/scripts/validate_direct_handoff.py",
+    "skills/implement/SKILL.md"
+  ],
+  "mappings": {
+    "SOUL.md": {
+      "mode": "adapted",
+      "targets": [
+        "skills/kwc-implementation-delivery-runtime/SKILL.md",
+        "src/hermes_langchain/controller/kanban_agent_delivery.py"
+      ]
+    },
+    "README.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-implementation-delivery-runtime/SKILL.md"]
+    },
+    "capabilities.yaml": {
+      "mode": "controller-owned",
+      "targets": ["src/hermes_langchain/controller/kanban_agent_delivery.py"]
+    },
+    "skills/run-impl-card/SKILL.md": {
+      "mode": "ported",
+      "targets": ["skills/kwc-implementation-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-impl-card/README.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-implementation-delivery-runtime/SKILL.md"]
+    },
+    "skills/run-impl-card/references/implementation-card-contract.md": {
+      "mode": "adapted",
+      "targets": [
+        "skills/kwc-implementation-delivery-runtime/SKILL.md",
+        "skills/kwc-build-task-graph/references/implementation-card-contract.md"
+      ]
+    },
+    "skills/run-impl-card/scripts/validate_direct_handoff.py": {
+      "mode": "controller-owned",
+      "targets": ["src/hermes_langchain/controller/kanban_agent_delivery.py"]
+    },
+    "skills/implement/SKILL.md": {
+      "mode": "adapted",
+      "targets": ["skills/kwc-implementation-delivery-runtime/SKILL.md"]
+    }
+  }
+}

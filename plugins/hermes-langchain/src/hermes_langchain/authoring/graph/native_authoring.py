@@ -9,10 +9,10 @@ from typing import Any
 
 from .graph_contract import REVIEW_GUIDE_LOCATORS, validate_review_graph
 from .implementation_batch import _parse_json_values, validate_impl_batch
-from .implementation_card_v5 import (
+from .legacy_implementation_card import (
     _implementation_triage_digest,
+    _validate_implementation_body,
     _validate_frozen_triage,
-    validate,
 )
 from .review_fast_path import (
     create_review_native as _create_review_native,
@@ -66,6 +66,36 @@ def _parent_ids(parents: Any) -> list[str]:
     return result
 
 
+def _implementation_slice_id(body: Any) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    if body.get("schema") == "backend-implementation-card-v6":
+        trace = body.get("trace")
+        return trace.get("slice_id") if isinstance(trace, dict) else None
+    body_slice = body.get("slice")
+    return body_slice.get("id") if isinstance(body_slice, dict) else None
+
+
+def _implementation_acceptance_ids(
+    body: Any, expected_ids: list[str]
+) -> list[str]:
+    if not isinstance(body, dict):
+        return []
+    if body.get("schema") == "backend-implementation-card-v6":
+        expected = set(expected_ids)
+        return [
+            item.get("id")
+            for field in ("obligations", "constraints")
+            for item in body.get(field, [])
+            if isinstance(item, dict) and item.get("id") in expected
+        ]
+    return [
+        item.get("id")
+        for item in body.get("acceptance", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+
+
 def prepare_review_fast_path(
     active_tasks: list[dict[str, Any]],
     *,
@@ -81,7 +111,7 @@ def prepare_review_fast_path(
         issue=issue,
         generation=generation,
         validate_triage=_validate_frozen_triage,
-        validate_implementation=validate,
+        validate_implementation=_validate_implementation_body,
         guide_locators=REVIEW_GUIDE_LOCATORS,
     )
 
@@ -91,7 +121,7 @@ def validate_review_fast_path(bundle: dict[str, Any], review_body: dict[str, Any
         bundle,
         review_body,
         validate_review=validate_review_graph,
-        validate_implementation=validate,
+        validate_implementation=_validate_implementation_body,
     )
 
 
@@ -114,7 +144,7 @@ def create_review_native(
         workspace_path=workspace_path,
         dry_run=dry_run,
         validate_triage=_validate_frozen_triage,
-        validate_implementation=validate,
+        validate_implementation=_validate_implementation_body,
         validate_review=validate_review_graph,
         guide_locators=REVIEW_GUIDE_LOCATORS,
     )
@@ -266,7 +296,7 @@ def create_impl_batch_native(
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         ]
         batch_slice_ids = [
-            wrapper.get("body", {}).get("slice", {}).get("id")
+            _implementation_slice_id(wrapper.get("body"))
             for wrapper in batch["cards"]
             if isinstance(wrapper.get("body"), dict)
         ]
@@ -296,7 +326,7 @@ def create_impl_batch_native(
         }
         for wrapper in batch["cards"]:
             impl_body = wrapper.get("body", {})
-            slice_id = impl_body.get("slice", {}).get("id")
+            slice_id = _implementation_slice_id(impl_body)
             source_slice = source_slices.get(slice_id, {})
             source_acceptance = source_slice.get("acceptance", [])
             expected_acceptance_ids = [
@@ -304,11 +334,9 @@ def create_impl_batch_native(
                 for item in source_acceptance
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
             ]
-            actual_acceptance_ids = [
-                item.get("id")
-                for item in impl_body.get("acceptance", [])
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            ]
+            actual_acceptance_ids = _implementation_acceptance_ids(
+                impl_body, expected_acceptance_ids
+            )
             acceptance_missing = sorted(set(expected_acceptance_ids) - set(actual_acceptance_ids))
             acceptance_unexpected = sorted(set(actual_acceptance_ids) - set(expected_acceptance_ids))
             acceptance_duplicates = sorted(

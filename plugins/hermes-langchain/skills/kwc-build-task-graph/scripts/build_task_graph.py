@@ -9,8 +9,18 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+
+_PLUGIN_SRC = Path(__file__).resolve().parents[3] / "src"
+if str(_PLUGIN_SRC) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_SRC))
+from hermes_langchain.authoring.graph import implementation_batch as _core_impl_batch
+from hermes_langchain.authoring.graph.legacy_implementation_card import (
+    _validate_implementation_body,
+)
 
 from contract_common import is_canonical_https_url, serialize_task_body
 from graph_contract import (
@@ -1209,6 +1219,36 @@ def _parent_ids(parents: Any) -> list[str]:
     return result
 
 
+def _implementation_slice_id(body: Any) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    if body.get("schema") == "backend-implementation-card-v6":
+        trace = body.get("trace")
+        return trace.get("slice_id") if isinstance(trace, dict) else None
+    body_slice = body.get("slice")
+    return body_slice.get("id") if isinstance(body_slice, dict) else None
+
+
+def _implementation_acceptance_ids(
+    body: Any, expected_ids: list[str]
+) -> list[str]:
+    if not isinstance(body, dict):
+        return []
+    if body.get("schema") == "backend-implementation-card-v6":
+        expected = set(expected_ids)
+        return [
+            item.get("id")
+            for field in ("obligations", "constraints")
+            for item in body.get(field, [])
+            if isinstance(item, dict) and item.get("id") in expected
+        ]
+    return [
+        item.get("id")
+        for item in body.get("acceptance", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+
+
 def prepare_review_fast_path(
     active_tasks: list[dict[str, Any]],
     *,
@@ -1224,7 +1264,7 @@ def prepare_review_fast_path(
         issue=issue,
         generation=generation,
         validate_triage=_validate_frozen_triage,
-        validate_implementation=validate,
+        validate_implementation=_validate_implementation_body,
         guide_locators=REVIEW_GUIDE_LOCATORS,
     )
 
@@ -1234,7 +1274,7 @@ def validate_review_fast_path(bundle: dict[str, Any], review_body: dict[str, Any
         bundle,
         review_body,
         validate_review=validate_review_graph,
-        validate_implementation=validate,
+        validate_implementation=_validate_implementation_body,
     )
 
 
@@ -1257,7 +1297,7 @@ def create_review_native(
         workspace_path=workspace_path,
         dry_run=dry_run,
         validate_triage=_validate_frozen_triage,
-        validate_implementation=validate,
+        validate_implementation=_validate_implementation_body,
         validate_review=validate_review_graph,
         guide_locators=REVIEW_GUIDE_LOCATORS,
     )
@@ -1395,11 +1435,18 @@ def create_impl_batch_native(
             raise ValueError(f"SOURCE_TRIAGE_INVALID:{triage_errors[0]}")
         if body.get("issue", {}).get("number") != batch.get("issue"):
             raise ValueError("SOURCE_TRIAGE_ISSUE_MISMATCH")
-        digests = {
-            wrapper.get("body", {}).get("triage_digest")
-            for wrapper in batch["cards"]
-            if isinstance(wrapper.get("body"), dict)
-        }
+        digests = set()
+        for wrapper in batch["cards"]:
+            impl_body = wrapper.get("body")
+            if not isinstance(impl_body, dict):
+                continue
+            if impl_body.get("schema") == "backend-implementation-card-v6":
+                trace = impl_body.get("trace")
+                digests.add(
+                    trace.get("triage_digest") if isinstance(trace, dict) else None
+                )
+            else:
+                digests.add(impl_body.get("triage_digest"))
         if digests != {body.get("frozen_digest")}:
             raise ValueError("SOURCE_TRIAGE_DIGEST_MISMATCH")
         source_slice_ids = [
@@ -1408,7 +1455,7 @@ def create_impl_batch_native(
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         ]
         batch_slice_ids = [
-            wrapper.get("body", {}).get("slice", {}).get("id")
+            _implementation_slice_id(wrapper.get("body"))
             for wrapper in batch["cards"]
             if isinstance(wrapper.get("body"), dict)
         ]
@@ -1438,7 +1485,7 @@ def create_impl_batch_native(
         }
         for wrapper in batch["cards"]:
             impl_body = wrapper.get("body", {})
-            slice_id = impl_body.get("slice", {}).get("id")
+            slice_id = _implementation_slice_id(impl_body)
             source_slice = source_slices.get(slice_id, {})
             source_acceptance = source_slice.get("acceptance", [])
             expected_acceptance_ids = [
@@ -1446,11 +1493,9 @@ def create_impl_batch_native(
                 for item in source_acceptance
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
             ]
-            actual_acceptance_ids = [
-                item.get("id")
-                for item in impl_body.get("acceptance", [])
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            ]
+            actual_acceptance_ids = _implementation_acceptance_ids(
+                impl_body, expected_acceptance_ids
+            )
             acceptance_missing = sorted(set(expected_acceptance_ids) - set(actual_acceptance_ids))
             acceptance_unexpected = sorted(set(actual_acceptance_ids) - set(expected_acceptance_ids))
             acceptance_duplicates = sorted(
@@ -1639,6 +1684,12 @@ def _read_json(path: Path) -> Any:
         return value
 
     return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys)
+
+
+impl_batch_template = _core_impl_batch.impl_batch_template_v6
+apply_impl_completions = _core_impl_batch.apply_impl_completions
+validate_impl_batch = _core_impl_batch.validate_impl_batch
+render_impl_batch = _core_impl_batch.render_impl_batch
 
 
 def main() -> int:
@@ -2078,12 +2129,25 @@ def main() -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             print(json.dumps({"valid": False, "errors": [f"READ_INPUT_FAILED:{exc}"]}, ensure_ascii=False))
             return 2
-        errors = validate_graph(payload, phase=args.phase, validate_implementation=validate, source_review_result=source_review_result)
+        errors = validate_graph(
+            payload,
+            phase=args.phase,
+            validate_implementation=_validate_implementation_body,
+            source_review_result=source_review_result,
+        )
         errors.extend(validate_native_readback(payload, readback))
     elif args.command == "validate-graph":
-        errors = validate_graph(payload, phase=args.phase, validate_implementation=validate, source_review_result=source_review_result)
+        errors = validate_graph(
+            payload,
+            phase=args.phase,
+            validate_implementation=_validate_implementation_body,
+            source_review_result=source_review_result,
+        )
     elif args.command == "validate-review-graph":
-        errors = validate_review_graph(payload, validate_implementation=validate)
+        errors = validate_review_graph(
+            payload,
+            validate_implementation=_validate_implementation_body,
+        )
     elif args.command == "validate-impl-batch":
         errors = validate_impl_batch(payload)
     else:

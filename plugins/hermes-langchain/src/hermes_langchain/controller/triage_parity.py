@@ -51,7 +51,7 @@ _ASSIGNMENT_FIELDS = (
     "generation",
     "workspace_path",
     "phase",
-    "profile",
+    "role",
 )
 _AUTHORING_STAGES = frozenset(_STAGE_IDS[:-1])
 _RAW_SCHEMAS = {
@@ -208,7 +208,7 @@ class TriageParityExecutor:
             "generation": assignment["generation"],
             "workspace_path": assignment["workspace_path"],
             "title": str(report["title"]),
-            "assignee": assignment["profile"],
+            "assignee": "project-manager",
             "status": "triage",
             "body_text": body_text,
             "frozen_digest": str(report["frozen_digest"]),

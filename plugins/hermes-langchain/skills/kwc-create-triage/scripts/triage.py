@@ -10,8 +10,15 @@ import json
 import math
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+
+_PLUGIN_SRC = Path(__file__).resolve().parents[3] / "src"
+if str(_PLUGIN_SRC) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_SRC))
+from hermes_langchain.authoring import triage_domain as _core_triage_domain
 
 
 SCHEMA = "triage-v7"
@@ -1380,6 +1387,17 @@ def replace_card_body(
 def _print_report(errors: list[str], **extra: Any) -> int:
     print(json.dumps({"valid": not errors, **extra, "errors": errors}, ensure_ascii=False))
     return 1 if errors else 0
+
+
+template = _core_triage_domain.template
+compose_intake = _core_triage_domain.compose_intake
+compose_analysis = _core_triage_domain.compose_analysis
+validate = _core_triage_domain.validate
+validate_repository_locators = _core_triage_domain.validate_repository_locators
+validate_current_state_inspection = _core_triage_domain.validate_current_state_inspection
+freeze = _core_triage_domain.freeze
+validate_card = _core_triage_domain.validate_card
+validate_decision_alignment = _core_triage_domain.validate_decision_alignment
 
 
 def main() -> int:

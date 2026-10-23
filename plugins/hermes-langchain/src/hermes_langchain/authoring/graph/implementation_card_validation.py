@@ -32,6 +32,8 @@ def validate_implementation_card(
 
     key = card.get("key")
     errors: list[str] = []
+    is_v6 = body.get("schema") == "backend-implementation-card-v6"
+    trace = body.get("trace") if is_v6 else None
     if validate_external:
         errors.extend(
             f"IMPLEMENTATION:{key}:{failure}"
@@ -39,28 +41,48 @@ def validate_implementation_card(
         )
 
     body_issue = body.get("issue")
-    if isinstance(body_issue, dict):
+    if not is_v6 and isinstance(body_issue, dict):
         if body_issue.get("number") != context.issue_number:
             errors.append(f"IMPLEMENTATION_ISSUE_NUMBER_MISMATCH:{key}")
         if body_issue.get("url") != context.issue_url:
             errors.append(f"IMPLEMENTATION_ISSUE_URL_MISMATCH:{key}")
-    if body.get("triage_digest") != context.triage_digest:
+    body_triage_digest = (
+        trace.get("triage_digest")
+        if isinstance(trace, dict)
+        else body.get("triage_digest")
+    )
+    if body_triage_digest != context.triage_digest:
         errors.append(f"IMPLEMENTATION_TRIAGE_DIGEST_MISMATCH:{key}")
 
-    body_slice = body.get("slice")
-    body_behavior_ids = (
-        set(body_slice.get("behavior_ids", []))
-        if isinstance(body_slice, dict)
-        else set()
-    )
+    if is_v6:
+        body_behavior_ids = (
+            set(trace.get("observable_ids", [])) if isinstance(trace, dict) else set()
+        )
+    else:
+        body_slice = body.get("slice")
+        body_behavior_ids = (
+            set(body_slice.get("behavior_ids", []))
+            if isinstance(body_slice, dict)
+            else set()
+        )
     if not body_behavior_ids <= context.behavior_ids:
         errors.append(f"IMPLEMENTATION_UNKNOWN_BEHAVIOR:{key}")
 
     body_requirement_ids: set[str] = set()
-    for acceptance in body.get("acceptance", []):
-        if not isinstance(acceptance, dict):
-            continue
-        for requirement_id in acceptance.get("requirement_ids", []):
+    if is_v6:
+        requirement_groups = (
+            [trace.get("requirement_ids", [])]
+            if isinstance(trace, dict)
+            else []
+        )
+    else:
+        requirement_groups = [
+            acceptance.get("requirement_ids", [])
+            for acceptance in body.get("acceptance", [])
+            if isinstance(acceptance, dict)
+        ]
+    for requirement_group in requirement_groups:
+        for requirement_id in requirement_group:
             if isinstance(requirement_id, str):
                 body_requirement_ids.add(requirement_id)
                 if requirement_id not in context.requirement_ids:

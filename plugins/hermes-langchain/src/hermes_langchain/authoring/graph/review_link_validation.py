@@ -97,10 +97,22 @@ def _collect_review_sources(
         impl_body = records.get(impl_key, {}).get("body")
         if not isinstance(impl_body, dict):
             continue
-        implementation_slice = impl_body.get("slice")
-        if isinstance(implementation_slice, dict):
-            implementation_behavior_ids.update(_string_set(implementation_slice.get("behavior_ids")))
-        for acceptance in _dict_items(impl_body.get("acceptance")):
+        if impl_body.get("schema") == "backend-implementation-card-v6":
+            trace = impl_body.get("trace")
+            if isinstance(trace, dict):
+                implementation_behavior_ids.update(_string_set(trace.get("observable_ids")))
+            source_contracts = [
+                *_dict_items(impl_body.get("obligations")),
+                *_dict_items(impl_body.get("constraints")),
+            ]
+        else:
+            implementation_slice = impl_body.get("slice")
+            if isinstance(implementation_slice, dict):
+                implementation_behavior_ids.update(
+                    _string_set(implementation_slice.get("behavior_ids"))
+                )
+            source_contracts = _dict_items(impl_body.get("acceptance"))
+        for acceptance in source_contracts:
             source_id = acceptance.get("id")
             if _non_empty(source_id):
                 owners = acceptance_owners.setdefault(source_id, set())

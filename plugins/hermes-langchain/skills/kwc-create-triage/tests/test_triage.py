@@ -157,9 +157,19 @@ class TriageV7ContractTest(unittest.TestCase):
                 "id": "GAP-001",
                 "subject": "CartService aggregate 우회",
                 "current_state": "CartService가 CartItem을 직접 변경한다.",
-                "required_state": "CartService는 Cart aggregate의 이름 있는 behavior를 호출한다.",
-                "evidence": [self.evidence()],
-                "rules": [self.source("docs/backend-development-guide.md#Application-구현-규칙", "Application calls aggregate behavior.")],
+                "required_state": "CartService는 Cart#changeQuantity를 이름 있는 behavior로 호출한다.",
+                "evidence": [
+                    self.evidence(
+                        "src/main/java/example/CartService.java#changeQuantity",
+                        "CartService가 CartItem 수량을 직접 변경한다.",
+                    )
+                ],
+                "rules": [
+                    self.source(
+                        "docs/backend-development-guide.md#Application-구현-규칙",
+                        "Application은 aggregate의 이름 있는 behavior를 호출한다.",
+                    )
+                ],
                 "requirement_ids": ["CHANGE-001"],
                 "affected_observable_ids": ["OBS-001"],
             }
@@ -178,12 +188,15 @@ class TriageV7ContractTest(unittest.TestCase):
                 "title": "Cart aggregate behavior 위임",
                 "outcome": "CartService의 직접 상태 변경을 aggregate 호출로 치환한다.",
                 "gap_ids": ["GAP-001"],
-                "scope": ["CartService changeQuantity", "Cart aggregate behavior"],
+                "scope": [
+                    "modify src/main/java/example/CartService.java#changeQuantity(UUID,UUID,int)에서 직접 상태 변경을 제거한다.",
+                    "modify src/main/java/example/Cart.java#changeQuantity(UUID,int) 이름 있는 behavior를 사용한다.",
+                ],
                 "out_of_scope": ["공개 API 변경"],
                 "acceptance": [
                     {
                         "id": "ACCEPT-001",
-                        "criterion": "CartService가 CartItem.changeQuantity를 직접 호출하지 않는다.",
+                        "criterion": "CartService가 Cart#changeQuantity를 호출하고 CartItem.changeQuantity를 직접 호출하지 않는다.",
                         "requirement_ids": ["CHANGE-001"],
                         "observable_ids": ["OBS-001"],
                         "verification_ids": ["VERIFY-001"],
@@ -204,7 +217,10 @@ class TriageV7ContractTest(unittest.TestCase):
                     "Cart aggregate executes the quantity transition.",
                 ),
                 "coverage_gap": None,
-                "required_verification": ["quantity=0 삭제를 회귀 검증한다."],
+                "required_verification": [
+                    "example.CartTest#quantityZeroDeletes에서 quantity=0 삭제를 회귀 검증한다.",
+                    "com.example.orders.ModularityTest#verifyModularity로 구조를 검증한다.",
+                ],
             }
         ]
         body["contract_changes"] = []

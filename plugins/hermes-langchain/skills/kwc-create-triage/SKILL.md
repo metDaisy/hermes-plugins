@@ -355,6 +355,11 @@ Issue의 공통 test·regression 요구를 독립 구현 gap으로 승격해 gen
 Issue가 이미 구현된 baseline behavior의 독립 검증을 명시적으로 요구한 경우에만 허용하며, 그때도 exact
 baseline production seam과 독립 acceptance가 있어야 한다.
 
+예외적으로 Issue가 여러 planned slice의 결합 뒤에만 가능한 `cross-slice integration/structure verification`을
+명시적으로 요구하면 finalization slice를 둘 수 있다. 이 slice는 production 변경을 다시 소유하지 않는다.
+Triage의 `depends_on`은 계속 비워 두고, downstream graph가 검증 대상 exact artifact별 `semantic parent`를
+증명해 final card에 연결한다.
+
 ### 4. Decision을 엄격히 제한한다
 
 다음 조건을 모두 만족할 때만 `open_decisions`를 만든다.

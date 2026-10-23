@@ -14,7 +14,7 @@ class ImplementationAdmissionContractTest(unittest.TestCase):
         return {
             "schema": "backend-implementation-admission-v2",
             "task_id": "t_a1b2c3d4",
-            "issue": 42,
+            "issue": 151,
             "workspace": "C:/Users/example/project-coder",
             "card_schema": "backend-implementation-card-v6",
             "baseline": {
@@ -49,8 +49,8 @@ class ImplementationAdmissionContractTest(unittest.TestCase):
         admission = self.admission()
         admission["restart"] = {
             "schema": "restart-task-v1",
-            "issue": 42,
-            "delivery_branch": "feature/issue42",
+            "issue": 151,
+            "delivery_branch": "p3/issue151",
             "workspace": admission["workspace"],
             "marker_baseline_sha": "b" * 40,
             "marker_snapshot_sha": "b" * 40,
@@ -59,8 +59,8 @@ class ImplementationAdmissionContractTest(unittest.TestCase):
             "path_attribution": [
                 {
                     "path": "src/main/java/example/App.java",
-                    "issue": 42,
-                    "evidence": "Interrupted implementation owned by Issue #42.",
+                    "issue": 151,
+                    "evidence": "Interrupted implementation owned by Issue #151.",
                     "attributed": True,
                 }
             ],
